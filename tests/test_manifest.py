@@ -3,8 +3,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
+from unittest.mock import MagicMock
+
+# Mock homeassistant modules if not installed in environment
+for _mod in ("homeassistant", "homeassistant.core", "homeassistant.config_entries"):
+    sys.modules.setdefault(_mod, MagicMock())
 
 import pytest
+
+from custom_components.nestquest.const import DOMAIN
 
 MANIFEST_PATH = Path(__file__).parent.parent / "custom_components" / "nestquest" / "manifest.json"
 
@@ -26,6 +34,17 @@ def test_manifest_is_valid_json(manifest: dict) -> None:
 def test_manifest_domain(manifest: dict) -> None:
     """Verify domain is nestquest."""
     assert manifest.get("domain") == "nestquest"
+
+
+def test_manifest_domain_matches_const(manifest: dict) -> None:
+    """Verify domain matches DOMAIN constant from const.py."""
+    assert manifest.get("domain") == DOMAIN
+
+
+def test_manifest_version(manifest: dict) -> None:
+    """Verify version is a non-empty string."""
+    assert isinstance(manifest.get("version"), str)
+    assert len(manifest["version"]) > 0
 
 
 def test_manifest_config_flow(manifest: dict) -> None:
