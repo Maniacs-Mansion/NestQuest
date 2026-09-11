@@ -1,15 +1,14 @@
 """The NestQuest integration."""
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import DOMAIN, LOGGER
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = LOGGER
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
