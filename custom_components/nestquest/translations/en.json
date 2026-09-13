@@ -1,0 +1,17 @@
+{
+  "title": "NestQuest",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add NestQuest",
+        "description": "Set up NestQuest to start coordinating the household. No additional configuration is required."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "NestQuest is already configured. Only a single instance is allowed."
+    },
+    "create_entry": {
+      "default": "NestQuest was successfully configured."
+    }
+  }
+}
