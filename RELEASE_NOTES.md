@@ -26,10 +26,20 @@ First release of NestQuest, a Home Assistant custom integration for managing cho
 
 ### Rollback
 
-This release performs no data or schema migrations. To roll back:
+v0.1.0 is the first release — there is no previous NestQuest version to downgrade to, so rollback means complete removal. This release performs no data or schema migrations.
 
-1. Disable and remove the NestQuest integration in Home Assistant (Settings > Devices & Services).
-2. Reinstall the previous HACS release or git-revert the release commit.
-3. Restart Home Assistant.
+**HACS installs:**
 
-No user data exists to preserve at this version — the integration does not yet create its database file.
+1. Remove the NestQuest integration via HACS (HACS > Integrations > NestQuest > Remove).
+2. Restart Home Assistant.
+3. Remove the integration in Home Assistant (Settings > Devices & Services > NestQuest > Delete), then restart Home Assistant again.
+
+**Manual installs:**
+
+1. Delete the `custom_components/nestquest/` directory from your Home Assistant configuration directory.
+2. Restart Home Assistant.
+3. Remove the integration in Home Assistant (Settings > Devices & Services > NestQuest > Delete), then restart Home Assistant again.
+
+**Data:** the integration does not yet create its own database file, so there is no application data. However, Home Assistant persists the config entry and its selected options — removing the integration deletes that configuration, and the option values (`horizon_days`, `day_rollover_time`, `panel_idle_timeout`) will be lost on removal.
+
+**Repository operators:** instead of uninstalling, you may git-revert the release merge on `main`, which removes the integration files entirely. End users should use the uninstall path above.
