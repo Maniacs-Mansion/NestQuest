@@ -1,6 +1,7 @@
 """Options flow for NestQuest post-setup settings."""
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -18,20 +19,13 @@ from .const import (
 
 MIN_HORIZON_DAYS = 1
 MIN_PANEL_IDLE_TIMEOUT = 30
-_TIME_PART_LENGTH = 2
+
+_TIME_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 
 
 def _parse_time(value: str) -> bool:
     """Return True when value is a valid 24-hour HH:MM string."""
-    parts = value.split(":")
-    if len(parts) != 2:
-        return False
-    hours, minutes = parts
-    if len(hours) != _TIME_PART_LENGTH or len(minutes) != _TIME_PART_LENGTH:
-        return False
-    if not hours.isdigit() or not minutes.isdigit():
-        return False
-    return int(hours) <= 23 and int(minutes) <= 59
+    return _TIME_PATTERN.fullmatch(value) is not None
 
 
 def _async_validate(user_input: dict[str, Any]) -> dict[str, str]:

@@ -375,6 +375,16 @@ def test_options_flow_rejects_malformed_time_out_of_range() -> None:
     assert result["errors"] == {CONF_DAY_ROLLOVER_TIME: "invalid_time"}
 
 
+def test_options_flow_rejects_pasted_unicode_superscript_time() -> None:
+    """Pasted Unicode digits like '²²:²²' yield a field-level error, no exception."""
+    flow = _make_flow(_make_entry())
+    result = _run(
+        flow.async_step_init({**VALID_INPUT, CONF_DAY_ROLLOVER_TIME: "²²:²²"})
+    )
+    assert result["type"] == "form"
+    assert result["errors"] == {CONF_DAY_ROLLOVER_TIME: "invalid_time"}
+
+
 @pytest.mark.parametrize("bad_timeout", ["abc", 0, -10, 10])
 def test_options_flow_rejects_invalid_idle_timeout(bad_timeout) -> None:
     """Non-numeric or too-low idle timeouts yield a field-level error."""
