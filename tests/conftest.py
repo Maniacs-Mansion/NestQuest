@@ -96,13 +96,8 @@ class _ConfigFlowBase:
         return {"type": "abort", "reason": reason}
 
     def async_create_entry(self, *, title, data, **kwargs):
-        result = {"type": "create_entry", "title": title, "data": data}
-        hass = getattr(self, "hass", None)
-        manager = getattr(hass, "config_entries", None) if hass is not None else None
-        add = getattr(manager, "async_add", None)
-        if add is not None:
-            add(SimpleNamespace(domain=self._domain, title=title, data=data))
-        return result
+        """Return the flow result only; the flow manager persists the entry."""
+        return {"type": "create_entry", "title": title, "data": data}
 
     async def async_set_unique_id(self, unique_id, raise_on_progress=True):
         self.context["unique_id"] = unique_id

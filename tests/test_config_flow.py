@@ -24,18 +24,19 @@ async def test_flow_shows_form_initially(hass, make_flow) -> None:
 
 
 async def test_flow_creates_entry_on_submit(hass, make_flow) -> None:
-    """Submitting the user step creates a config entry on the fixture's manager."""
+    """Submitting the user step returns a create-entry result with the payload.
+
+    Real HA's ConfigFlow.async_create_entry only returns the flow result; the
+    flow manager persists the entry afterward.  The manager surface therefore
+    stays empty here — persistence is the manager's job, not the flow's.
+    """
     flow = make_flow(hass)
     assert hass.config_entries.async_entries(DOMAIN) == []
     result = await flow.async_step_user({})
     assert result["type"] == "create_entry"
     assert result["title"] == "NestQuest"
     assert result["data"] == {}
-    created = hass.config_entries.async_entries(DOMAIN)
-    assert len(created) == 1
-    assert created[0].domain == DOMAIN
-    assert created[0].title == "NestQuest"
-    assert created[0].data == {}
+    assert hass.config_entries.async_entries(DOMAIN) == []
 
 
 async def test_second_flow_aborts_single_instance(
@@ -48,6 +49,7 @@ async def test_second_flow_aborts_single_instance(
     result = await flow.async_step_user(None)
     assert result["type"] == "abort"
     assert result["reason"] == "single_instance_allowed"
+    assert hass.config_entries.async_entries(DOMAIN) == [existing]
 
 
 async def test_flow_aborts_when_in_progress(hass, make_flow) -> None:
