@@ -15,6 +15,6 @@ def _ensure_dir(path: Path) -> None:
 
 async def async_get_db_path(hass: HomeAssistant) -> Path:
     """Return the absolute path to the NestQuest SQLite database file."""
-    db_path = Path(hass.config.path(SQLITE_DB_FILENAME))
+    db_path = Path(hass.config.path(SQLITE_DB_FILENAME)).absolute()
     await hass.async_add_executor_job(_ensure_dir, db_path.parent)
     return db_path

@@ -40,12 +40,26 @@ def test_returns_absolute_path_from_config_path() -> None:
     assert db_path.is_absolute()
 
 
+def test_relative_config_path_is_normalized_to_absolute(tmp_path) -> None:
+    hass = MagicMock()
+    hass.config.path = MagicMock(return_value="relative-config/" + SQLITE_DB_FILENAME)
+    hass.async_add_executor_job = AsyncMock(side_effect=(lambda fn, *a: fn(*a)))
+    db_path = _run(store.async_get_db_path(hass))
+    assert db_path.is_absolute()
+    assert db_path.name == SQLITE_DB_FILENAME
+    assert str(db_path).endswith("relative-config/" + SQLITE_DB_FILENAME)
+    assert db_path.parent.is_dir()
+    assert not db_path.exists()
+
+
 def test_creates_missing_parent_directory(tmp_path) -> None:
     nested = tmp_path / "homeassistant" / "config"
     hass = _make_hass(nested)
     db_path = _run(store.async_get_db_path(hass))
     assert db_path.parent == nested
     assert nested.is_dir()
+    assert db_path.parent.is_dir()
+    assert not db_path.exists()
 
 
 def test_two_calls_return_same_path(tmp_path) -> None:
@@ -54,13 +68,18 @@ def test_two_calls_return_same_path(tmp_path) -> None:
     second = _run(store.async_get_db_path(hass))
     assert first == second
     assert first.parent.is_dir()
+    assert not first.exists()
+    assert not second.exists()
 
 
 def test_existing_directory_does_not_fail(tmp_path) -> None:
     nested = tmp_path / "config"
     nested.mkdir()
     hass = _make_hass(nested)
-    assert _run(store.async_get_db_path(hass)) == nested / SQLITE_DB_FILENAME
+    db_path = _run(store.async_get_db_path(hass))
+    assert db_path == nested / SQLITE_DB_FILENAME
+    assert db_path.parent.is_dir()
+    assert not db_path.exists()
 
 
 def test_mkdir_runs_via_executor(tmp_path) -> None:
@@ -76,6 +95,8 @@ def test_mkdir_runs_via_executor(tmp_path) -> None:
     assert fn_args == (nested,)
     assert kwargs == {}
     assert db_path.parent == nested
+    assert db_path.parent.is_dir()
+    assert not db_path.exists()
 
 
 def test_executor_helper_creates_directory(tmp_path) -> None:
@@ -102,6 +123,27 @@ def test_no_sqlite3_import_in_package() -> None:
                 raise AssertionError(
                     f"Found sqlite3 import in {py_file.name}:{node.lineno}"
                 )
+
+
+def test_no_file_creation_calls_in_store() -> None:
+    source = Path(store.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(store.__file__))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "open":
+                raise AssertionError(
+                    f"Found open() call in store.py:{node.lineno}"
+                )
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr == "touch"
+            ):
+                raise AssertionError(
+                    f"Found touch() call in store.py:{node.lineno}"
+                )
+    assert "touch(" not in source
+    assert "open(" not in source
 
 
 def test_container_style_path_resolves() -> None:
