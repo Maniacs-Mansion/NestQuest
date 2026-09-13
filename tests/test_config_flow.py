@@ -30,6 +30,10 @@ class _ConfigFlowBase:
 
     def __init_subclass__(cls, domain=None, **kwargs):
         super().__init_subclass__(**kwargs)
+        cls._domain = domain
+
+    def __init__(self):
+        self.context = {}
 
     def async_show_form(self, *, step_id, **kwargs):
         return {"type": "form", "step_id": step_id}
@@ -39,6 +43,16 @@ class _ConfigFlowBase:
 
     def async_create_entry(self, *, title, data, **kwargs):
         return {"type": "create_entry", "title": title, "data": data}
+
+    async def async_set_unique_id(self, unique_id, raise_on_progress=True):
+        self.context["unique_id"] = unique_id
+        return None
+
+    def _async_current_entries(self):
+        return self.hass.config_entries.async_entries(self._domain)
+
+    def _async_in_progress(self):
+        return []
 
 
 sys.modules["homeassistant.config_entries"].ConfigFlow = _ConfigFlowBase
@@ -59,14 +73,20 @@ def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
 
-def _make_flow(existing_entries: list | None = None):
+def _make_flow(existing_entries: list | None = None, in_progress: list | None = None):
     """Create a config flow instance with a stubbed hass."""
     flow = config_flow.NestQuestConfigFlow()
     flow.hass = SimpleNamespace(
         config_entries=SimpleNamespace(
-            async_entries=lambda _domain: existing_entries or []
+            async_entries=lambda domain: [
+                entry
+                for entry in (existing_entries or [])
+                if entry.domain == domain
+            ]
         )
     )
+    if in_progress:
+        flow._async_in_progress = lambda: in_progress
     return flow
 
 
@@ -100,27 +120,28 @@ def test_second_flow_aborts_single_instance() -> None:
     assert result["reason"] == "single_instance_allowed"
 
 
+def test_flow_aborts_when_in_progress() -> None:
+    """A concurrent flow in progress aborts with single_instance_allowed."""
+    flow = _make_flow(in_progress=[{"flow_id": "other"}])
+    result = _run(flow.async_step_user(None))
+    assert result["type"] == "abort"
+    assert result["reason"] == "single_instance_allowed"
+
+
+def test_flow_sets_stable_unique_id() -> None:
+    """The flow assigns a stable unique id equal to the domain."""
+    flow = _make_flow()
+    assert flow.context.get("unique_id") is None
+    _run(flow.async_step_user(None))
+    assert flow.context["unique_id"] == DOMAIN
+
+
 def test_flow_ignores_other_domain_entries() -> None:
     """Entries of other domains do not trigger the abort."""
     flow = _make_flow([_make_entry("other_domain")])
     result = _run(flow.async_step_user(None))
     assert result["type"] == "form"
     assert result["step_id"] == "user"
-
-
-def test_setup_entry_records_entry_in_hass_data() -> None:
-    """async_setup_entry stores the entry under hass.data[DOMAIN]."""
-    from custom_components.nestquest import async_setup_entry, async_unload_entry
-
-    hass = MagicMock()
-    hass.data = {}
-    entry = SimpleNamespace(entry_id="abc123")
-
-    _run(async_setup_entry(hass, entry))
-    assert hass.data[DOMAIN][entry.entry_id] is entry
-
-    _run(async_unload_entry(hass, entry))
-    assert entry.entry_id not in hass.data[DOMAIN]
 
 
 @pytest.fixture

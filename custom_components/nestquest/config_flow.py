@@ -18,11 +18,8 @@ class NestQuestConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle the user step of the config flow."""
-        existing = any(
-            entry.domain == DOMAIN
-            for entry in self.hass.config_entries.async_entries(DOMAIN)
-        )
-        if existing:
+        await self.async_set_unique_id(DOMAIN, raise_on_progress=False)
+        if self._async_in_progress() or self._async_current_entries():
             return self.async_abort(reason="single_instance_allowed")
 
         if user_input is None:
