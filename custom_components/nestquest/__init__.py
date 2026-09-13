@@ -50,7 +50,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    runtime_data = hass.data.setdefault(DOMAIN, {}).pop(entry.entry_id, None)
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    runtime_data = domain_data.pop(entry.entry_id, None)
+    if not domain_data:
+        hass.data.pop(DOMAIN, None)
     if runtime_data is None:
         runtime_data = getattr(entry, "runtime_data", None)
     if runtime_data is not None:

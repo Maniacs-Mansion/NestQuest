@@ -3,12 +3,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import sys
-from unittest.mock import MagicMock
-
-# Mock homeassistant modules if not installed in environment
-for _mod in ("homeassistant", "homeassistant.core", "homeassistant.config_entries"):
-    sys.modules.setdefault(_mod, MagicMock())
 
 import pytest
 
