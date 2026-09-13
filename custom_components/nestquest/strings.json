@@ -13,5 +13,22 @@
     "create_entry": {
       "default": "NestQuest was successfully configured."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "NestQuest Settings",
+        "description": "Adjust how NestQuest plans, rolls over days, and idles its panel.",
+        "data": {
+          "horizon_days": "Generation horizon (days)",
+          "day_rollover_time": "Day rollover time (HH:MM)",
+          "panel_idle_timeout": "Panel idle timeout (seconds)"
+        }
+      }
+    },
+    "errors": {
+      "invalid": "Invalid value.",
+      "invalid_time": "Time must use 24-hour HH:MM format."
+    }
   }
 }

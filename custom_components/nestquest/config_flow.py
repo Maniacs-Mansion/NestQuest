@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant import config_entries
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import DOMAIN
@@ -13,6 +14,16 @@ class NestQuestConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for NestQuest."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> Any:
+        """Create the options flow handler for NestQuest."""
+        from .options_flow import NestQuestOptionsFlow
+
+        return NestQuestOptionsFlow(config_entry=config_entry)
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
