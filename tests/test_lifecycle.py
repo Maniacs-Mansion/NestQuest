@@ -30,31 +30,30 @@ def _run(coro):
 
 
 class _ListenerRegistry:
-    """Models HA's update-listener bookkeeping: re-adding replaces, not accumulates."""
+    """Models HA's update-listener bookkeeping: appends to a list per entry, with per-listener removers."""
 
     def __init__(self, hass=None):
         self._hass = hass
-        self._listeners: dict[str, object] = {}
+        self._listeners: dict[str, list[object]] = {}
         self.reloaded: list[str] = []
         self._loop = asyncio.new_event_loop()
 
     def add(self, entry_id: str, listener) -> object:
         def _remove():
-            self._listeners.pop(entry_id, None)
+            self._listeners.get(entry_id, []).remove(listener)
 
-        self._listeners[entry_id] = listener
+        self._listeners.setdefault(entry_id, []).append(listener)
         return _remove
 
     def dispatch_options_update(self, entry) -> None:
-        listener = self._listeners.get(entry.entry_id)
-        if listener is not None:
+        for listener in list(self._listeners.get(entry.entry_id, [])):
             result = listener(self._hass, entry)
             if inspect.isawaitable(result):
                 self._loop.run_until_complete(result)
 
     @property
     def size(self) -> int:
-        return len(self._listeners)
+        return sum(len(listeners) for listeners in self._listeners.values())
 
 
 def _make_hass():
@@ -174,6 +173,31 @@ def test_three_reload_cycles_keep_single_listener() -> None:
         assert _run(async_unload_entry(hass, entry)) is True
         assert registry.size == 0
     assert hass.config_entries.async_reload.call_count == 0
+
+
+def test_three_setup_unload_cycles_leave_no_listeners() -> None:
+    """Listeners accumulate per entry (HA semantics); unload must remove them all."""
+    hass, registry = _make_hass()
+    entry = _wire_entry(_make_entry(), registry)
+    for _ in range(3):
+        _run(async_setup_entry(hass, entry))
+        _run(async_unload_entry(hass, entry))
+    assert registry._listeners.get(entry.entry_id, []) == []
+    assert registry.size == 0
+
+
+def test_options_update_after_each_setup_invokes_exactly_one_listener() -> None:
+    """After each setup, an options update dispatches to exactly one listener."""
+    hass, registry = _make_hass()
+    entry = _wire_entry(_make_entry(), registry)
+    for _ in range(3):
+        _run(async_setup_entry(hass, entry))
+        registry.dispatch_options_update(entry)
+        assert hass.config_entries.async_reload.call_count == 1
+        assert registry.reloaded == [entry.entry_id]
+        _run(async_unload_entry(hass, entry))
+        hass.config_entries.async_reload.reset_mock()
+        registry.reloaded.clear()
 
 
 def test_reload_setup_cycles_dispatch_reload_each_time() -> None:

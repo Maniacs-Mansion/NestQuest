@@ -25,8 +25,14 @@ def test_hacs_json_exists_and_is_valid(hacs_config: dict) -> None:
     """Verify hacs.json exists and is valid JSON."""
     assert isinstance(hacs_config, dict)
     assert hacs_config.get("name") == "NestQuest"
-    assert hacs_config.get("homeassistant") == "2024.1.0"
+    assert hacs_config.get("homeassistant") == "2024.6.0"
     assert hacs_config.get("render_readme") is True
+
+
+def test_hacs_json_minimum_version_supports_runtime_data(hacs_config: dict) -> None:
+    """Advertised HA floor must support ConfigEntry.runtime_data (added in 2024.6)."""
+    advertised = tuple(int(part) for part in hacs_config.get("homeassistant", "").split("."))
+    assert advertised >= (2024, 6, 0)
 
 
 def test_license_exists_and_non_empty() -> None:
