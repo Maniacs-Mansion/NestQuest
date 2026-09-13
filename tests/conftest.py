@@ -8,18 +8,21 @@ project supports >=3.11.  The documented fallback is therefore used:
 ``pytest-asyncio`` plus a standard-shaped ``hass`` fixture below.
 
 conftest.py is the single place where ``homeassistant`` modules are provided:
-it first tries to import the real packages (importlib in a try/except) and
-only when they are absent installs MagicMock stand-ins via ``sys.modules`` and
-wires the parent-package attributes.  All of that happens here, before any
-test module imports the integration, so no test module needs its own
-``sys.modules`` setup.  It also provides the ``hass`` fixture plus shared
-helpers used by the behavior tests (config-entry factory, listener registry).
+this harness is explicitly MOCK-ONLY.  It unconditionally installs a coherent
+set of MagicMock stand-ins via ``sys.modules`` and wires the parent-package
+attributes.  All of that happens here, before any test module imports the
+integration, so no test module needs its own ``sys.modules`` setup.  It also
+provides the ``hass`` fixture plus shared helpers used by the behavior tests
+(config-entry factory, listener registry).
+
+Run this suite in its own venv *without* homeassistant installed (``uv run
+pytest -q``); it is never meant to run against a real HA install.
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib
+import importlib.util
 import inspect
 import sys
 from types import SimpleNamespace
@@ -28,7 +31,7 @@ from unittest.mock import MagicMock
 import pytest
 
 # ---------------------------------------------------------------------------
-# Homeassistant module provisioning (mock-only fallback, real import first).
+# Homeassistant module provisioning (explicitly mock-only).
 # ---------------------------------------------------------------------------
 _HA_MODULES = (
     "homeassistant",
@@ -37,39 +40,51 @@ _HA_MODULES = (
     "homeassistant.data_entry_flow",
 )
 
-_HA_AVAILABLE: dict[str, bool] = {}
-for _mod in _HA_MODULES:
+def _find_spec(name: str):
+    """find_spec that returns None when the module (or its parent) is absent."""
     try:
-        importlib.import_module(_mod)
-        _HA_AVAILABLE[_mod] = True
-    except ImportError:
-        _HA_AVAILABLE[_mod] = False
+        return importlib.util.find_spec(name)
+    except (ModuleNotFoundError, ValueError):
+        return None
 
-if not all(_HA_AVAILABLE.values()):
-    # Mock-only branch: install MagicMock stand-ins for the missing modules.
+
+def _ensure_mock_only():
+    """Fail fast if real homeassistant is importable: this harness is mock-only."""
     for _mod in _HA_MODULES:
-        if not _HA_AVAILABLE[_mod]:
-            sys.modules.setdefault(_mod, MagicMock())
+        # Anything already in sys.modules at load time is real HA; our mocks
+        # are only installed after this check.
+        if _mod in sys.modules or _find_spec(_mod) is not None:
+            raise pytest.UsageError(
+                "The NestQuest test harness is mock-only: real homeassistant is "
+                f"importable ({_mod!r} found), and mixing real HA modules with the "
+                "shaped mocks is not supported. Run the suite in its own venv "
+                "without homeassistant installed, e.g. `uv run pytest -q`."
+            )
 
-    # Wire parent package attributes so "from homeassistant import
-    # config_entries" resolves to the mocked submodule, mirroring real HA's
-    # package layout.
-    for _parent, _child in (
-        ("homeassistant", "config_entries"),
-        ("homeassistant", "data_entry_flow"),
-        ("homeassistant", "core"),
-    ):
-        if not _HA_AVAILABLE[_parent]:
-            setattr(sys.modules[_parent], _child, sys.modules[f"{_parent}.{_child}"])
+
+_ensure_mock_only()
+
+for _mod in _HA_MODULES:
+    sys.modules.setdefault(_mod, MagicMock())
+
+# Wire parent package attributes so "from homeassistant import
+# config_entries" resolves to the mocked submodule, mirroring real HA's
+# package layout.
+for _parent, _child in (
+    ("homeassistant", "config_entries"),
+    ("homeassistant", "data_entry_flow"),
+    ("homeassistant", "core"),
+):
+    setattr(sys.modules[_parent], _child, sys.modules[f"{_parent}.{_child}"])
 
 
 def _ha_mock(name: str):
-    """Return a module object for a mocked homeassistant module."""
+    """Return the shaped mock module object for a homeassistant module."""
     return sys.modules[name]
 
 
 def options_flow_base():
-    """Return the active OptionsFlowWithConfigEntry class (real or mocked)."""
+    """Return the mocked OptionsFlowWithConfigEntry class."""
     return getattr(sys.modules["homeassistant.config_entries"], "OptionsFlowWithConfigEntry")
 
 
@@ -135,20 +150,19 @@ def _callback_decorator(fn):
     return fn
 
 
-if not all(_HA_AVAILABLE.values()):
-    # The concrete 2024.6-shaped surface the integration is written against
-    # (mirrors the shapes the tests previously installed per module).
-    _config_entries_mock = _ha_mock("homeassistant.config_entries")
-    _core_mock = _ha_mock("homeassistant.core")
-    _data_entry_flow_mock = _ha_mock("homeassistant.data_entry_flow")
+# The concrete 2024.6-shaped surface the integration is written against
+# (mirrors the shapes the tests previously installed per module).
+_config_entries_mock = _ha_mock("homeassistant.config_entries")
+_core_mock = _ha_mock("homeassistant.core")
+_data_entry_flow_mock = _ha_mock("homeassistant.data_entry_flow")
 
-    _config_entries_mock.ConfigFlow = _ConfigFlowBase
-    _config_entries_mock.OptionsFlowWithConfigEntry = _OptionsFlowWithConfigEntryBase
-    _core_mock.callback = _callback_decorator
-    _data_entry_flow_mock.RESULT_TYPE_FORM = "form"
-    _data_entry_flow_mock.RESULT_TYPE_CREATE_ENTRY = "create_entry"
-    _data_entry_flow_mock.RESULT_TYPE_ABORT = "abort"
-    _data_entry_flow_mock.FlowResult = dict
+_config_entries_mock.ConfigFlow = _ConfigFlowBase
+_config_entries_mock.OptionsFlowWithConfigEntry = _OptionsFlowWithConfigEntryBase
+_core_mock.callback = _callback_decorator
+_data_entry_flow_mock.RESULT_TYPE_FORM = "form"
+_data_entry_flow_mock.RESULT_TYPE_CREATE_ENTRY = "create_entry"
+_data_entry_flow_mock.RESULT_TYPE_ABORT = "abort"
+_data_entry_flow_mock.FlowResult = dict
 
 
 # ---------------------------------------------------------------------------
