@@ -3,128 +3,13 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import importlib
-import inspect
 import json
 from pathlib import Path
-import sys
 from types import SimpleNamespace
-from typing import Any
-from unittest.mock import MagicMock
-
-# Mock homeassistant modules if not installed in environment.
-# The mock mirrors the REAL Home Assistant 2024.6 contract:
-# config_entries.OptionsFlowWithConfigEntry accepts a config_entry kwarg and
-# exposes .options / .config_entry; homeassistant.core.callback exists as a
-# decorator; data_entry_flow.RESULT_TYPE_* constants and FlowResult exist.
-for _mod in (
-    "homeassistant",
-    "homeassistant.core",
-    "homeassistant.config_entries",
-    "homeassistant.data_entry_flow",
-):
-    sys.modules.setdefault(_mod, MagicMock())
-
-# Wire parent package attributes to the actual module mocks so that
-# "from homeassistant import config_entries" resolves to the mocked module.
-sys.modules["homeassistant"].config_entries = sys.modules["homeassistant.config_entries"]
-sys.modules["homeassistant"].data_entry_flow = sys.modules["homeassistant.data_entry_flow"]
-
-
-class _OptionsFlowWithConfigEntryBase:
-    """Stand-in mirroring HA 2024.6 config_entries.OptionsFlowWithConfigEntry."""
-
-    def __init__(self, config_entry=None):
-        self.config_entry = config_entry
-        self.hass = None
-        self.options = dict(config_entry.options) if config_entry is not None else {}
-
-    def async_show_form(self, *, step_id, **kwargs):
-        return {"type": "form", "step_id": step_id, **kwargs}
-
-    def async_create_entry(self, *, title, data, **kwargs):
-        return {"type": "create_entry", "title": title, "data": data}
-
-
-class _ConfigFlowBase:
-    """Stand-in for homeassistant ConfigFlow; a superset of test_config_flow's base.
-
-    test_config_flow.py may be imported after this file, so the concrete
-    NestQuestConfigFlow can end up bound to this base. It must therefore also
-    satisfy that file's tests.
-    """
-
-    VERSION = 1
-
-    def __init_subclass__(cls, domain=None, **kwargs):
-        super().__init_subclass__(**kwargs)
-        cls._domain = domain
-
-    def __init__(self):
-        self.context = {}
-
-    def async_show_form(self, *, step_id, **kwargs):
-        return {"type": "form", "step_id": step_id, **kwargs}
-
-    def async_abort(self, *, reason, **kwargs):
-        return {"type": "abort", "reason": reason}
-
-    def async_create_entry(self, *, title, data, **kwargs):
-        return {"type": "create_entry", "title": title, "data": data}
-
-    async def async_set_unique_id(self, unique_id, raise_on_progress=True):
-        self.context["unique_id"] = unique_id
-        return None
-
-    def _async_current_entries(self):
-        return self.hass.config_entries.async_entries(self._domain)
-
-    def _async_in_progress(self):
-        return []
-
-    @staticmethod
-    def async_get_options_flow(config_entry):
-        raise NotImplementedError
-
-
-def _callback_decorator(fn):
-    """Mirror homeassistant.core.callback: flags the fn and returns it unchanged."""
-    fn.__ha_callback__ = True
-    return fn
-
-
-_config_entries_mock = sys.modules["homeassistant.config_entries"]
-_core_mock = sys.modules["homeassistant.core"]
-_data_entry_flow_mock = sys.modules["homeassistant.data_entry_flow"]
-
-# The concrete 2024.6-shaped surface the integration is written against:
-# plain OptionsFlow has no config_entry constructor (NQ-001); only
-# OptionsFlowWithConfigEntry does.
-_config_entries_mock.OptionsFlowWithConfigEntry = _OptionsFlowWithConfigEntryBase
-_config_entries_mock.ConfigFlow = _ConfigFlowBase
-_core_mock.callback = _callback_decorator
-
-# data_entry_flow constants/annotations referenced by the production modules.
-_data_entry_flow_mock.RESULT_TYPE_FORM = "form"
-_data_entry_flow_mock.RESULT_TYPE_CREATE_ENTRY = "create_entry"
-_data_entry_flow_mock.RESULT_TYPE_ABORT = "abort"
-_data_entry_flow_mock.FlowResult = dict
-
-# test_config_flow.py may run first and import the integration modules against a
-# bare MagicMock surface. Force a clean re-import now that the 2024.6-shaped
-# mocks are installed, so the concrete classes bind to them.
-for _name in [
-    name
-    for name in sys.modules
-    if name.startswith("custom_components.nestquest")
-]:
-    del sys.modules[_name]
-
-importlib.import_module("custom_components.nestquest")
-importlib.import_module("custom_components.nestquest.config_flow")
-importlib.import_module("custom_components.nestquest.options_flow")
 
 import pytest
+
+from conftest import make_config_entry, make_hass, options_flow_base as _options_flow_base
 
 from custom_components.nestquest import config_flow
 from custom_components.nestquest import options_flow
@@ -153,53 +38,12 @@ def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
 
-class _ListenerRegistry:
-    """Models HA's update-listener bookkeeping with reload tracking."""
-
-    def __init__(self, hass=None):
-        self._hass = hass
-        self._listeners: dict[str, list[object]] = {}
-        self.reloaded: list[str] = []
-        self._loop = asyncio.new_event_loop()
-
-    def add(self, entry_id: str, listener) -> object:
-        def _remove():
-            self._listeners.get(entry_id, []).remove(listener)
-
-        self._listeners.setdefault(entry_id, []).append(listener)
-        return _remove
-
-    def dispatch_options_update(self, entry) -> None:
-        for listener in list(self._listeners.get(entry.entry_id, [])):
-            result = listener(self._hass, entry)
-            if inspect.isawaitable(result):
-                self._loop.run_until_complete(result)
-
-    @property
-    def size(self) -> int:
-        return sum(len(listeners) for listeners in self._listeners.values())
-
-
 def _make_hass():
-    hass = SimpleNamespace(
-        data={},
-        config_entries=SimpleNamespace(async_reload=None),
-    )
-    registry = _ListenerRegistry(hass)
-
-    async def _async_reload(entry_id: str) -> None:
-        registry.reloaded.append(entry_id)
-
-    hass.config_entries.async_reload = MagicMock(side_effect=_async_reload)
-    return hass, registry
+    return make_hass()
 
 
 def _make_entry(entry_id: str = "test_entry", options: dict | None = None, data: dict | None = None):
-    entry = SimpleNamespace(
-        entry_id=entry_id, options=dict(options or {}), data=dict(data or {})
-    )
-    entry.add_update_listener = None
-    return entry
+    return make_config_entry(entry_id=entry_id, options=options, data=data)
 
 
 def _make_flow(entry) -> options_flow.NestQuestOptionsFlow:
@@ -237,7 +81,7 @@ def test_options_flow_constructs_through_2024_6_surface() -> None:
     """The handler constructs against the mocked 2024.6 base and inherits its contract."""
     entry = _make_entry(options={CONF_HORIZON_DAYS: 21})
     flow = options_flow.NestQuestOptionsFlow(config_entry=entry)
-    assert isinstance(flow, sys.modules["homeassistant.config_entries"].OptionsFlowWithConfigEntry)
+    assert isinstance(flow, _options_flow_base())
     assert flow.config_entry is entry
     assert flow.options == {CONF_HORIZON_DAYS: 21}
 
@@ -513,7 +357,7 @@ def test_options_flow_no_plain_dict_schema_fallback() -> None:
 
 def test_options_flow_subclasses_options_flow_with_config_entry() -> None:
     """NestQuestOptionsFlow subclasses config_entries.OptionsFlowWithConfigEntry."""
-    base = sys.modules["homeassistant.config_entries"].OptionsFlowWithConfigEntry
+    base = _options_flow_base()
     assert issubclass(options_flow.NestQuestOptionsFlow, base)
     assert options_flow.NestQuestOptionsFlow.__bases__ == (base,)
 

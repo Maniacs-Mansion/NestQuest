@@ -7,35 +7,222 @@ its tests), and its back-releases raise the floor to Python >=3.12 while this
 project supports >=3.11.  The documented fallback is therefore used:
 ``pytest-asyncio`` plus a standard-shaped ``hass`` fixture below.
 
-The tests mock the ``homeassistant`` package via ``sys.modules`` injection;
-this conftest wires the mock modules before any test module import and
-provides the standard ``hass`` fixture shape (``config``, ``config_entries``,
-``data``, ``loop``) that HA's own harness exposes.
+conftest.py is the single place where ``homeassistant`` modules are provided:
+it first tries to import the real packages (importlib in a try/except) and
+only when they are absent installs MagicMock stand-ins via ``sys.modules`` and
+wires the parent-package attributes.  All of that happens here, before any
+test module imports the integration, so no test module needs its own
+``sys.modules`` setup.  It also provides the ``hass`` fixture plus shared
+helpers used by the behavior tests (config-entry factory, listener registry).
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
+import inspect
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-# Mock homeassistant modules if not installed in the environment.  Runs in
-# conftest so it precedes every test module's import of the integration.
-for _mod in (
+# ---------------------------------------------------------------------------
+# Homeassistant module provisioning (mock-only fallback, real import first).
+# ---------------------------------------------------------------------------
+_HA_MODULES = (
     "homeassistant",
     "homeassistant.core",
     "homeassistant.config_entries",
     "homeassistant.data_entry_flow",
-):
-    sys.modules.setdefault(_mod, MagicMock())
+)
 
-# Wire parent package attributes so "from homeassistant import config_entries"
-# resolves to the mocked submodule, mirroring real HA's package layout.
-sys.modules["homeassistant"].config_entries = sys.modules["homeassistant.config_entries"]
-sys.modules["homeassistant"].data_entry_flow = sys.modules["homeassistant.data_entry_flow"]
+_HA_AVAILABLE: dict[str, bool] = {}
+for _mod in _HA_MODULES:
+    try:
+        importlib.import_module(_mod)
+        _HA_AVAILABLE[_mod] = True
+    except ImportError:
+        _HA_AVAILABLE[_mod] = False
+
+if not all(_HA_AVAILABLE.values()):
+    # Mock-only branch: install MagicMock stand-ins for the missing modules.
+    for _mod in _HA_MODULES:
+        if not _HA_AVAILABLE[_mod]:
+            sys.modules.setdefault(_mod, MagicMock())
+
+    # Wire parent package attributes so "from homeassistant import
+    # config_entries" resolves to the mocked submodule, mirroring real HA's
+    # package layout.
+    for _parent, _child in (
+        ("homeassistant", "config_entries"),
+        ("homeassistant", "data_entry_flow"),
+        ("homeassistant", "core"),
+    ):
+        if not _HA_AVAILABLE[_parent]:
+            setattr(sys.modules[_parent], _child, sys.modules[f"{_parent}.{_child}"])
+
+
+def _ha_mock(name: str):
+    """Return a module object for a mocked homeassistant module."""
+    return sys.modules[name]
+
+
+def options_flow_base():
+    """Return the active OptionsFlowWithConfigEntry class (real or mocked)."""
+    return getattr(sys.modules["homeassistant.config_entries"], "OptionsFlowWithConfigEntry")
+
+
+class _ConfigFlowBase:
+    """Stand-in for homeassistant.config_entries.ConfigFlow.
+
+    A superset covering both the config-flow and options-flow tests: it must
+    satisfy every consumer of the mocked surface.
+    """
+
+    VERSION = 1
+
+    def __init_subclass__(cls, domain=None, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls._domain = domain
+
+    def __init__(self):
+        self.context = {}
+
+    def async_show_form(self, *, step_id, **kwargs):
+        return {"type": "form", "step_id": step_id, **kwargs}
+
+    def async_abort(self, *, reason, **kwargs):
+        return {"type": "abort", "reason": reason}
+
+    def async_create_entry(self, *, title, data, **kwargs):
+        return {"type": "create_entry", "title": title, "data": data}
+
+    async def async_set_unique_id(self, unique_id, raise_on_progress=True):
+        self.context["unique_id"] = unique_id
+        return None
+
+    def _async_current_entries(self):
+        return self.hass.config_entries.async_entries(self._domain)
+
+    def _async_in_progress(self):
+        return []
+
+    @staticmethod
+    def async_get_options_flow(config_entry):
+        raise NotImplementedError
+
+
+class _OptionsFlowWithConfigEntryBase:
+    """Stand-in mirroring HA 2024.6 config_entries.OptionsFlowWithConfigEntry."""
+
+    def __init__(self, config_entry=None):
+        self.config_entry = config_entry
+        self.hass = None
+        self.options = dict(config_entry.options) if config_entry is not None else {}
+
+    def async_show_form(self, *, step_id, **kwargs):
+        return {"type": "form", "step_id": step_id, **kwargs}
+
+    def async_create_entry(self, *, title, data, **kwargs):
+        return {"type": "create_entry", "title": title, "data": data}
+
+
+def _callback_decorator(fn):
+    """Mirror homeassistant.core.callback: flags the fn and returns it unchanged."""
+    fn.__ha_callback__ = True
+    return fn
+
+
+if not all(_HA_AVAILABLE.values()):
+    # The concrete 2024.6-shaped surface the integration is written against
+    # (mirrors the shapes the tests previously installed per module).
+    _config_entries_mock = _ha_mock("homeassistant.config_entries")
+    _core_mock = _ha_mock("homeassistant.core")
+    _data_entry_flow_mock = _ha_mock("homeassistant.data_entry_flow")
+
+    _config_entries_mock.ConfigFlow = _ConfigFlowBase
+    _config_entries_mock.OptionsFlowWithConfigEntry = _OptionsFlowWithConfigEntryBase
+    _core_mock.callback = _callback_decorator
+    _data_entry_flow_mock.RESULT_TYPE_FORM = "form"
+    _data_entry_flow_mock.RESULT_TYPE_CREATE_ENTRY = "create_entry"
+    _data_entry_flow_mock.RESULT_TYPE_ABORT = "abort"
+    _data_entry_flow_mock.FlowResult = dict
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers for the behavior tests.
+# ---------------------------------------------------------------------------
+class ListenerRegistry:
+    """Models HA's update-listener bookkeeping: appends to a list per entry, with per-listener removers."""
+
+    def __init__(self, hass=None):
+        self._hass = hass
+        self._listeners: dict[str, list[object]] = {}
+        self.reloaded: list[str] = []
+        self._loop = asyncio.new_event_loop()
+
+    def add(self, entry_id: str, listener) -> object:
+        def _remove():
+            self._listeners.get(entry_id, []).remove(listener)
+
+        self._listeners.setdefault(entry_id, []).append(listener)
+        return _remove
+
+    def dispatch_options_update(self, entry) -> None:
+        """Synchronous dispatch for sync tests (drives a private event loop)."""
+        for listener in list(self._listeners.get(entry.entry_id, [])):
+            result = listener(self._hass, entry)
+            if inspect.isawaitable(result):
+                self._loop.run_until_complete(result)
+
+    async def async_dispatch_options_update(self, entry) -> None:
+        """Async dispatch for pytest-asyncio tests (awaits listeners in the running loop)."""
+        for listener in list(self._listeners.get(entry.entry_id, [])):
+            result = listener(self._hass, entry)
+            if inspect.isawaitable(result):
+                await result
+
+    @property
+    def size(self) -> int:
+        return sum(len(listeners) for listeners in self._listeners.values())
+
+
+def make_config_entry(
+    entry_id: str = "test_entry",
+    options: dict | None = None,
+    data: dict | None = None,
+):
+    """Create a stub config entry shaped like HA's ConfigEntry for tests."""
+    entry = SimpleNamespace(
+        entry_id=entry_id,
+        options=dict(options or {}),
+        data=dict(data or {}),
+    )
+    entry.add_update_listener = None
+    return entry
+
+
+def wire_entry_to_registry(entry, registry: ListenerRegistry):
+    """Attach an update-listener registration function to the entry."""
+    entry.add_update_listener = lambda listener: registry.add(entry.entry_id, listener)
+    return entry
+
+
+def make_hass() -> tuple:
+    """Create a hass stub plus its listener registry, mirroring HA's shape."""
+    hass = SimpleNamespace(
+        data={},
+        config=MagicMock(),
+        config_entries=SimpleNamespace(async_reload=None),
+    )
+    registry = ListenerRegistry(hass)
+
+    async def _async_reload(entry_id: str) -> None:
+        registry.reloaded.append(entry_id)
+
+    hass.config_entries.async_reload = MagicMock(side_effect=_async_reload)
+    return hass, registry
 
 
 @pytest.fixture
@@ -43,16 +230,64 @@ def hass():
     """Provide a standard-shaped hass fixture.
 
     Mirrors the surface of Home Assistant's ``hass`` fixture: a ``config``
-    namespace, a ``config_entries`` manager, a ``data`` dict for integration
-    state, and the running event ``loop``.
+    namespace, a ``config_entries`` manager wired to a listener registry, a
+    ``data`` dict for integration state, and the running event ``loop``.
     """
-    hass = SimpleNamespace(
-        data={},
-        config=MagicMock(),
-        config_entries=MagicMock(),
-    )
-    hass.loop = asyncio.new_event_loop()
+    _hass, registry = make_hass()
+    _hass.registry = registry
+    _hass.loop = asyncio.new_event_loop()
     try:
-        yield hass
+        yield _hass
     finally:
-        hass.loop.close()
+        _hass.loop.close()
+
+
+@pytest.fixture
+def make_entry():
+    """Provide the config-entry factory as a fixture."""
+
+    def _factory(entry_id: str = "test_entry", options: dict | None = None, data: dict | None = None):
+        return make_config_entry(entry_id=entry_id, options=options, data=data)
+
+    return _factory
+
+
+@pytest.fixture
+def listener_registry():
+    """Provide a fresh listener registry for manual wiring."""
+
+    def _factory(hass=None):
+        return ListenerRegistry(hass)
+
+    return _factory
+
+
+@pytest.fixture
+def make_flow():
+    """Provide a factory for a stubbed NestQuestConfigFlow bound to hass."""
+
+    def _factory(hass=None, existing_entries=None, in_progress=None):
+        from custom_components.nestquest import config_flow
+
+        flow = config_flow.NestQuestConfigFlow()
+        entries = [
+            e for e in (existing_entries or []) if getattr(e, "domain", None) == flow._domain
+        ]
+        flow.hass = SimpleNamespace(
+            config_entries=SimpleNamespace(async_entries=lambda domain: entries)
+        )
+        if in_progress:
+            flow._async_in_progress = lambda: in_progress
+        return flow
+
+    return _factory
+
+
+@pytest.fixture
+def make_config_flow_entry():
+    """Provide an entry stub carrying a domain, for current-entries checks."""
+
+    def _factory(domain: str, entry_id: str = "existing"):
+        return SimpleNamespace(domain=domain, entry_id=entry_id)
+
+    return _factory

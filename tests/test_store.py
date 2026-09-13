@@ -4,16 +4,7 @@ from __future__ import annotations
 import ast
 import asyncio
 from pathlib import Path
-import sys
 from unittest.mock import AsyncMock, MagicMock
-
-# Mock homeassistant modules if not installed in environment
-for _mod in (
-    "homeassistant",
-    "homeassistant.core",
-    "homeassistant.config_entries",
-):
-    sys.modules.setdefault(_mod, MagicMock())
 
 from custom_components.nestquest import store
 from custom_components.nestquest.const import SQLITE_DB_FILENAME

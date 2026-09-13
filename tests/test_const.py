@@ -5,12 +5,6 @@ import ast
 from datetime import datetime
 import logging
 from pathlib import Path
-import sys
-from unittest.mock import MagicMock
-
-# Mock homeassistant modules if not installed in environment
-for _mod in ("homeassistant", "homeassistant.core", "homeassistant.config_entries"):
-    sys.modules.setdefault(_mod, MagicMock())
 
 from custom_components.nestquest import const
 
