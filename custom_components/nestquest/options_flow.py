@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResult
 
@@ -14,11 +15,6 @@ from .const import (
     DEFAULT_HORIZON_DAYS,
     DEFAULT_PANEL_IDLE_TIMEOUT,
 )
-
-try:
-    import voluptuous as vol
-except ImportError:
-    vol = None
 
 MIN_HORIZON_DAYS = 1
 MIN_PANEL_IDLE_TIMEOUT = 30
@@ -65,30 +61,24 @@ def _async_validate(user_input: dict[str, Any]) -> dict[str, str]:
     return errors
 
 
-def _build_schema(current: dict[str, Any]) -> Any:
+def _build_schema(current: dict[str, Any]) -> vol.Schema:
     """Build the form schema, pre-filled with the current values."""
-    if vol is not None:
-        return vol.Schema(
-            {
-                vol.Required(
-                    CONF_HORIZON_DAYS, default=current[CONF_HORIZON_DAYS]
-                ): int,
-                vol.Required(
-                    CONF_DAY_ROLLOVER_TIME, default=current[CONF_DAY_ROLLOVER_TIME]
-                ): str,
-                vol.Required(
-                    CONF_PANEL_IDLE_TIMEOUT, default=current[CONF_PANEL_IDLE_TIMEOUT]
-                ): int,
-            }
-        )
-    return {
-        CONF_HORIZON_DAYS: current[CONF_HORIZON_DAYS],
-        CONF_DAY_ROLLOVER_TIME: current[CONF_DAY_ROLLOVER_TIME],
-        CONF_PANEL_IDLE_TIMEOUT: current[CONF_PANEL_IDLE_TIMEOUT],
-    }
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_HORIZON_DAYS, default=current[CONF_HORIZON_DAYS]
+            ): int,
+            vol.Required(
+                CONF_DAY_ROLLOVER_TIME, default=current[CONF_DAY_ROLLOVER_TIME]
+            ): str,
+            vol.Required(
+                CONF_PANEL_IDLE_TIMEOUT, default=current[CONF_PANEL_IDLE_TIMEOUT]
+            ): int,
+        }
+    )
 
 
-class NestQuestOptionsFlow(config_entries.OptionsFlow):
+class NestQuestOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
     """Handle the options flow for NestQuest."""
 
     async def async_step_init(

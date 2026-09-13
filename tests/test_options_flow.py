@@ -3,13 +3,20 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import importlib
 import inspect
 import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
-# Mock homeassistant modules if not installed in environment
+
+# Mock homeassistant modules if not installed in environment.
+# The mock mirrors the REAL Home Assistant 2024.6 contract:
+# config_entries.OptionsFlowWithConfigEntry accepts a config_entry kwarg and
+# exposes .options / .config_entry; homeassistant.core.callback exists as a
+# decorator; data_entry_flow.RESULT_TYPE_* constants and FlowResult exist.
 for _mod in (
     "homeassistant",
     "homeassistant.core",
@@ -24,8 +31,8 @@ sys.modules["homeassistant"].config_entries = sys.modules["homeassistant.config_
 sys.modules["homeassistant"].data_entry_flow = sys.modules["homeassistant.data_entry_flow"]
 
 
-class _OptionsFlowBase:
-    """Minimal stand-in for homeassistant OptionsFlow."""
+class _OptionsFlowWithConfigEntryBase:
+    """Stand-in mirroring HA 2024.6 config_entries.OptionsFlowWithConfigEntry."""
 
     def __init__(self, config_entry=None):
         self.config_entry = config_entry
@@ -80,8 +87,42 @@ class _ConfigFlowBase:
         raise NotImplementedError
 
 
-sys.modules["homeassistant.config_entries"].OptionsFlow = _OptionsFlowBase
-sys.modules["homeassistant.config_entries"].ConfigFlow = _ConfigFlowBase
+def _callback_decorator(fn):
+    """Mirror homeassistant.core.callback: flags the fn and returns it unchanged."""
+    fn.__ha_callback__ = True
+    return fn
+
+
+_config_entries_mock = sys.modules["homeassistant.config_entries"]
+_core_mock = sys.modules["homeassistant.core"]
+_data_entry_flow_mock = sys.modules["homeassistant.data_entry_flow"]
+
+# The concrete 2024.6-shaped surface the integration is written against:
+# plain OptionsFlow has no config_entry constructor (NQ-001); only
+# OptionsFlowWithConfigEntry does.
+_config_entries_mock.OptionsFlowWithConfigEntry = _OptionsFlowWithConfigEntryBase
+_config_entries_mock.ConfigFlow = _ConfigFlowBase
+_core_mock.callback = _callback_decorator
+
+# data_entry_flow constants/annotations referenced by the production modules.
+_data_entry_flow_mock.RESULT_TYPE_FORM = "form"
+_data_entry_flow_mock.RESULT_TYPE_CREATE_ENTRY = "create_entry"
+_data_entry_flow_mock.RESULT_TYPE_ABORT = "abort"
+_data_entry_flow_mock.FlowResult = dict
+
+# test_config_flow.py may run first and import the integration modules against a
+# bare MagicMock surface. Force a clean re-import now that the 2024.6-shaped
+# mocks are installed, so the concrete classes bind to them.
+for _name in [
+    name
+    for name in sys.modules
+    if name.startswith("custom_components.nestquest")
+]:
+    del sys.modules[_name]
+
+importlib.import_module("custom_components.nestquest")
+importlib.import_module("custom_components.nestquest.config_flow")
+importlib.import_module("custom_components.nestquest.options_flow")
 
 import pytest
 
@@ -168,12 +209,47 @@ def _make_flow(entry) -> options_flow.NestQuestOptionsFlow:
     return flow
 
 
+def _schema_values(schema) -> dict:
+    """Extract the per-field default values from a real voluptuous schema."""
+    return {
+        marker.schema: marker.default()
+        for marker in schema.schema
+        if hasattr(marker, "schema")
+    }
+
+
 def test_options_flow_reachable_via_configure_button() -> None:
     """The config flow exposes async_get_options_flow returning the options flow."""
     entry = _make_entry()
     handler = config_flow.NestQuestConfigFlow.async_get_options_flow(entry)
     assert isinstance(handler, options_flow.NestQuestOptionsFlow)
     assert handler.config_entry is entry
+
+
+def test_options_flow_get_options_flow_is_ha_callback() -> None:
+    """async_get_options_flow is wrapped by the homeassistant.core.callback decorator."""
+    assert getattr(
+        config_flow.NestQuestConfigFlow.async_get_options_flow, "__ha_callback__", False
+    ) is True
+
+
+def test_options_flow_constructs_through_2024_6_surface() -> None:
+    """The handler constructs against the mocked 2024.6 base and inherits its contract."""
+    entry = _make_entry(options={CONF_HORIZON_DAYS: 21})
+    flow = options_flow.NestQuestOptionsFlow(config_entry=entry)
+    assert isinstance(flow, sys.modules["homeassistant.config_entries"].OptionsFlowWithConfigEntry)
+    assert flow.config_entry is entry
+    assert flow.options == {CONF_HORIZON_DAYS: 21}
+
+
+def test_options_flow_submits_through_2024_6_surface() -> None:
+    """The handler can be submitted through the mocked 2024.6-shaped surface."""
+    entry = _make_entry()
+    handler = config_flow.NestQuestConfigFlow.async_get_options_flow(entry)
+    result = _run(handler.async_step_init(dict(VALID_INPUT)))
+    assert result["type"] == "create_entry"
+    assert result["title"] == "NestQuest"
+    assert result["data"] == VALID_INPUT
 
 
 def test_options_flow_shows_form_initially() -> None:
@@ -184,14 +260,23 @@ def test_options_flow_shows_form_initially() -> None:
     assert result["step_id"] == "init"
 
 
+def test_options_flow_schema_is_voluptuous() -> None:
+    """The form's data_schema is a real voluptuous Schema (no dict fallback)."""
+    flow = _make_flow(_make_entry())
+    result = _run(flow.async_step_init(None))
+    import voluptuous as vol
+
+    assert isinstance(result["data_schema"], vol.Schema)
+
+
 def test_options_flow_prefills_from_defaults() -> None:
     """Without stored options, the form pre-fills with the constant defaults."""
     flow = _make_flow(_make_entry())
     result = _run(flow.async_step_init(None))
-    schema = result["data_schema"]
-    assert schema[CONF_HORIZON_DAYS] == DEFAULT_HORIZON_DAYS
-    assert schema[CONF_DAY_ROLLOVER_TIME] == DEFAULT_DAY_ROLLOVER_TIME
-    assert schema[CONF_PANEL_IDLE_TIMEOUT] == DEFAULT_PANEL_IDLE_TIMEOUT
+    values = _schema_values(result["data_schema"])
+    assert values[CONF_HORIZON_DAYS] == DEFAULT_HORIZON_DAYS
+    assert values[CONF_DAY_ROLLOVER_TIME] == DEFAULT_DAY_ROLLOVER_TIME
+    assert values[CONF_PANEL_IDLE_TIMEOUT] == DEFAULT_PANEL_IDLE_TIMEOUT
 
 
 def test_options_flow_prefills_from_entry_options() -> None:
@@ -209,10 +294,10 @@ def test_options_flow_prefills_from_entry_options() -> None:
         },
     )
     result = _run(_make_flow(entry).async_step_init(None))
-    schema = result["data_schema"]
-    assert schema[CONF_HORIZON_DAYS] == 21
-    assert schema[CONF_DAY_ROLLOVER_TIME] == "05:45"
-    assert schema[CONF_PANEL_IDLE_TIMEOUT] == 120
+    values = _schema_values(result["data_schema"])
+    assert values[CONF_HORIZON_DAYS] == 21
+    assert values[CONF_DAY_ROLLOVER_TIME] == "05:45"
+    assert values[CONF_PANEL_IDLE_TIMEOUT] == 120
 
 
 def test_options_flow_falls_back_to_entry_data() -> None:
@@ -225,10 +310,38 @@ def test_options_flow_falls_back_to_entry_data() -> None:
         }
     )
     result = _run(_make_flow(entry).async_step_init(None))
+    values = _schema_values(result["data_schema"])
+    assert values[CONF_HORIZON_DAYS] == 10
+    assert values[CONF_DAY_ROLLOVER_TIME] == "01:15"
+    assert values[CONF_PANEL_IDLE_TIMEOUT] == 90
+
+
+def test_options_flow_schema_applies_stored_defaults() -> None:
+    """A real voluptuous validate({}) fills every field from the stored defaults."""
+    entry = _make_entry(
+        options={
+            CONF_HORIZON_DAYS: 21,
+            CONF_DAY_ROLLOVER_TIME: "05:45",
+            CONF_PANEL_IDLE_TIMEOUT: 120,
+        }
+    )
+    result = _run(_make_flow(entry).async_step_init(None))
+    assert result["data_schema"]({}) == {
+        CONF_HORIZON_DAYS: 21,
+        CONF_DAY_ROLLOVER_TIME: "05:45",
+        CONF_PANEL_IDLE_TIMEOUT: 120,
+    }
+
+
+def test_options_flow_schema_coerces_field_types() -> None:
+    """The schema validates the expected field types via voluptuous."""
+    flow = _make_flow(_make_entry())
+    result = _run(flow.async_step_init(None))
     schema = result["data_schema"]
-    assert schema[CONF_HORIZON_DAYS] == 10
-    assert schema[CONF_DAY_ROLLOVER_TIME] == "01:15"
-    assert schema[CONF_PANEL_IDLE_TIMEOUT] == 90
+    validators = {marker.schema: validator for marker, validator in schema.schema.items()}
+    assert validators[CONF_HORIZON_DAYS] is int
+    assert validators[CONF_DAY_ROLLOVER_TIME] is str
+    assert validators[CONF_PANEL_IDLE_TIMEOUT] is int
 
 
 @pytest.mark.parametrize("bad_horizon", [0, -5])
@@ -369,6 +482,30 @@ def test_options_strings_no_raw_keys(strings: dict, translations_en: dict) -> No
 
     check(strings["options"])
     check(translations_en["options"])
+
+
+def test_options_flow_no_plain_dict_schema_fallback() -> None:
+    """No try/except ImportError fallback for voluptuous in the options flow module."""
+    py_file = Path(options_flow.__file__)
+    tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try):
+            handlers = node.handlers or []
+            has_import_error_handler = any(
+                getattr(handler.type, "id", getattr(handler.type, "attr", None))
+                == "ImportError"
+                for handler in handlers
+            )
+            assert not has_import_error_handler, (
+                f"Plain-dict schema fallback (try/except ImportError) found in {py_file.name}:{node.lineno}"
+            )
+
+
+def test_options_flow_subclasses_options_flow_with_config_entry() -> None:
+    """NestQuestOptionsFlow subclasses config_entries.OptionsFlowWithConfigEntry."""
+    base = sys.modules["homeassistant.config_entries"].OptionsFlowWithConfigEntry
+    assert issubclass(options_flow.NestQuestOptionsFlow, base)
+    assert options_flow.NestQuestOptionsFlow.__bases__ == (base,)
 
 
 def test_options_flow_no_hardcoded_domain_or_db_filename() -> None:
