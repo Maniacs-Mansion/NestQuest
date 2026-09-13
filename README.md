@@ -4,7 +4,7 @@ Home Assistant custom integration for managing chores, custody schedules, and ho
 
 ## Overview
 
-NestQuest helps households coordinate daily life, chore tracking, custody schedules, and shared tasks directly within Home Assistant. It provides sensors, calendar events, and service calls designed for busy households and modern co-parenting setups.
+NestQuest helps households coordinate daily life, chore tracking, custody schedules, and shared tasks directly within Home Assistant. Version 0.1.0 is the integration foundation: a configuration scaffold providing the package and manifest, shared constants, a single-instance config flow, setup/unload lifecycle handling with an options-reload listener, an options flow (horizon days, day rollover time, panel idle timeout), SQLite storage-path resolution, and HACS metadata. Sensors, calendar events, and service calls are forthcoming in later releases and are not yet part of the integration.
 
 ## Installation
 

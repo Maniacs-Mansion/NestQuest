@@ -3,10 +3,10 @@
   "name": "NestQuest",
   "codeowners": ["@overseer"],
   "config_flow": true,
-  "documentation": "https://code.cubecraftlabs.com/Maniacs_Mansion/NestQuest",
+  "documentation": "https://github.com/talon2king/NestQuest",
   "integration_type": "hub",
   "iot_class": "local_polling",
-  "issue_tracker": "https://code.cubecraftlabs.com/Maniacs_Mansion/NestQuest/issues",
+  "issue_tracker": "https://github.com/talon2king/NestQuest/issues",
   "requirements": [],
   "version": "0.1.0"
 }
