@@ -41,6 +41,32 @@ async def test_unload_returns_true_and_removes_hass_data(hass, make_entry) -> No
     assert registry.size == 0
 
 
+async def test_unload_of_one_entry_keeps_domain_while_other_remains(
+    hass, make_entry
+) -> None:
+    """Unloading one of two entries keeps DOMAIN alive with the other entry."""
+    registry = hass.registry
+    entry_a = _wire(make_entry(entry_id="entry_a"), registry)
+    entry_b = _wire(make_entry(entry_id="entry_b"), registry)
+    assert await async_setup_entry(hass, entry_a) is True
+    assert await async_setup_entry(hass, entry_b) is True
+    assert set(hass.data[DOMAIN]) == {"entry_a", "entry_b"}
+
+    assert await async_unload_entry(hass, entry_a) is True
+    assert DOMAIN in hass.data
+    assert set(hass.data[DOMAIN]) == {"entry_b"}
+    assert hass.data[DOMAIN]["entry_b"] is entry_b.runtime_data
+    assert entry_a.runtime_data is None
+    assert entry_b.runtime_data is not None
+    assert registry.size == 1
+
+    assert await async_unload_entry(hass, entry_b) is True
+    assert DOMAIN not in hass.data
+    assert hass.data == {}
+    assert entry_b.runtime_data is None
+    assert registry.size == 0
+
+
 async def test_unload_is_idempotent(hass, make_entry) -> None:
     entry = _wire(make_entry(), hass.registry)
     assert await async_setup_entry(hass, entry) is True

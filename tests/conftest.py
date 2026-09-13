@@ -96,7 +96,13 @@ class _ConfigFlowBase:
         return {"type": "abort", "reason": reason}
 
     def async_create_entry(self, *, title, data, **kwargs):
-        return {"type": "create_entry", "title": title, "data": data}
+        result = {"type": "create_entry", "title": title, "data": data}
+        hass = getattr(self, "hass", None)
+        manager = getattr(hass, "config_entries", None) if hass is not None else None
+        add = getattr(manager, "async_add", None)
+        if add is not None:
+            add(SimpleNamespace(domain=self._domain, title=title, data=data))
+        return result
 
     async def async_set_unique_id(self, unique_id, raise_on_progress=True):
         self.context["unique_id"] = unique_id
@@ -222,6 +228,15 @@ def make_hass() -> tuple:
         registry.reloaded.append(entry_id)
 
     hass.config_entries.async_reload = MagicMock(side_effect=_async_reload)
+    hass.config_entries._entries = []
+    hass.config_entries.async_add = (
+        lambda entry: hass.config_entries._entries.append(entry)
+    )
+
+    def _async_entries(domain: str):
+        return [e for e in hass.config_entries._entries if e.domain == domain]
+
+    hass.config_entries.async_entries = _async_entries
     return hass, registry
 
 
@@ -270,12 +285,10 @@ def make_flow():
         from custom_components.nestquest import config_flow
 
         flow = config_flow.NestQuestConfigFlow()
-        entries = [
-            e for e in (existing_entries or []) if getattr(e, "domain", None) == flow._domain
-        ]
-        flow.hass = SimpleNamespace(
-            config_entries=SimpleNamespace(async_entries=lambda domain: entries)
-        )
+        flow.hass = hass if hass is not None else make_hass()[0]
+        for entry in existing_entries or []:
+            if getattr(entry, "domain", None) == flow._domain:
+                flow.hass.config_entries.async_add(entry)
         if in_progress:
             flow._async_in_progress = lambda: in_progress
         return flow

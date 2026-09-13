@@ -24,19 +24,27 @@ async def test_flow_shows_form_initially(hass, make_flow) -> None:
 
 
 async def test_flow_creates_entry_on_submit(hass, make_flow) -> None:
-    """Submitting the user step creates a config entry."""
+    """Submitting the user step creates a config entry on the fixture's manager."""
     flow = make_flow(hass)
+    assert hass.config_entries.async_entries(DOMAIN) == []
     result = await flow.async_step_user({})
     assert result["type"] == "create_entry"
     assert result["title"] == "NestQuest"
     assert result["data"] == {}
+    created = hass.config_entries.async_entries(DOMAIN)
+    assert len(created) == 1
+    assert created[0].domain == DOMAIN
+    assert created[0].title == "NestQuest"
+    assert created[0].data == {}
 
 
 async def test_second_flow_aborts_single_instance(
     hass, make_flow, make_config_flow_entry
 ) -> None:
     """A second flow aborts with single_instance_allowed."""
-    flow = make_flow(hass, existing_entries=[make_config_flow_entry(DOMAIN)])
+    existing = make_config_flow_entry(DOMAIN)
+    flow = make_flow(hass, existing_entries=[existing])
+    assert hass.config_entries.async_entries(DOMAIN) == [existing]
     result = await flow.async_step_user(None)
     assert result["type"] == "abort"
     assert result["reason"] == "single_instance_allowed"
