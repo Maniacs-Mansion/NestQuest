@@ -40,7 +40,8 @@ def test_returns_absolute_path_from_config_path() -> None:
     assert db_path.is_absolute()
 
 
-def test_relative_config_path_is_normalized_to_absolute(tmp_path) -> None:
+def test_relative_config_path_is_normalized_to_absolute(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
     hass = MagicMock()
     hass.config.path = MagicMock(return_value="relative-config/" + SQLITE_DB_FILENAME)
     hass.async_add_executor_job = AsyncMock(side_effect=(lambda fn, *a: fn(*a)))
@@ -49,6 +50,7 @@ def test_relative_config_path_is_normalized_to_absolute(tmp_path) -> None:
     assert db_path.name == SQLITE_DB_FILENAME
     assert str(db_path).endswith("relative-config/" + SQLITE_DB_FILENAME)
     assert db_path.parent.is_dir()
+    assert (tmp_path / "relative-config").is_dir()
     assert not db_path.exists()
 
 
