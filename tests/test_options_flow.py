@@ -271,7 +271,7 @@ def test_options_flow_create_entry_data_lands_in_entry_options_and_reloads_once(
     assert result["type"] == "create_entry"
     entry.options = dict(result["data"])
 
-    registry.dispatch_options_update(entry)
+    _run(registry.dispatch_options_update(entry))
     assert hass.config_entries.async_reload.call_count == 1
     assert registry.reloaded == [entry.entry_id]
     assert entry.options == VALID_INPUT

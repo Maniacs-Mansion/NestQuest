@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
+import inspect
 import sys
 from unittest.mock import MagicMock
 
@@ -44,3 +46,41 @@ def test_mock_only_harness_contract(monkeypatch):
     monkeypatch.setitem(sys.modules, "homeassistant", MagicMock(name="real-module"))
     with pytest.raises(pytest.UsageError, match="mock-only"):
         _ensure_mock_only()
+
+
+async def test_hass_and_registry_run_on_the_running_test_loop(hass, make_entry):
+    """hass.loop is the test's own loop and the registry spins no private loop."""
+    # hass.loop is the very loop the async test runs on (HA running-loop
+    # contract): code scheduling on hass.loop lands on the test loop itself.
+    assert hass.loop is asyncio.get_running_loop()
+    ran = []
+
+    async def _scheduled():
+        ran.append(True)
+
+    await hass.loop.create_task(_scheduled())
+    assert ran == [True]
+
+    # ListenerRegistry never spins its own event loop (no resource leak) and
+    # dispatch is a plain coroutine: sync listeners run inline, async awaited.
+    registry = hass.registry
+    assert not hasattr(registry, "_loop")
+    assert inspect.iscoroutinefunction(registry.dispatch_options_update)
+
+    calls = []
+
+    def _sync_listener(h, entry):
+        calls.append(("sync", entry.entry_id, h is hass))
+
+    entry = make_entry(entry_id="disp")
+    registry.add("disp", _sync_listener)
+    await registry.dispatch_options_update(entry)
+    assert calls == [("sync", "disp", True)]
+
+    async def _async_listener(h, entry):
+        calls.append(("async", entry.entry_id))
+
+    registry.add("disp", _async_listener)
+    calls.clear()
+    await registry.async_dispatch_options_update(entry)
+    assert calls == [("sync", "disp", True), ("async", "disp")]

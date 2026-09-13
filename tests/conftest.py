@@ -175,7 +175,6 @@ class ListenerRegistry:
         self._hass = hass
         self._listeners: dict[str, list[object]] = {}
         self.reloaded: list[str] = []
-        self._loop = asyncio.new_event_loop()
 
     def add(self, entry_id: str, listener) -> object:
         def _remove():
@@ -184,19 +183,14 @@ class ListenerRegistry:
         self._listeners.setdefault(entry_id, []).append(listener)
         return _remove
 
-    def dispatch_options_update(self, entry) -> None:
-        """Synchronous dispatch for sync tests (drives a private event loop)."""
-        for listener in list(self._listeners.get(entry.entry_id, [])):
-            result = listener(self._hass, entry)
-            if inspect.isawaitable(result):
-                self._loop.run_until_complete(result)
-
-    async def async_dispatch_options_update(self, entry) -> None:
-        """Async dispatch for pytest-asyncio tests (awaits listeners in the running loop)."""
+    async def dispatch_options_update(self, entry) -> None:
+        """Dispatch on the running loop; sync listeners run inline, async ones awaited."""
         for listener in list(self._listeners.get(entry.entry_id, [])):
             result = listener(self._hass, entry)
             if inspect.isawaitable(result):
                 await result
+
+    async_dispatch_options_update = dispatch_options_update
 
     @property
     def size(self) -> int:
@@ -250,20 +244,19 @@ def make_hass() -> tuple:
 
 
 @pytest.fixture
-def hass():
-    """Provide a standard-shaped hass fixture.
+async def hass():
+    """Provide a standard-shaped hass fixture bound to the running test loop.
 
     Mirrors the surface of Home Assistant's ``hass`` fixture: a ``config``
     namespace, a ``config_entries`` manager wired to a listener registry, a
-    ``data`` dict for integration state, and the running event ``loop``.
+    ``data`` dict for integration state, and a ``loop`` bound to the
+    pytest-asyncio loop the test itself runs on (HA's running-loop contract),
+    so code scheduling on ``hass.loop`` runs on the actual test loop.
     """
     _hass, registry = make_hass()
     _hass.registry = registry
-    _hass.loop = asyncio.new_event_loop()
-    try:
-        yield _hass
-    finally:
-        _hass.loop.close()
+    _hass.loop = asyncio.get_running_loop()
+    yield _hass
 
 
 @pytest.fixture
