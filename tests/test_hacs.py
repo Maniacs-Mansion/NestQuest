@@ -58,6 +58,16 @@ def test_readme_exists_and_contains_required_sections() -> None:
     assert "uv run pytest" in content
 
 
+def test_readme_hacs_points_at_public_github_mirror() -> None:
+    """Verify README directs HACS users to the public GitHub mirror, not the private Gitea repo."""
+    content = README_PATH.read_text(encoding="utf-8")
+    assert "https://github.com/talon2king/NestQuest" in content
+    assert "https://code.cubecraftlabs.com/Maniacs_Mansion/NestQuest" in content
+    assert content.index("https://github.com/talon2king/NestQuest") < content.index(
+        "https://code.cubecraftlabs.com/Maniacs_Mansion/NestQuest"
+    )
+
+
 def test_hacs_directory_structure() -> None:
     """Verify directory structure matches HACS integration expectations."""
     assert MANIFEST_PATH.exists(), f"Integration manifest does not exist at {MANIFEST_PATH}"
