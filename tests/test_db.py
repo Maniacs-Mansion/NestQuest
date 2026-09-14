@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import sqlite3
+import threading
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -101,7 +104,7 @@ def test_every_method_routes_sqlite3_through_executor(tmp_path) -> None:
 
     assert row == ("a",)
     assert rows == [("a",), ("b",), ("c",)]
-    assert hass.async_add_executor_job.await_count == calls_before + 7
+    assert hass.async_add_executor_job.await_count == calls_before + 5
     _run(database.close())
 
 
@@ -118,8 +121,35 @@ async def test_every_wrapper_call_awaits_executor_job(tmp_path) -> None:
     async with database.transaction():
         pass
 
-    assert hass.async_add_executor_job.await_count == 9
+    assert hass.async_add_executor_job.await_count == 7
     assert all(callable(c.args[0]) for c in hass.async_add_executor_job.call_args_list)
+    await database.close()
+
+
+async def test_public_methods_return_only_plain_data(tmp_path) -> None:
+    """execute/execute_many return plain dataclasses, never sqlite3 objects."""
+    hass = _make_hass_mock()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "plain.db")
+    result = await database.execute(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"
+    )
+    assert not isinstance(result, (sqlite3.Connection, sqlite3.Cursor))
+    insert = await database.execute("INSERT INTO t (name) VALUES (?)", ("a",))
+    assert not isinstance(insert, (sqlite3.Connection, sqlite3.Cursor))
+    assert insert.rowcount == 1
+    assert insert.lastrowid == 1
+    many = await database.execute_many(
+        "INSERT INTO t (name) VALUES (?)", [("b",), ("c",)]
+    )
+    assert not isinstance(many, (sqlite3.Connection, sqlite3.Cursor))
+    assert many.rowcount == 2
+    row = await database.fetch_one("SELECT name FROM t WHERE id = 1")
+    assert row == ("a",)
+    rows = await database.fetch_all("SELECT name FROM t ORDER BY id")
+    assert rows == [("a",), ("b",), ("c",)]
+    for value in (*rows, row):
+        assert not isinstance(value, sqlite3.Cursor)
     await database.close()
 
 
@@ -131,6 +161,68 @@ async def test_no_sqlite3_call_on_event_loop_with_real_executor(tmp_path) -> Non
     await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
     assert await database.fetch_one("SELECT 1") == (1,)
     await database.close()
+
+
+async def test_real_executor_never_touches_loop_thread(tmp_path, monkeypatch) -> None:
+    """Every real sqlite3 call must run on a non-event-loop thread.
+
+    sqlite3.connect is instrumented so a proxy wraps the connection and
+    every cursor it hands out; each proxied call records the thread it ran
+    on.  A recorded thread id equal to the event-loop thread would mean a
+    sqlite3 call crossed the executor boundary.
+    """
+    loop_thread = threading.get_ident()
+    recorded: list[int] = []
+    guard = threading.Lock()
+
+    def _note() -> None:
+        with guard:
+            recorded.append(threading.get_ident())
+
+    class _Proxy:
+        """Generic proxy recording the thread of every attribute call."""
+
+        def __init__(self, target: Any) -> None:
+            object.__setattr__(self, "_target", target)
+
+        def __getattr__(self, name: str):
+            attr = getattr(object.__getattribute__(self, "_target"), name)
+            if not callable(attr):
+                return attr
+
+            def _wrapped(*args, **kwargs):
+                _note()
+                result = attr(*args, **kwargs)
+                if isinstance(result, sqlite3.Cursor):
+                    return _Proxy(result)
+                return result
+
+            return _wrapped
+
+    real_connect = sqlite3.connect
+
+    def _traced_connect(*args, **kwargs):
+        return _Proxy(real_connect(*args, **kwargs))
+
+    monkeypatch.setattr(db_module.sqlite3, "connect", _traced_connect)
+
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "threads.db")
+    await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+    await database.execute("INSERT INTO t (id) VALUES (?)", (1,))
+    await database.execute_many("INSERT INTO t (id) VALUES (?)", [(2,), (3,)])
+    assert await database.fetch_one("SELECT id FROM t WHERE id = 1") == (1,)
+    assert await database.fetch_all("SELECT id FROM t") == [(1,), (2,), (3,)]
+    async with database.transaction():
+        await database.execute("INSERT INTO t (id) VALUES (?)", (4,))
+    await database.close()
+
+    assert recorded, "expected at least one recorded sqlite3 call"
+    assert loop_thread not in recorded, (
+        f"sqlite3 call ran on the event-loop thread {loop_thread}; "
+        f"recorded threads: {sorted(set(recorded))}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +297,8 @@ def test_close_is_idempotent(tmp_path) -> None:
     _run(database.close())
     assert database.connected is False
     assert hass.async_add_executor_job.await_count == 2
+    assert database.rowcount == -1
+    assert database.lastrowid is None
 
 
 def test_operations_after_close_raise_clear_error(tmp_path) -> None:
@@ -277,6 +371,191 @@ async def test_transaction_persists_across_connections(tmp_path) -> None:
     await other.open(tmp_path / "persist.db")
     assert await other.fetch_all("SELECT name FROM t") == [("kept",)]
     await other.close()
+
+
+# ---------------------------------------------------------------------------
+# Serialization: one lock per wrapper, no cross-commit interleaving
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_writers_do_not_interleave_commits(tmp_path) -> None:
+    """Real-executor proof: nothing commits inside another transaction's span.
+
+    A transaction runner repeatedly counts rows, inserts, and counts again
+    inside BEGIN..COMMIT; the count must grow by exactly one, proving no
+    other writer committed in between even though several writer tasks fire
+    statements concurrently on real executor threads.  Statements issued
+    while a transaction is open queue behind it on the wrapper lock.
+    """
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "serial.db")
+    await database.execute("CREATE TABLE t (kind TEXT, seq INTEGER)")
+    tx_rounds, writers, writer_rounds = 6, 5, 8
+    total = tx_rounds + writers * writer_rounds
+
+    async def _tx_runner() -> None:
+        for rnd in range(tx_rounds):
+            async with database.transaction():
+                rows = await database.fetch_all("SELECT COUNT(*) FROM t")
+                seen = rows[0][0] if rows else -1
+                await database.execute(
+                    "INSERT INTO t (kind, seq) VALUES (?, ?)", ("tx", rnd)
+                )
+                rows = await database.fetch_all("SELECT COUNT(*) FROM t")
+                grown = rows[0][0] if rows else -1
+                if grown != seen + 1:
+                    raise AssertionError(
+                        f"interleaved commit: count {seen} -> {grown} "
+                        f"in tx round {rnd}"
+                    )
+
+    async def _writer(worker: int) -> None:
+        for rnd in range(writer_rounds):
+            await database.execute(
+                "INSERT INTO t (kind, seq) VALUES (?, ?)", ("w", worker)
+            )
+
+    await asyncio.gather(
+        _tx_runner(), *(_writer(w) for w in range(writers))
+    )
+
+    rows = await database.fetch_all("SELECT COUNT(*) FROM t")
+    assert rows[0][0] == total, f"expected {total} rows, got {rows[0][0]}"
+    await database.close()
+
+
+async def test_transaction_span_excludes_concurrent_transaction(tmp_path) -> None:
+    """A second transaction caller is rejected with a clear error."""
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "reject.db")
+    await database.execute("CREATE TABLE t (id INTEGER)")
+
+    started = asyncio.Event()
+
+    async def _first() -> None:
+        async with database.transaction():
+            started.set()
+            await asyncio.sleep(0.05)
+
+    first = asyncio.create_task(_first())
+    await started.wait()
+    with pytest.raises(RuntimeError, match="transaction"):
+        async with database.transaction():
+            pass
+    await first
+    await database.execute("INSERT INTO t (id) VALUES (?)", (1,))
+    assert await database.fetch_one("SELECT id FROM t") == (1,)
+    await database.close()
+
+
+async def test_transaction_blocks_other_statements_until_commit(tmp_path) -> None:
+    """A statement issued during an open transaction queues behind it."""
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "block.db")
+    await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+
+    order: list[str] = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _txn() -> None:
+        async with database.transaction():
+            await database.execute("INSERT INTO t (name) VALUES (?)", ("in_tx",))
+            order.append("tx-start")
+            started.set()
+            await release.wait()
+            order.append("tx-end")
+
+    async def _outsider() -> None:
+        await started.wait()
+        await database.execute("INSERT INTO t (name) VALUES (?)", ("after",))
+        order.append("outside")
+
+    txn_task = asyncio.create_task(_txn())
+    await started.wait()
+    outsider_task = asyncio.create_task(_outsider())
+    await asyncio.sleep(0.05)
+    assert order == ["tx-start"], f"outsider ran inside transaction: {order}"
+    release.set()
+    await asyncio.gather(txn_task, outsider_task)
+    assert order == ["tx-start", "tx-end", "outside"]
+    rows = await database.fetch_all("SELECT name FROM t ORDER BY id")
+    assert rows == [("in_tx",), ("after",)]
+    await database.close()
+
+
+async def test_concurrent_transaction_is_rejected_with_clear_error(
+    tmp_path,
+) -> None:
+    """A second concurrent transaction() gets a clear RuntimeError."""
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "concurrent-tx.db")
+    await database.execute("CREATE TABLE t (id INTEGER)")
+
+    started = asyncio.Event()
+
+    async def _first() -> None:
+        async with database.transaction():
+            started.set()
+            await asyncio.sleep(0.05)
+
+    first = asyncio.create_task(_first())
+    await started.wait()
+    with pytest.raises(RuntimeError, match="transaction"):
+        async with database.transaction():
+            pass
+    await first
+    await database.close()
+
+
+async def test_close_waits_for_in_flight_transaction(tmp_path) -> None:
+    """close() serializes: an open transaction finishes before shutdown."""
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "closerace.db")
+    await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _txn() -> None:
+        async with database.transaction():
+            await database.execute("INSERT INTO t (name) VALUES (?)", ("kept",))
+            started.set()
+            await release.wait()
+
+    txn_task = asyncio.create_task(_txn())
+    await started.wait()
+    close_task = asyncio.create_task(database.close())
+    await asyncio.sleep(0.05)
+    assert database.connected is True, "close() raced an open transaction"
+    release.set()
+    await asyncio.gather(txn_task, close_task)
+    assert database.connected is False
+
+    witness = NestQuestDatabase(hass)
+    await witness.open(tmp_path / "closerace.db")
+    assert await witness.fetch_all("SELECT name FROM t") == [("kept",)]
+    await witness.close()
+
+
+async def test_close_during_transaction_from_same_task_is_rejected(
+    tmp_path,
+) -> None:
+    """close() inside its own transaction body raises instead of deadlocking."""
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "selfclose.db")
+    await database.execute("CREATE TABLE t (id INTEGER)")
+    with pytest.raises(RuntimeError, match="transaction"):
+        async with database.transaction():
+            await database.close()
+    assert database.connected is True
+    await database.close()
 
 
 # ---------------------------------------------------------------------------

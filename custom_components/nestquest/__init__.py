@@ -50,11 +50,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await listener_hass.config_entries.async_reload(listener_entry.entry_id)
 
     database = await NestQuestDatabase(hass).open(await async_get_db_path(hass))
+    try:
+        remove_update_listener = entry.add_update_listener(_async_update_listener)
+    except BaseException:
+        await database.close()
+        raise
     runtime_data = NestQuestRuntimeData(
         entry_id=entry.entry_id,
         options=dict(entry.options),
         database=database,
-        remove_update_listener=entry.add_update_listener(_async_update_listener),
+        remove_update_listener=remove_update_listener,
     )
     entry.runtime_data = runtime_data
     hass.data[DOMAIN][entry.entry_id] = runtime_data
@@ -71,13 +76,22 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtime_data = getattr(entry, "runtime_data", None)
     if runtime_data is not None:
         remove_update_listener = getattr(runtime_data, "remove_update_listener", None)
-        if remove_update_listener is not None:
-            result = remove_update_listener()
-            if inspect.isawaitable(result):
-                await result
-        database = getattr(runtime_data, "database", None)
-        if database is not None:
-            await database.close()
+        unload_error: BaseException | None = None
+        try:
+            if remove_update_listener is not None:
+                result = remove_update_listener()
+                if inspect.isawaitable(result):
+                    await result
+        except BaseException as err:
+            unload_error = err
+        finally:
+            database = getattr(runtime_data, "database", None)
+            if database is not None:
+                await database.close()
+        if unload_error is not None:
+            if getattr(entry, "runtime_data", None) is not None:
+                entry.runtime_data = None
+            raise unload_error
     if getattr(entry, "runtime_data", None) is not None:
         entry.runtime_data = None
     return True
