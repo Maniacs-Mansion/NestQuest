@@ -10,6 +10,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN, LOGGER
+from .db import NestQuestDatabase
+from .store import async_get_db_path
 
 _LOGGER = LOGGER
 
@@ -20,6 +22,7 @@ class NestQuestRuntimeData:
 
     entry_id: str
     options: dict[str, Any]
+    database: NestQuestDatabase
     remove_update_listener: Callable[[], Any]
 
 
@@ -31,6 +34,14 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up NestQuest from a config entry."""
     hass.data.setdefault(DOMAIN, {})
+    existing = hass.data[DOMAIN].get(entry.entry_id)
+    if existing is not None:
+        db = getattr(existing, "database", None)
+        if db is None:
+            db = await NestQuestDatabase(hass).open(await async_get_db_path(hass))
+            existing.database = db
+        entry.runtime_data = existing
+        return True
 
     async def _async_update_listener(
         listener_hass: HomeAssistant, listener_entry: ConfigEntry
@@ -38,10 +49,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Reload the entry when its options change."""
         await listener_hass.config_entries.async_reload(listener_entry.entry_id)
 
+    database = await NestQuestDatabase(hass).open(await async_get_db_path(hass))
+    try:
+        remove_update_listener = entry.add_update_listener(_async_update_listener)
+    except BaseException:
+        await database.close()
+        raise
     runtime_data = NestQuestRuntimeData(
         entry_id=entry.entry_id,
         options=dict(entry.options),
-        remove_update_listener=entry.add_update_listener(_async_update_listener),
+        database=database,
+        remove_update_listener=remove_update_listener,
     )
     entry.runtime_data = runtime_data
     hass.data[DOMAIN][entry.entry_id] = runtime_data
@@ -58,10 +76,22 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtime_data = getattr(entry, "runtime_data", None)
     if runtime_data is not None:
         remove_update_listener = getattr(runtime_data, "remove_update_listener", None)
-        if remove_update_listener is not None:
-            result = remove_update_listener()
-            if inspect.isawaitable(result):
-                await result
+        unload_error: BaseException | None = None
+        try:
+            if remove_update_listener is not None:
+                result = remove_update_listener()
+                if inspect.isawaitable(result):
+                    await result
+        except BaseException as err:
+            unload_error = err
+        finally:
+            database = getattr(runtime_data, "database", None)
+            if database is not None:
+                await database.close()
+        if unload_error is not None:
+            if getattr(entry, "runtime_data", None) is not None:
+                entry.runtime_data = None
+            raise unload_error
     if getattr(entry, "runtime_data", None) is not None:
         entry.runtime_data = None
     return True
