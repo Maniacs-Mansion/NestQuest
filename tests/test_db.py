@@ -406,6 +406,163 @@ async def test_commit_failure_rolls_back_and_next_transaction_works(
     await database.close()
 
 
+async def test_cancel_during_begin_settles_then_rolls_back(tmp_path) -> None:
+    """NQ-PR12-007: cancel during BEGIN must not leak a stray transaction.
+
+    The BEGIN executor job is gated: the transaction task is cancelled
+    while BEGIN is still in flight, then the worker is allowed to
+    complete it anyway.  The wrapper must keep transaction ownership
+    until the submitted work settles, roll the completed BEGIN back,
+    clear its state, and stay usable for the next transaction.
+    """
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "cancel-begin.db")
+    await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+    await database.execute("INSERT INTO t (name) VALUES (?)", ("before",))
+
+    begin_started = asyncio.Event()
+    release_begin = asyncio.Event()
+    real_add = hass.async_add_executor_job
+
+    async def _gated_add_executor_job(fn, *args, **kwargs):
+        if getattr(fn, "__name__", "") == "_begin":
+            begin_started.set()
+            await release_begin.wait()
+        return await real_add(fn, *args, **kwargs)
+
+    hass.async_add_executor_job = _gated_add_executor_job
+
+    async def _txn() -> None:
+        async with database.transaction():
+            await database.execute("INSERT INTO t (name) VALUES (?)", ("kept",))
+
+    txn_task = asyncio.create_task(_txn())
+    await begin_started.wait()
+    txn_task.cancel()
+    await asyncio.sleep(0.05)
+    assert database._in_transaction is True, (
+        "ownership was released while the cancelled BEGIN was still in flight"
+    )
+    release_begin.set()
+    with pytest.raises(asyncio.CancelledError):
+        await txn_task
+
+    assert database._in_transaction is False
+    assert database._tx_task is None
+    assert database._conn is not None
+    assert database._conn.in_transaction is False
+
+    hass.async_add_executor_job = real_add
+    assert await database.fetch_all("SELECT name FROM t ORDER BY id") == [
+        ("before",)
+    ]
+    async with database.transaction():
+        await database.execute("INSERT INTO t (name) VALUES (?)", ("kept",))
+    assert await database.fetch_all("SELECT name FROM t ORDER BY id") == [
+        ("before",),
+        ("kept",),
+    ]
+    await database.close()
+
+
+async def test_cancel_during_commit_settles_then_propagates_cancellation(
+    tmp_path,
+) -> None:
+    """NQ-PR12-007: cancel during COMMIT must not mask the cancellation.
+
+    COMMIT is gated; the task is cancelled while it is in flight and the
+    worker then completes it anyway.  The cancellation must propagate as
+    CancelledError (not be converted by a doomed ROLLBACK of an already
+    committed transaction), the connection must end outside any
+    transaction, and the wrapper must stay usable.
+    """
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "cancel-commit.db")
+    await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+
+    commit_started = asyncio.Event()
+    release_commit = asyncio.Event()
+    real_add = hass.async_add_executor_job
+
+    async def _gated_add_executor_job(fn, *args, **kwargs):
+        if getattr(fn, "__name__", "") == "_commit":
+            commit_started.set()
+            await release_commit.wait()
+        return await real_add(fn, *args, **kwargs)
+
+    hass.async_add_executor_job = _gated_add_executor_job
+
+    async def _txn() -> None:
+        async with database.transaction():
+            await database.execute("INSERT INTO t (name) VALUES (?)", ("kept",))
+
+    txn_task = asyncio.create_task(_txn())
+    await commit_started.wait()
+    txn_task.cancel()
+    await asyncio.sleep(0.05)
+    assert database._in_transaction is True, (
+        "ownership was released while the cancelled COMMIT was still in flight"
+    )
+    release_commit.set()
+    with pytest.raises(asyncio.CancelledError):
+        await txn_task
+
+    assert database._in_transaction is False
+    assert database._tx_task is None
+    assert database._conn is not None
+    assert database._conn.in_transaction is False
+
+    hass.async_add_executor_job = real_add
+    assert await database.fetch_all("SELECT name FROM t") == [("kept",)]
+    async with database.transaction():
+        await database.execute("INSERT INTO t (name) VALUES (?)", ("again",))
+    assert await database.fetch_all("SELECT name FROM t ORDER BY id") == [
+        ("kept",),
+        ("again",),
+    ]
+    await database.close()
+
+
+async def test_commit_and_rollback_failures_are_both_preserved(tmp_path) -> None:
+    """NQ-PR12-008: both errors survive when COMMIT and ROLLBACK both fail.
+
+    The COMMIT executor call is forced to fail, and the follow-up
+    cleanup ROLLBACK is forced to fail as well.  The raised error must
+    keep both original exceptions inspectable instead of discarding the
+    commit failure behind the rollback failure.
+    """
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "both-fail.db")
+    await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+
+    commit_failure = sqlite3.OperationalError("commit exploded")
+    rollback_failure = sqlite3.OperationalError("rollback exploded")
+    real_add = hass.async_add_executor_job
+
+    async def _failing_add_executor_job(fn, *args, **kwargs):
+        name = getattr(fn, "__name__", "")
+        if name == "_commit":
+            raise commit_failure
+        if name == "_cleanup":
+            raise rollback_failure
+        return await real_add(fn, *args, **kwargs)
+
+    hass.async_add_executor_job = _failing_add_executor_job
+
+    with pytest.raises(BaseExceptionGroup) as exc_info:
+        async with database.transaction():
+            pass
+
+    assert commit_failure in exc_info.value.exceptions
+    assert rollback_failure in exc_info.value.exceptions
+    assert database._in_transaction is False
+    assert database._tx_task is None
+    await database.close()
+
+
 async def test_transaction_persists_across_connections(tmp_path) -> None:
     """A committed transaction is visible to a brand-new connection."""
     hass, _registry = make_hass()
