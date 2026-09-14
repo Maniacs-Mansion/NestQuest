@@ -425,16 +425,18 @@ def occurs_on(rule: ScheduleRule, target: datetime.date) -> bool:
     are plain calendar dates (Feature 04 guardrail); the caller decides
     the timezone that produced them.
     """
+    # Dispatch FIRST: an unimplemented shape must raise loudly even for
+    # dates outside the window, never silently evaluate to False.
+    shape = rule.rule_type
+    if shape is not RuleType.DAILY:
+        raise NotImplementedError(
+            f"occurs_on for {shape} lands with its own engine task "
+            "(Features 04 task sequence)"
+        )
     if not _within_window(rule, target):
         return False
-    shape = rule.rule_type
-    if shape is RuleType.DAILY:
-        offset = (target - _parse_date(rule.start_date)).days
-        return offset % rule.interval == 0
-    raise NotImplementedError(
-        f"occurs_on for {shape} lands with its own engine task "
-        "(Features 04 task sequence)"
-    )
+    offset = (target - _parse_date(rule.start_date)).days
+    return offset % rule.interval == 0
 
 
 def occurrences_between(
@@ -446,6 +448,11 @@ def occurrences_between(
     inverted bounds; a window entirely outside [rule.start_date,
     rule.end_date] yields an empty list.
     """
+    if rule.rule_type is not RuleType.DAILY:
+        raise NotImplementedError(
+            f"occurrences_between for {rule.rule_type} lands with its own "
+            "engine task (Features 04 task sequence)"
+        )
     _validate_date(start, "start")
     _validate_date(end, "end")
     start_date = _parse_date(start)

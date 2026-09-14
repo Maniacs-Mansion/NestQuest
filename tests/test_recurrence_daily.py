@@ -221,3 +221,73 @@ def test_occurs_on_rejects_unimplemented_shapes_loudly() -> None:
     )
     with pytest.raises(NotImplementedError):
         occurs_on(rule, _d("2026-09-07"))
+
+def test_interval_7_preserves_weekday_alignment_across_months() -> None:
+    """Weekly-by-interval semantics: every firing lands on the SAME
+    weekday as start_date, no matter how many month edges intervene."""
+    rule = ScheduleRule(
+        rule_type=RuleType.DAILY, interval=7, start_date="2026-09-01"
+    )
+    # 2026-09-01 is a Tuesday; every firing must be a Tuesday too.
+    assert _d("2026-09-01").weekday() == 1
+    for day in ("2026-09-08", "2026-09-29", "2026-10-06", "2026-11-03"):
+        assert occurs_on(rule, _d(day)) is True, day
+        assert _d(day).weekday() == 1, f"{day} must be a Tuesday"
+    # The day after a firing is never a firing.
+    assert occurs_on(rule, _d("2026-10-07")) is False
+
+
+def test_interval_2_across_leap_day() -> None:
+    """Interval > 1 arithmetic across a leap day: the extra day shifts
+    subsequent offsets by one, and the mod arithmetic reflects it."""
+    rule = ScheduleRule(
+        rule_type=RuleType.DAILY, interval=2, start_date="2028-02-27"
+    )
+    assert occurs_on(rule, _d("2028-02-27")) is True   # 0
+    assert occurs_on(rule, _d("2028-02-28")) is False  # 1
+    assert occurs_on(rule, _d("2028-02-29")) is True   # 2 (leap day)
+    assert occurs_on(rule, _d("2028-03-01")) is False  # 3
+    assert occurs_on(rule, _d("2028-03-02")) is True   # 4
+
+
+def test_occurrences_between_leap_day_interval_2() -> None:
+    rule = ScheduleRule(
+        rule_type=RuleType.DAILY, interval=2, start_date="2028-02-27"
+    )
+    result = occurrences_between(rule, "2028-02-27", "2028-03-03")
+    assert result == ["2028-02-27", "2028-02-29", "2028-03-02"]
+
+
+def test_occurrences_between_year_boundary_interval_2() -> None:
+    rule = ScheduleRule(
+        rule_type=RuleType.DAILY, interval=2, start_date="2026-12-30"
+    )
+    result = occurrences_between(rule, "2026-12-30", "2027-01-04")
+    # Offsets 0, 2, 4, 6 = Dec 30, Jan 1, Jan 3 ... wait: offsets are
+    # Dec30=0, Dec31=1, Jan1=2, Jan2=3, Jan3=4, Jan4=5. Even offsets:
+    assert result == ["2026-12-30", "2027-01-01", "2027-01-03"]
+
+
+def test_occurs_on_unimplemented_shape_raises_even_outside_window() -> None:
+    """An unimplemented shape must raise whether the date is inside or
+    outside the window — silent False would hide a missing engine."""
+    rule = ScheduleRule(
+        rule_type=RuleType.WEEKLY, weekday_set={0},
+        start_date="2026-09-01", end_date="2026-09-10",
+    )
+    # Before start, inside window, after end: all must raise.
+    for day in ("2026-08-31", "2026-09-07", "2026-09-20"):
+        with pytest.raises(NotImplementedError):
+            occurs_on(rule, _d(day))
+
+
+def test_occurrences_between_unimplemented_shape_raises_even_disjoint(
+    tmp_path,
+) -> None:
+    rule = ScheduleRule(
+        rule_type=RuleType.WEEKLY, weekday_set={0}, start_date="2026-09-01"
+    )
+    # A range entirely before the rule's start still raises: the shape
+    # is unimplemented, and silence would hide it.
+    with pytest.raises(NotImplementedError):
+        occurrences_between(rule, "2026-08-01", "2026-08-10")
