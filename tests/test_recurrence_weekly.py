@@ -90,9 +90,9 @@ def test_weekly_interval_2_fires_on_alternate_weeks() -> None:
     assert occurs_on(rule, _d("2026-09-14")) is False
     # Week 2 (Sep 21-27): fires Mon Sep 21.
     assert occurs_on(rule, _d("2026-09-21")) is True
-    # Week 2 is not a firing week: Mon Sep 28 skipped.
+    # Week 3 (Sep 28-Oct 4): skipped; Mon Sep 28 does not fire.
     assert occurs_on(rule, _d("2026-09-28")) is False
-    # Week 3: fires Mon Oct 5.
+    # Week 4 (Oct 5-11): fires Mon Oct 5.
     assert occurs_on(rule, _d("2026-10-05")) is True
 
 
