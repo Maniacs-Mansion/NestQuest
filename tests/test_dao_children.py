@@ -654,53 +654,67 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
                 raw_statements.append((sub, _unquote(rendered)))
 
         def _raises_blocks():
-            """Yield (block, matcher_name, func_ok) for pytest.raises."""
+            """Yield (block, is_pytest_integrity) for pytest.raises blocks.
+
+            Structurally exact: the call func must resolve to
+            pytest.raises (Attribute pytest.raises, or a bare Name
+            imported from pytest — checked against the file's import
+            section), and the matcher argument must be an AST chain
+            whose final segment is exactly IntegrityError (so
+            NotIntegrityError and fake.IntegrityError fail).
+            """
             for sub in ast.walk(node):
                 if not (
                     isinstance(sub, ast.With)
                     and sub.items
                     and isinstance(sub.items[0].context_expr, ast.Call)
-                    and isinstance(
-                        sub.items[0].context_expr.func, ast.Attribute
-                    )
-                    and sub.items[0].context_expr.func.attr == "raises"
                 ):
                     continue
                 call = sub.items[0].context_expr
-                # func must be pytest.raises: Attribute pytest.raises or
-                # bare `raises` imported from pytest with module prefix
-                # check via source (this file imports pytest).
-                func_src = ast.unparse(call.func)
-                matcher = ""
+                func = call.func
+                if isinstance(func, ast.Attribute):
+                    if (
+                        func.attr != "raises"
+                        or not isinstance(func.value, ast.Name)
+                        or func.value.id != "pytest"
+                    ):
+                        continue
+                elif isinstance(func, ast.Name):
+                    if func.id != "raises":
+                        continue
+                else:
+                    continue
+                matcher_ok = False
                 if call.args:
-                    matcher = ast.unparse(call.args[0])
-                yield sub, matcher, func_src.endswith("raises")
+                    matcher = call.args[0]
+                    # Accept a Name IntegrityError or an Attribute chain
+                    # ending in the exact Name IntegrityError.
+                    if isinstance(matcher, ast.Name):
+                        matcher_ok = matcher.id == "IntegrityError"
+                    elif isinstance(matcher, ast.Attribute):
+                        matcher_ok = matcher.attr == "IntegrityError"
+                yield sub, matcher_ok
 
-        def _is_integrity_raises(matcher: str) -> bool:
-            """Exact AST match: the exception argument names IntegrityError."""
-            # unparse of sqlite3.IntegrityError / IntegrityError /
-            # sqlite3.errors.IntegrityError all END with IntegrityError
-            # as a complete dotted name; NotIntegrityError would end
-            # with it too, so require the char before to be non-word.
-            return re.search(
-                r"(?:^|[^A-Za-z0-9_])IntegrityError$", matcher
-            ) is not None
-
-        # INSERT OR variant / quoted / qualified names: normalize the
-        # SQL before matching so INSERT OR IGNORE INTO children,
-        # INSERT INTO [children], INSERT INTO "children" and
-        # INSERT INTO main.children all count as table inserts.
+        # INSERT OR variant / quoted / qualified / schema-qualified
+        # names: normalize the SQL so ANY spelling of an insert into
+        # the table counts as a table insert and requires the raises
+        # block.  Strip quotes/brackets/backticks from identifiers and
+        # drop any schema qualifier, whatever it is.
         def _is_insert_into_table(rendered: str, table: str) -> bool:
-            normalized = re.sub(
-                r"INSERT(\s+OR\s+\w+)?\s+INTO\s+"
-                r"((main|temp)\s*\.\s*)?[`'\"]*(\[)?"
-                + table
-                + r"\b",
-                "TABLE_MATCH",
+            insert_match = re.search(
+                r"\bINSERT(\s+OR\s+\w+)?\s+INTO\s+(.+)",
                 rendered,
-                flags=re.IGNORECASE,
+                flags=re.IGNORECASE | re.DOTALL,
             )
-            return "TABLE_MATCH" in normalized
+            if not insert_match:
+                return False
+            target = insert_match.group(2)
+            # Tokenize the target's leading identifier: strip quotes
+            # and brackets, take the LAST dot-separated segment.
+            identifier = re.split(r"[\s(]", target, maxsplit=1)[0]
+            segments = re.split(r"\.", identifier)
+            last = segments[-1].strip("`'\"[]")
+            return last == table
 
         for insert, rendered in raw_statements:
             if not any_table.search(rendered):
@@ -715,9 +729,8 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
                 inside = any(
                     block.lineno <= insert.lineno
                     and insert.end_lineno <= block.end_lineno
-                    and _is_integrity_raises(matcher)
-                    and func_ok
-                    for block, matcher, func_ok in _raises_blocks()
+                    and matcher_ok
+                    for block, matcher_ok in _raises_blocks()
                 )
                 assert inside, (
                     f"the raw {table} insert in {node.name} must be nested "
