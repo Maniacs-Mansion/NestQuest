@@ -39,11 +39,16 @@ reach storage):
 - ``start_date`` is a strict ISO date; ``end_date`` is optional and,
   when present, on or after ``start_date``.
 
-Month-end policy (documented for Feature 04): a MONTHLY_DAY rule for
-the 31st does NOT fire in a 30-day month, and a YEARLY rule for
-February 29th does NOT fire in a non-leap year — the engine skips
-instead of clamping to month end, because clamping silently moves
-"the 31st" to "the 30th" and double-fires tasks.
+Month-end policy (implemented in :func:`_occurs_monthly_day` and
+documented for Feature 04): a MONTHLY_DAY rule for a day that does not
+exist in a given month — the 31st in April, the 30th or 29th in
+February, February 29th in a non-leap year — fires on the LAST day of
+that month instead of being skipped.  A monthly chore still happens
+every month, pinned to the month's end when its nominal date is
+absent; exactly one day per month matches the rule (nominal day when
+it exists, month end when it does not).  The interval anchors on
+nominal months elapsed from start_date's month, so clamping never
+shifts the cadence.
 """
 from __future__ import annotations
 
