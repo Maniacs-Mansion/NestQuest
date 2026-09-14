@@ -640,18 +640,19 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
             return rendered
 
         # Collect EVERY database SQL entry point (execute, fetch_one,
-        # fetch_all, execute_many): a bypass through fetch_one or
-        # execute_many must be caught the same as execute.
-        raw_statements: list[tuple[ast.Await, str]] = []
+        # fetch_all, execute_many) wherever it appears in the awaited
+        # expression tree: a bypass through fetch_one/execute_many OR a
+        # call wrapped in another awaitable (asyncio.gather, a helper
+        # coroutine, a Task) must be caught the same as a bare await.
+        raw_statements: list[tuple[ast.AST, str]] = []
         for sub in ast.walk(node):
             if (
-                isinstance(sub, ast.Await)
-                and isinstance(sub.value, ast.Call)
-                and isinstance(sub.value.func, ast.Attribute)
-                and sub.value.func.attr
+                isinstance(sub, ast.Call)
+                and isinstance(sub.value if False else sub.func, ast.Attribute)
+                and sub.func.attr
                 in {"execute", "fetch_one", "fetch_all", "execute_many"}
             ):
-                sql_arg = sub.value.args[0] if sub.value.args else None
+                sql_arg = sub.args[0] if sub.args else None
                 rendered = ast.unparse(sql_arg) if sql_arg else ""
                 raw_statements.append((sub, _unquote(rendered)))
 
@@ -785,7 +786,7 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
         # constraint insert — an admin_users insert inside the children
         # function (or vice versa) is a bypass attempt and fails here,
         # as does any second insert of the expected table.
-        for insert, rendered in raw_statements:
+        for stmt_node, rendered in raw_statements:
             if not any_table.search(rendered):
                 continue
             assert _is_insert_into_table(rendered, table), (
@@ -796,8 +797,8 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
             # This is the sanctioned probe: require pytest.raises
             # with an exact IntegrityError matcher around it.
             inside = any(
-                block.lineno <= insert.lineno
-                and insert.end_lineno <= block.end_lineno
+                block.lineno <= stmt_node.lineno
+                and stmt_node.end_lineno <= block.end_lineno
                 and matcher_ok
                 for block, matcher_ok in _raises_blocks()
             )
