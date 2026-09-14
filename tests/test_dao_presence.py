@@ -155,28 +155,63 @@ def test_upsert_two_children_have_distinct_rows(tmp_path) -> None:
 def test_upsert_concurrent_same_child_serializes(tmp_path) -> None:
     """Racing upserts for one child both succeed; exactly one row.
 
-    Without serialization the UNIQUE(child_id) would make the second
-    plain INSERT raise; the serialized ON CONFLICT upserts both land.
+    Deterministic interleaving: a controllable executor gates task A's
+    job AFTER it has acquired the connection lock and begun its
+    transaction, so task B is created while A provably owns the
+    transaction and must queue on the lock.  Both upserts land, and
+    the table holds exactly one row (the ON CONFLICT upsert, not two
+    plain INSERTs, is what avoids a UNIQUE violation).
     """
     async def _main():
-        database = NestQuestDatabase(_make_hass_mock())
+        from unittest.mock import MagicMock
+
+        hass = MagicMock()
+        # Gate exactly ONE job: the first executor job issued after
+        # arming, which is task A's child-existence SELECT inside its
+        # transaction (A holds the connection lock from that moment).
+        # Everything before arming (open, migrations, child create)
+        # and everything after (B's jobs, A's remaining jobs, reads)
+        # pass straight through.
+        armed = {"active": False, "gated_once": False}
+        gate_open = asyncio.Event()
+        a_started = asyncio.Event()
+
+        async def _gated_executor(fn, *args):
+            if armed["active"] and not armed["gated_once"]:
+                armed["gated_once"] = True
+                a_started.set()
+                await gate_open.wait()
+            return fn(*args)
+
+        hass.async_add_executor_job = _gated_executor
+        database = NestQuestDatabase(hass)
         await database.open(tmp_path / "upsert-race.db")
         try:
             await apply_migrations(database)
             children = ChildrenDao(database)
             schedules = PresenceSchedulesDao(database)
             child = await children.create("Ada", NOW)
+
+            armed["active"] = True
             task_a = asyncio.ensure_future(
                 schedules.upsert_by_child(
                     child.id, 2, "2026-09-07", "0,2|1,3"
                 )
             )
-            await asyncio.sleep(0)
+            # Wait until task A's first transactional job is paused
+            # (A holds the connection lock, transaction open), then
+            # schedule task B so it must queue behind A.
+            await a_started.wait()
+            armed["active"] = False
             task_b = asyncio.ensure_future(
                 schedules.upsert_by_child(
                     child.id, 2, "2026-09-14", "1,3|0,2"
                 )
             )
+            await asyncio.sleep(0)
+            # Release A; B's upsert must wait for A's commit and then
+            # land as the ON CONFLICT update path.
+            gate_open.set()
             record_a, record_b = await asyncio.gather(task_a, task_b)
             assert record_a.id == record_b.id
             fetched = await schedules.get_by_child(child.id)
@@ -205,11 +240,17 @@ def test_get_by_child_missing_schedule_returns_none(tmp_path) -> None:
     assert _with_db(tmp_path, "get-none.db")(_body) is None
 
 
-def test_get_by_child_unknown_child_returns_none(tmp_path) -> None:
+def test_get_by_child_unknown_child_raises(tmp_path) -> None:
+    """None must mean ONLY 'no schedule row': an unknown child id is a
+    caller bug, and silently reading a nonexistent child as 'present
+    every day' would be wrong — so get raises instead.
+    """
     async def _body(database, schedules, overrides, children, child):
-        return await schedules.get_by_child(999)
+        with pytest.raises(ValueError, match="does not exist"):
+            await schedules.get_by_child(999)
+        return None
 
-    assert _with_db(tmp_path, "get-unknown.db")(_body) is None
+    _with_db(tmp_path, "get-unknown.db")(_body)
 
 
 def test_delete_removes_and_returns_true_then_false(tmp_path) -> None:
@@ -513,9 +554,11 @@ def test_presence_sql_lives_only_in_dao_module() -> None:
 
 def test_dao_presence_test_file_uses_dao_not_raw_table_sql() -> None:
     """This test module must exercise the DAO, not raw SQL, for these
-    tables — except the upsert row-count probe (COUNT(*) of the whole
-    table, needed to prove exactly-one-row) and the guard functions'
-    own spans.  Scanned as ONE blob so multiline SQL cannot evade it.
+    tables.  Exemptions are EXACT lines, not whole-function spans: the
+    two single-statement COUNT(*) row probes (the only honest way to
+    prove 'exactly one row exists' without a listing method) and the
+    guard functions' own regex spans.  Any other raw SQL added anywhere
+    in this file fails the guard.
     """
     import ast
     import re
@@ -529,16 +572,26 @@ def test_dao_presence_test_file_uses_dao_not_raw_table_sql() -> None:
         "test_presence_sql_lives_only_in_dao_module",
         "test_dao_presence_test_file_uses_dao_not_raw_table_sql",
     }
-    probe_names = {"test_upsert_creates_then_updates_same_row",
-                   "test_upsert_concurrent_same_child_serializes"}
     excluded: set[int] = set()
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if node.name in guard_names or node.name in probe_names:
+        if node.name in guard_names:
             excluded.update(
                 range(node.lineno, (node.end_lineno or node.lineno) + 1)
             )
+            continue
+        # Narrow probe exemption: only the string-literal line holding
+        # the sanctioned COUNT(*) query, not the enclosing function.
+        for sub in ast.walk(node):
+            if (
+                isinstance(sub, ast.Constant)
+                and isinstance(sub.value, str)
+                and sub.value.strip()
+                == "SELECT COUNT(*) FROM presence_schedules"
+                and sub.lineno is not None
+            ):
+                excluded.add(sub.lineno)
 
     remaining = "".join(
         line

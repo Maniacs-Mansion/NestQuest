@@ -134,9 +134,17 @@ class PresenceSchedulesDao:
     ) -> PresenceScheduleRecord | None:
         """Return the child's schedule, or None when the child has none.
 
-        None is meaningful: a child with no schedule row is present
-        every day (Feature 05 guardrail).
+        None is meaningful and UNAMBIGUOUS here: the child exists and
+        has no schedule row, i.e. the child is present every day
+        (Feature 05 guardrail).  An unknown child id raises ValueError
+        instead of returning None, because "nonexistent child" must
+        never be silently read as "present every day".
         """
+        child = await self._database.fetch_one(
+            "SELECT 1 FROM children WHERE id = ?", (child_id,)
+        )
+        if child is None:
+            raise ValueError(f"child {child_id} does not exist")
         row = await self._database.fetch_one(
             f"SELECT {_SCHEDULE_COLUMNS} FROM presence_schedules "
             "WHERE child_id = ?",
