@@ -80,8 +80,17 @@ async def _preflight_existing_file(
     def _probe() -> None:
         # The file-state check and URI construction live inside the
         # executor job: exists/stat/resolve are disk I/O.
-        if not db_path.exists() or db_path.stat().st_size == 0:
+        if not db_path.exists():
             return
+        # A zero-byte file is neither missing nor a valid database: it
+        # is a corrupt (truncated-to-nothing) existing file, likely an
+        # interrupted first write.  The leave-untouched contract applies
+        # to it too: refuse rather than silently initialize over it.
+        if db_path.stat().st_size == 0:
+            raise sqlite3.DatabaseError(
+                "existing database file is empty (zero bytes): file is "
+                "not a database"
+            )
         # Properly escape the path: '#'/'?'/'%' in a directory or file
         # name would otherwise be parsed as URI fragments/parameters/
         # escapes.  immutable=1: SQLite guarantees no writes and no

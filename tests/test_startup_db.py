@@ -124,6 +124,24 @@ def test_missing_file_opens_fresh(tmp_path) -> None:
         _run(database.close())
 
 
+def test_zero_byte_existing_file_is_corrupt_and_untouched(tmp_path) -> None:
+    """A zero-byte file is neither missing nor valid: it is corrupt.
+
+    The leave-untouched contract applies — startup refuses (retryable)
+    rather than silently initializing over whatever interrupted write
+    left the empty file, and the file stays exactly zero bytes.
+    """
+    db_path = tmp_path / "nestquest.db"
+    db_path.write_bytes(b"")
+    with pytest.raises(ConfigEntryNotReady) as excinfo:
+        _run(_async_open_database(_make_hass_mock(), db_path))
+    assert db_path.stat().st_size == 0
+    assert isinstance(excinfo.value.__cause__, sqlite3.DatabaseError)
+    # No sidecars appeared from the refusal path.
+    assert not (tmp_path / "nestquest.db-wal").exists()
+    assert not (tmp_path / "nestquest.db-shm").exists()
+
+
 def test_valid_file_opens_and_migrations_noop(tmp_path) -> None:
     db_path = tmp_path / "nestquest.db"
     _valid_database(db_path)
