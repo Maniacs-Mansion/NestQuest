@@ -105,8 +105,19 @@ def _validate_date(value: str, field_name: str) -> None:
 
 
 def _validate_weekday_set(weekday_set) -> frozenset[int]:
-    """Return a normalized frozenset or raise with a clear message."""
+    """Return a normalized frozenset or raise with a clear message.
+
+    Sequence entries are validated BEFORE set() coercion: a list like
+    [0, False] must not collapse the boolean into 0, and unhashable
+    entries must raise RuleValidationError, never a raw TypeError.
+    """
     if isinstance(weekday_set, (list, tuple)):
+        for entry in weekday_set:
+            if isinstance(entry, bool) or not isinstance(entry, int):
+                raise RuleValidationError(
+                    f"weekday_set entries must be plain integers, got "
+                    f"{entry!r}"
+                )
         weekday_set = set(weekday_set)
     if not isinstance(weekday_set, (set, frozenset)):
         raise RuleValidationError(
@@ -132,7 +143,9 @@ def _validate_weekday_set(weekday_set) -> frozenset[int]:
 
 
 def _is_plain_int(value) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
+    """True only for real ints: bool excluded AND int subclasses too
+    (an unhashable int subclass would break the frozen-hashable model)."""
+    return type(value) is int
 
 
 def _validate_monthly_weekday(nth_weekday, weekday) -> None:
@@ -182,40 +195,19 @@ class ScheduleRule:
         # Normalize a string rule_type into the enum; anything else
         # that is not already a RuleType is rejected.
         if isinstance(self.rule_type, str):
-            normalized = self.rule_type.strip().lower()
-            # Accept the model name (monthly_day) or the storage value
-            # ('monthly'/'custom'), the latter resolved by the populated
-            # fields per the DAO mapping.
+            # EXACT model names only: no whitespace stripping, no storage
+            # aliases.  The DAO maps storage strings to model fields when
+            # reading rows; the model boundary stays unambiguous.
             candidates = {rt.name.lower(): rt for rt in RuleType}
-            if normalized in candidates:
-                object.__setattr__(self, "rule_type", candidates[normalized])
+            if self.rule_type in candidates:
+                object.__setattr__(
+                    self, "rule_type", candidates[self.rule_type]
+                )
             else:
-                by_storage = {
-                    rt.storage_value: rt for rt in RuleType
-                }
-                resolved = None
-                if normalized in by_storage:
-                    candidate = by_storage[normalized]
-                    # 'monthly' is ambiguous; resolve by fields.
-                    if normalized == "monthly":
-                        if self.nth_weekday is not None:
-                            resolved = RuleType.MONTHLY_WEEKDAY
-                        else:
-                            resolved = RuleType.MONTHLY_DAY
-                    elif normalized == "custom":
-                        resolved = RuleType.CUSTOM_DAYS
-                elif normalized == "custom" and self.weekday_set is not None:
-                    resolved = RuleType.CUSTOM_DAYS
-                if resolved is None:
-                    resolved = candidates.get(self.rule_type)
-                if resolved is not None:
-                    object.__setattr__(self, "rule_type", resolved)
-                else:
-                    raise RuleValidationError(
-                        f"rule_type must be one of "
-                        f"{sorted(rt.name.lower() for rt in RuleType)} "
-                        f"or a storage value, got {self.rule_type!r}"
-                    )
+                raise RuleValidationError(
+                    f"rule_type must be a RuleType or one of "
+                    f"{sorted(candidates)}, got {self.rule_type!r}"
+                )
         if not isinstance(self.rule_type, RuleType):
             raise RuleValidationError(
                 f"rule_type must be a RuleType or one of its string "
@@ -365,7 +357,9 @@ class ScheduleRule:
         }
         unknown = [key for key in data if key not in allowed]
         if unknown:
-            raise RuleValidationError(f"unknown rule fields: {sorted(unknown)}")
+            raise RuleValidationError(
+                f"unknown rule fields: {sorted(unknown, key=repr)}"
+            )
         if "rule_type" not in data:
             raise RuleValidationError("missing required rule field: rule_type")
         weekday_set = data.get("weekday_set")

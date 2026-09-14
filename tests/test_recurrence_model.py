@@ -297,19 +297,26 @@ def test_recurrence_module_imports_only_stdlib() -> None:
         elif isinstance(node, ast.ImportFrom):
             module = (node.module or "").lower()
             level = node.level  # 1+ means relative import
-            # Relative imports into the integration package (db/dao
-            # clients) are forbidden; schema.py is also off-limits.
+            # 'from . import db' has module=None and the name in the
+            # aliases: check BOTH the module and every imported name.
+            imported_names = [alias.name for alias in node.names]
+            forbidden_targets = {
+                "db", "schema", "dao_children", "dao_rules",
+                "dao_presence", "dao_instances", "migrations", "store",
+            }
             if level:
-                assert "db" not in module.split(".") and module not in {
-                    "db",
-                    "schema",
-                    "dao_children",
-                    "dao_rules",
-                    "dao_presence",
-                    "dao_instances",
-                    "migrations",
-                    "store",
-                }, f"recurrence.py must not import from .{module}"
+                for name in imported_names:
+                    assert name not in forbidden_targets, (
+                        f"recurrence.py must not import {name!r} from a "
+                        "relative import"
+                    )
+            if module:
+                assert module not in forbidden_targets, (
+                    f"recurrence.py must not import from .{module}"
+                )
+                assert "db" not in module.split("."), (
+                    f"recurrence.py must not import from {module}"
+                )
             assert "homeassistant" not in module, (
                 f"recurrence.py must not import from {module}"
             )
@@ -409,3 +416,50 @@ def test_rule_type_is_a_dataclass() -> None:
     import dataclasses
 
     assert dataclasses.is_dataclass(ScheduleRule)
+
+def test_direct_list_with_bool_weekday_rejected(tmp_path) -> None:
+    """Direct construction with a list: entries validated pre-coercion."""
+    with pytest.raises(RuleValidationError, match="plain integers"):
+        ScheduleRule(
+            rule_type=RuleType.WEEKLY, weekday_set=[0, False],
+            start_date="2026-09-01",
+        )
+
+
+def test_unhashable_list_item_leads_to_clear_error(tmp_path) -> None:
+    """Unhashable entries raise RuleValidationError, not TypeError."""
+    with pytest.raises(RuleValidationError):
+        ScheduleRule(
+            rule_type=RuleType.WEEKLY, weekday_set=[[0]],
+            start_date="2026-09-01",
+        )
+
+
+def test_from_dict_mixed_type_unknown_keys_raise_validation_error(
+    tmp_path,
+) -> None:
+    """sorted() over mixed key types must not leak TypeError."""
+    with pytest.raises(RuleValidationError, match="unknown rule fields"):
+        ScheduleRule.from_dict({"rule_type": "daily", 42: "value"})
+
+
+def test_storage_aliases_and_whitespace_are_not_model_names(tmp_path) -> None:
+    """The model boundary is exact names only: storage strings, padded
+    and case variants are all rejected."""
+    for bad in ("monthly", "custom", " DAILY ", "daily ", "DAILY"):
+        with pytest.raises(RuleValidationError):
+            ScheduleRule(rule_type=bad, start_date="2026-09-01")
+
+
+def test_unhashable_int_subclass_interval_rejected() -> None:
+    """An int subclass with __hash__ = None must not construct."""
+
+    class UnhashableInt(int):
+        __hash__ = None
+
+    with pytest.raises(RuleValidationError):
+        ScheduleRule(
+            rule_type=RuleType.DAILY,
+            interval=UnhashableInt(1),
+            start_date="2026-09-01",
+        )
