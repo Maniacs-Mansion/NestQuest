@@ -639,15 +639,17 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
                 return rendered[1:-1]
             return rendered
 
-        # Collect every execute(...) statement and every raises-block
-        # with its full AST shape.
+        # Collect EVERY database SQL entry point (execute, fetch_one,
+        # fetch_all, execute_many): a bypass through fetch_one or
+        # execute_many must be caught the same as execute.
         raw_statements: list[tuple[ast.Await, str]] = []
         for sub in ast.walk(node):
             if (
                 isinstance(sub, ast.Await)
                 and isinstance(sub.value, ast.Call)
                 and isinstance(sub.value.func, ast.Attribute)
-                and sub.value.func.attr == "execute"
+                and sub.value.func.attr
+                in {"execute", "fetch_one", "fetch_all", "execute_many"}
             ):
                 sql_arg = sub.value.args[0] if sub.value.args else None
                 rendered = ast.unparse(sql_arg) if sql_arg else ""
@@ -663,15 +665,36 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
             AST chain whose final segment is exactly IntegrityError (so
             NotIntegrityError and fake.IntegrityError fail).
             """
-            # Names this file imports from pytest as `raises` (e.g.
-            # `from pytest import raises`): a bare Name is only trusted
-            # when bound that way.  `from x import raises` for x != pytest
-            # is rejected.
-            imported_as_raises = re.search(
-                r"from\s+pytest\s+import\s+.*\braises\b",
-                text,
-                re.IGNORECASE,
-            )
+            # Names bound to pytest's raises: parse the FILE's actual
+            # ImportFrom nodes.  A bare Name('raises') is trusted only
+            # when an alias binds it from the pytest module (with or
+            # without an asname), and only when no other import or
+            # assignment shadows it anywhere in this file.
+            raises_bindings: set[str] = set()
+            for file_node in ast.walk(tree):
+                if (
+                    isinstance(file_node, ast.ImportFrom)
+                    and file_node.module == "pytest"
+                ):
+                    for alias in file_node.names:
+                        if alias.name == "raises":
+                            raises_bindings.add(
+                                alias.asname or alias.name
+                            )
+            for file_node in ast.walk(tree):
+                # Any competing binding of the same names fails closed.
+                if isinstance(file_node, ast.ImportFrom):
+                    for alias in file_node.names:
+                        bound = alias.asname or alias.name
+                        if (
+                            bound in {"raises", "pytest"}
+                            and file_node.module != "pytest"
+                        ):
+                            raise AssertionError(
+                                f"shadowed import of {bound!r} from "
+                                f"{file_node.module!r} defeats the "
+                                "pytest.raises probe validation"
+                            )
             for sub in ast.walk(node):
                 if not (
                     isinstance(sub, ast.With)
@@ -689,7 +712,7 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
                     ):
                         continue
                 elif isinstance(func, ast.Name):
-                    if func.id != "raises" or not imported_as_raises:
+                    if func.id not in raises_bindings:
                         continue
                 else:
                     continue
