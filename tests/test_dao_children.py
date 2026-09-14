@@ -492,7 +492,7 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
     offenders: list[str] = []
     for root in scan_roots:
         for py in sorted(root.rglob("*.py")):
-            relative = str(py.relative_to(repo_root))
+            relative = py.relative_to(repo_root).as_posix()
             if relative in allowed:
                 continue
             if sql_pattern.search(py.read_text()):
@@ -543,7 +543,7 @@ def test_dao_test_file_uses_dao_not_raw_table_sql() -> None:
         if number not in excluded
     )
     sql_pattern = re.compile(
-        r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE\s+SET|"
+        r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|"
         r"DELETE\s+FROM|FROM|JOIN)\s+['\"]*"
         r"(children|admin_users)\b",
         re.IGNORECASE,
