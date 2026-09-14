@@ -100,11 +100,14 @@ def test_executor_helper_creates_directory(tmp_path) -> None:
     assert nested.is_dir()
 
 
-def test_no_sqlite3_import_in_package() -> None:
+def test_no_sqlite3_import_outside_db_module() -> None:
+    """sqlite3 is banned package-wide except db.py, the connection wrapper."""
     pkg_dir = Path(store.__file__).parent
     py_files = list(pkg_dir.glob("*.py"))
     assert py_files
     for py_file in py_files:
+        if py_file.name == "db.py":
+            continue
         tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

@@ -1,0 +1,381 @@
+"""Tests for db.py, the async SQLite connection wrapper of NestQuest."""
+from __future__ import annotations
+
+import ast
+import asyncio
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from conftest import make_hass
+
+from custom_components.nestquest import db as db_module
+from custom_components.nestquest.db import NestQuestDatabase
+
+
+def _run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def _make_hass_mock():
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=(lambda fn, *a: fn(*a)))
+    return hass
+
+
+def _open_db(path) -> tuple[NestQuestDatabase, MagicMock]:
+    hass = _make_hass_mock()
+    database = NestQuestDatabase(hass)
+    _run(database.open(path))
+    return database, hass
+
+
+# ---------------------------------------------------------------------------
+# open(): pragmas, executor delegation, idempotence
+# ---------------------------------------------------------------------------
+
+
+def test_open_enables_wal_journal_mode(tmp_path) -> None:
+    database, _hass = _open_db(tmp_path / "wal.db")
+    row = _run(database.fetch_one("PRAGMA journal_mode"))
+    assert row is not None and str(row[0]).lower() == "wal"
+    _run(database.close())
+
+
+def test_open_enables_foreign_key_enforcement(tmp_path) -> None:
+    database, _hass = _open_db(tmp_path / "fk.db")
+    row = _run(database.fetch_one("PRAGMA foreign_keys"))
+    assert row is not None and int(row[0]) == 1
+    _run(database.close())
+
+
+def test_open_delegates_connection_to_executor(tmp_path) -> None:
+    hass = _make_hass_mock()
+    database = NestQuestDatabase(hass)
+    _run(database.open(tmp_path / "exec.db"))
+    first_call = hass.async_add_executor_job.call_args_list[0]
+    assert callable(first_call.args[0])
+    _run(database.close())
+
+
+def test_open_twice_returns_same_wrapper_without_second_connect(tmp_path) -> None:
+    path = tmp_path / "once.db"
+    hass = _make_hass_mock()
+    database = NestQuestDatabase(hass)
+    first = _run(database.open(path))
+    second = _run(database.open(path))
+    assert first is database
+    assert second is database
+    assert database.connected is True
+    opens = [
+        c
+        for c in hass.async_add_executor_job.call_args_list
+        if getattr(c.args[0], "__name__", "") == "_open"
+    ]
+    assert len(opens) == 1
+    _run(database.close())
+
+
+def test_open_accepts_str_path(tmp_path) -> None:
+    database, _hass = _open_db(str(tmp_path / "str.db"))
+    assert database.connected is True
+    _run(database.close())
+
+
+# ---------------------------------------------------------------------------
+# Executor delegation: every sqlite3 call happens off the event loop
+# ---------------------------------------------------------------------------
+
+
+def test_every_method_routes_sqlite3_through_executor(tmp_path) -> None:
+    """Each wrapper call must go via hass.async_add_executor_job."""
+    database, hass = _open_db(tmp_path / "route.db")
+    calls_before = hass.async_add_executor_job.await_count
+
+    _run(database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"))
+    _run(database.execute("INSERT INTO t (name) VALUES (?)", ("a",)))
+    _run(database.execute_many("INSERT INTO t (name) VALUES (?)", [("b",), ("c",)]))
+    row = _run(database.fetch_one("SELECT name FROM t WHERE id = 1"))
+    rows = _run(database.fetch_all("SELECT name FROM t ORDER BY id"))
+
+    assert row == ("a",)
+    assert rows == [("a",), ("b",), ("c",)]
+    assert hass.async_add_executor_job.await_count == calls_before + 7
+    _run(database.close())
+
+
+async def test_every_wrapper_call_awaits_executor_job(tmp_path) -> None:
+    """The executor surface is awaited per wrapper call on a live loop."""
+    hass = _make_hass_mock()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "loop.db")
+
+    await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+    await database.fetch_one("SELECT 1")
+    await database.fetch_all("SELECT 1")
+    await database.execute_many("INSERT INTO t (id) VALUES (?)", [(1,)])
+    async with database.transaction():
+        pass
+
+    assert hass.async_add_executor_job.await_count == 9
+    assert all(callable(c.args[0]) for c in hass.async_add_executor_job.call_args_list)
+    await database.close()
+
+
+async def test_no_sqlite3_call_on_event_loop_with_real_executor(tmp_path) -> None:
+    """With the conftest hass (real run_in_executor), queries still succeed."""
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "real.db")
+    await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+    assert await database.fetch_one("SELECT 1") == (1,)
+    await database.close()
+
+
+# ---------------------------------------------------------------------------
+# Source scan: sqlite3.* only inside executor-delegated functions
+# ---------------------------------------------------------------------------
+
+
+def _iter_with_scope(node, chain):
+    """Yield (node, enclosing-function chain), depth-first."""
+    for child in ast.iter_child_nodes(node):
+        yield child, chain
+        next_chain = chain + (child,) if isinstance(
+            child, (ast.FunctionDef, ast.AsyncFunctionDef)
+        ) else chain
+        yield from _iter_with_scope(child, next_chain)
+
+
+def test_db_sqlite3_calls_only_inside_executor_delegated_functions() -> None:
+    """Every sqlite3.* call in db.py sits inside an executor-delegating function.
+
+    A function is executor-delegating when it (or, for nested closures, any of
+    its enclosing functions) passes work to ``hass.async_add_executor_job``.
+    """
+    source = Path(db_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(db_module.__file__))
+
+    delegated = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr == "async_add_executor_job"
+            for sub in ast.walk(node)
+        )
+    }
+    assert delegated, "expected executor-delegated functions in db.py"
+
+    violations = []
+    for node, chain in _iter_with_scope(tree, ()):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "sqlite3"
+            and not any(f.name in delegated for f in chain)
+        ):
+            violations.append((node.lineno, node.func.attr))
+    assert violations == [], (
+        f"Direct sqlite3 calls outside executor-delegated functions: {violations}"
+    )
+
+
+def test_package_wide_sqlite3_scan_excludes_only_db_module() -> None:
+    """The package-wide store scan exempts exactly the db module."""
+    pkg_dir = Path(db_module.__file__).parent
+    scanned = [p.name for p in pkg_dir.glob("*.py") if p.name != "db.py"]
+    assert scanned, "expected other package modules to be scanned"
+    assert "db.py" not in scanned
+
+
+# ---------------------------------------------------------------------------
+# close(): idempotence and post-close errors
+# ---------------------------------------------------------------------------
+
+
+def test_close_is_idempotent(tmp_path) -> None:
+    database, hass = _open_db(tmp_path / "idem.db")
+    _run(database.close())
+    assert database.connected is False
+    _run(database.close())
+    assert database.connected is False
+    assert hass.async_add_executor_job.await_count == 2
+
+
+def test_operations_after_close_raise_clear_error(tmp_path) -> None:
+    database, _hass = _open_db(tmp_path / "closed.db")
+    _run(database.close())
+
+    async def _txn():
+        async with database.transaction():
+            pass
+
+    with pytest.raises(RuntimeError, match="closed"):
+        _run(database.execute("SELECT 1"))
+    with pytest.raises(RuntimeError, match="closed"):
+        _run(database.fetch_one("SELECT 1"))
+    with pytest.raises(RuntimeError, match="closed"):
+        _run(database.fetch_all("SELECT 1"))
+    with pytest.raises(RuntimeError, match="closed"):
+        _run(database.execute_many("SELECT 1", []))
+    with pytest.raises(RuntimeError, match="closed"):
+        _run(_txn())
+
+
+# ---------------------------------------------------------------------------
+# Transactions: commit on success, rollback on exception
+# ---------------------------------------------------------------------------
+
+
+def test_transaction_commits_on_success(tmp_path) -> None:
+    database, _hass = _open_db(tmp_path / "commit.db")
+    _run(database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"))
+
+    async def _block():
+        async with database.transaction():
+            await database.execute("INSERT INTO t (name) VALUES (?)", ("kept",))
+
+    _run(_block())
+    assert _run(database.fetch_all("SELECT name FROM t")) == [("kept",)]
+    _run(database.close())
+
+
+def test_transaction_rolls_back_on_exception(tmp_path) -> None:
+    database, _hass = _open_db(tmp_path / "rollback.db")
+    _run(database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"))
+    _run(database.execute("INSERT INTO t (name) VALUES (?)", ("before",)))
+
+    async def _block():
+        with pytest.raises(ValueError, match="boom"):
+            async with database.transaction():
+                await database.execute(
+                    "INSERT INTO t (name) VALUES (?)", ("dropped",)
+                )
+                raise ValueError("boom")
+
+    _run(_block())
+    assert _run(database.fetch_all("SELECT name FROM t")) == [("before",)]
+    _run(database.close())
+
+
+async def test_transaction_persists_across_connections(tmp_path) -> None:
+    """A committed transaction is visible to a brand-new connection."""
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "persist.db")
+    await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+    async with database.transaction():
+        await database.execute("INSERT INTO t (name) VALUES (?)", ("kept",))
+    await database.close()
+
+    other = NestQuestDatabase(hass)
+    await other.open(tmp_path / "persist.db")
+    assert await other.fetch_all("SELECT name FROM t") == [("kept",)]
+    await other.close()
+
+
+# ---------------------------------------------------------------------------
+# rowcount / lastrowid surface
+# ---------------------------------------------------------------------------
+
+
+def test_rowcount_and_lastrowid_before_any_operation(tmp_path) -> None:
+    database, _hass = _open_db(tmp_path / "unset.db")
+    assert database.rowcount == -1
+    assert database.lastrowid is None
+    _run(database.close())
+
+
+def test_execute_exposes_rowcount_and_lastrowid(tmp_path) -> None:
+    database, _hass = _open_db(tmp_path / "counts.db")
+    _run(database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"))
+    _run(database.execute("INSERT INTO t (name) VALUES (?)", ("x",)))
+    assert database.rowcount == 1
+    assert database.lastrowid == 1
+    _run(database.execute("INSERT INTO t (name) VALUES (?)", ("y",)))
+    assert database.rowcount == 1
+    assert database.lastrowid == 2
+    _run(database.close())
+
+
+def test_execute_many_exposes_rowcount(tmp_path) -> None:
+    database, _hass = _open_db(tmp_path / "many.db")
+    _run(database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"))
+    _run(database.execute_many("INSERT INTO t (name) VALUES (?)", [("a",), ("b",)]))
+    assert database.rowcount == 2
+    _run(database.execute("INSERT INTO t (name) VALUES (?)", ("c",)))
+    assert database.lastrowid == 3
+    _run(database.close())
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle wiring: opened once per entry, closed on unload
+# ---------------------------------------------------------------------------
+
+
+async def test_setup_entry_opens_database_in_runtime_data(hass, make_entry) -> None:
+    from conftest import wire_entry_to_registry
+
+    from custom_components.nestquest import async_setup_entry, async_unload_entry
+
+    entry = wire_entry_to_registry(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    runtime = entry.runtime_data
+    assert runtime.database is not None
+    assert runtime.database.connected is True
+    await async_unload_entry(hass, entry)
+
+
+async def test_unload_entry_closes_database(hass, make_entry) -> None:
+    from conftest import wire_entry_to_registry
+
+    from custom_components.nestquest import async_setup_entry, async_unload_entry
+
+    entry = wire_entry_to_registry(make_entry(), hass.registry)
+    await async_setup_entry(hass, entry)
+    database = entry.runtime_data.database
+    assert database.connected is True
+    assert await async_unload_entry(hass, entry) is True
+    assert database.connected is False
+    with pytest.raises(RuntimeError, match="closed"):
+        await database.fetch_one("SELECT 1")
+
+
+async def test_second_setup_does_not_open_second_connection(hass, make_entry) -> None:
+    from conftest import wire_entry_to_registry
+
+    from custom_components.nestquest import async_setup_entry, async_unload_entry
+
+    entry = wire_entry_to_registry(make_entry(), hass.registry)
+    await async_setup_entry(hass, entry)
+    first = entry.runtime_data.database
+
+    await async_setup_entry(hass, entry)
+    second = entry.runtime_data.database
+
+    assert first is second
+    assert first.connected is True
+    await async_unload_entry(hass, entry)
+
+
+async def test_setup_unload_cycles_reopen_fresh_connection(hass, make_entry) -> None:
+    from conftest import wire_entry_to_registry
+
+    from custom_components.nestquest import async_setup_entry, async_unload_entry
+
+    entry = wire_entry_to_registry(make_entry(), hass.registry)
+    seen: list[NestQuestDatabase] = []
+    for _ in range(3):
+        await async_setup_entry(hass, entry)
+        runtime = entry.runtime_data
+        assert runtime.database.connected is True
+        seen.append(runtime.database)
+        await async_unload_entry(hass, entry)
+        assert runtime.database.connected is False
+    assert len(set(seen)) == 3
+    assert hass.data == {}

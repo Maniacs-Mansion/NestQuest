@@ -25,6 +25,9 @@ import asyncio
 import importlib.util
 import inspect
 import sys
+import tempfile
+import weakref
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -218,13 +221,35 @@ def wire_entry_to_registry(entry, registry: ListenerRegistry):
     return entry
 
 
+class _HassNamespace(SimpleNamespace):
+    """SimpleNamespace subclass so the hass stub can hold weak references."""
+
+
 def make_hass() -> tuple:
     """Create a hass stub plus its listener registry, mirroring HA's shape."""
-    hass = SimpleNamespace(
+    config_dir = Path(tempfile.mkdtemp(prefix="nestquest-hass-"))
+    hass = _HassNamespace(
         data={},
         config=MagicMock(),
         config_entries=SimpleNamespace(async_reload=None),
     )
+
+    def _cleanup_config_dir():
+        import shutil
+
+        shutil.rmtree(config_dir, ignore_errors=True)
+
+    weakref.finalize(hass, _cleanup_config_dir)
+    hass.config.path = MagicMock(
+        side_effect=lambda name: str(config_dir / (name or "config"))
+    )
+
+    def _run_executor_job(fn, *args, **kwargs):
+        return asyncio.get_running_loop().run_in_executor(
+            None, lambda: fn(*args, **kwargs)
+        )
+
+    hass.async_add_executor_job = _run_executor_job
     registry = ListenerRegistry(hass)
 
     async def _async_reload(entry_id: str) -> None:
