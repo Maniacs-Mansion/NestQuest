@@ -666,38 +666,41 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
             NotIntegrityError and fake.IntegrityError fail).
             """
             # Names bound to pytest's raises: parse the FILE's actual
-            # Import nodes.  A bare Name('raises') is trusted only when
-            # an alias binds it from the pytest module; ANY other import
-            # (Import or ImportFrom) binding 'raises', 'pytest', or any
-            # raises alias from a non-pytest module fails closed, so a
-            # spoofed module or shadowed alias cannot defeat the check.
-            raises_bindings: set[str] = set()
+            # Import nodes in TWO passes so order cannot matter — pass
+            # one collects every binding pytest's raises gets (whatever
+            # alias), pass two rejects ANY competing binding of those
+            # names (or of 'pytest' itself) from a non-pytest import,
+            # wherever it appears.  A spoof imported BEFORE the genuine
+            # binding therefore still fails.
+            pytest_raises_aliases: set[str] = set()
+            for file_node in ast.walk(tree):
+                if (
+                    isinstance(file_node, ast.ImportFrom)
+                    and file_node.module == "pytest"
+                ):
+                    for alias in file_node.names:
+                        if alias.name == "raises":
+                            pytest_raises_aliases.add(
+                                alias.asname or alias.name
+                            )
+            raises_bindings: set[str] = set(pytest_raises_aliases)
             for file_node in ast.walk(tree):
                 if isinstance(file_node, ast.ImportFrom):
                     if file_node.module == "pytest":
-                        for alias in file_node.names:
-                            if alias.name == "raises":
-                                raises_bindings.add(
-                                    alias.asname or alias.name
-                                )
-                    # Any ImportFrom binding the guarded names from a
-                    # non-pytest module fails closed.
+                        continue
                     for alias in file_node.names:
                         bound = alias.asname or alias.name
-                        if (
-                            bound in raises_bindings | {"pytest"}
-                            and file_node.module != "pytest"
-                        ):
+                        if bound in raises_bindings | {"pytest"}:
                             raise AssertionError(
                                 f"shadowed import of {bound!r} from "
                                 f"{file_node.module!r} defeats the "
                                 "pytest.raises probe validation"
                             )
                 elif isinstance(file_node, ast.Import):
-                    # import fake_module as pytest (or as anything the
-                    # raises machinery trusts) fails closed.  A plain
-                    # `import pytest` (alias.name == 'pytest', no asname)
-                    # is the genuine module binding and is allowed.
+                    # import fake_module as pytest (or as any raises
+                    # alias) fails closed.  A plain `import pytest`
+                    # (alias.name == 'pytest', no asname) is the genuine
+                    # module binding and is allowed.
                     for alias in file_node.names:
                         bound = alias.asname or alias.name
                         genuine_pytest = (
