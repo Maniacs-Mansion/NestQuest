@@ -166,19 +166,49 @@ def test_corrupt_file_raises_not_ready_and_leaves_file_untouched(
     ), "the error log must name the corrupt path"
 
 
-def test_corrupt_file_does_not_raise_database_error_directly(tmp_path) -> None:
+def test_corrupt_file_raises_not_ready_never_raw_error(tmp_path) -> None:
     """The corrupt case must surface as ConfigEntryNotReady, not crash
-    setup with a raw sqlite3.DatabaseError."""
+    setup with a raw sqlite3.DatabaseError — and it must ALWAYS raise
+    (returning normally would mean corruption was silently accepted)."""
     db_path = tmp_path / "nestquest.db"
     _truncated_database(db_path)
-    try:
+    with pytest.raises(ConfigEntryNotReady) as excinfo:
         _run(_async_open_database(_make_hass_mock(), db_path))
-    except ConfigEntryNotReady:
-        pass
-    except sqlite3.DatabaseError as err:
-        raise AssertionError(
-            f"corruption leaked as raw {type(err).__name__}: {err}"
-        ) from err
+    assert isinstance(excinfo.value.__cause__, sqlite3.DatabaseError)
+
+
+def test_migration_stage_corruption_leaves_db_and_sidecars_untouched(
+    tmp_path,
+) -> None:
+    """A valid header with a corrupt LATER page is detected during
+    migrations, AFTER the read-write open has switched the file to WAL.
+    The leave-untouched guarantee must still hold byte-for-byte for
+    the main file AND no WAL/SHM sidecars may be left behind for the
+    owner to clean up.
+    """
+    db_path = tmp_path / "nestquest.db"
+    _valid_database(db_path)
+    data = bytearray(db_path.read_bytes())
+    # Corrupt a page well past the 100-byte header (offset 4096, the
+    # second page region): the header itself stays valid, so the
+    # read-write open succeeds and only migrations discover damage.
+    assert len(data) > 4200
+    for offset in range(4096, 4128):
+        data[offset] = 0xFF
+    db_path.write_bytes(bytes(data))
+    corrupt_bytes = db_path.read_bytes()
+    digest = hashlib.sha256(corrupt_bytes).hexdigest()
+
+    with pytest.raises(ConfigEntryNotReady) as excinfo:
+        _run(_async_open_database(_make_hass_mock(), db_path))
+    assert isinstance(excinfo.value.__cause__, sqlite3.DatabaseError)
+
+    # The main file is byte-identical to the corrupt state we handed in.
+    assert hashlib.sha256(db_path.read_bytes()).hexdigest() == digest
+    # No WAL/SHM sidecars left behind (WAL mode was never persisted,
+    # or they were cleaned up on close).
+    assert not (tmp_path / "nestquest.db-wal").exists()
+    assert not (tmp_path / "nestquest.db-shm").exists()
 
 
 def test_open_failure_closes_connection_when_opened(

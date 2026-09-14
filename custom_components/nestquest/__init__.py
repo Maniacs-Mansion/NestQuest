@@ -25,21 +25,67 @@ _LOGGER = LOGGER
 #: "encrypted or malformed" spelling (3.41+) maps to the same failure.
 _CORRUPTION_MARKERS = (
     "file is not a database",
+    "database disk image is malformed",
     "encrypted or malformed",
+    "is not a database",
 )
+
+#: Primary sqlite error codes that mean "the file is corrupt" (SQLite
+#: result codes, https://www.sqlite.org/c3ref/c_abort.html).  Extended
+#: codes carry the primary code in their low byte, so the match is on
+#: errcode & 0xff.
+_CORRUPT_PRIMARY_CODES = frozenset({11, 26})  # SQLITE_CORRUPT, SQLITE_NOTADB
 
 
 def _is_corruption_error(error: BaseException) -> bool:
     """Return True when ``error`` indicates a corrupt database file.
 
-    Matching happens on the message: sqlite3.DatabaseError is the base
-    of several non-corruption errors too (e.g. OperationalError), and
-    only the corruption spellings warrant refusing to open.
+    Classification order: sqlite_errorcode (Python 3.11+) is primary
+    and locale-independent — SQLITE_CORRUPT and SQLITE_NOTADB, matched
+    on the primary byte so extended codes (SQLITE_CORRUPT_VTAB etc.)
+    classify correctly too.  Message matching is the fallback for
+    older Pythons: the corruption spellings are the documented English
+    texts; a non-English locale could evade them, but the code check
+    already covers every locale on supported Pythons.
     """
+    if not isinstance(error, sqlite3.DatabaseError):
+        return False
+    errorcode = getattr(error, "sqlite_errorcode", None)
+    if errorcode is not None and (errorcode & 0xFF) in _CORRUPT_PRIMARY_CODES:
+        return True
     message = str(error).lower()
-    return isinstance(error, sqlite3.DatabaseError) and any(
-        marker in message for marker in _CORRUPTION_MARKERS
-    )
+    return any(marker in message for marker in _CORRUPTION_MARKERS)
+
+
+def _preflight_existing_file(db_path: Path) -> None:
+    """Detect corruption in an EXISTING file before it is opened read-write.
+
+    Opening read-write persists WAL mode and can create -wal/-shm
+    sidecars, which would modify a corrupt file before detection —
+    breaking the leave-untouched guarantee.  This preflight reads the
+    file's header with a READ-ONLY connection (mode=ro URI): a corrupt
+    header raises there, before anything is written.  Missing files
+    skip the preflight (they are created fresh by the real open).
+    """
+    if not db_path.exists() or db_path.stat().st_size == 0:
+        return
+    uri = f"file:{db_path}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+        try:
+            conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as err:
+        if _is_corruption_error(err):
+            raise
+        # Read-only probing can fail for non-corruption reasons (e.g.
+        # a transient lock); the real open path will surface those.
+        _LOGGER.debug(
+            "NestQuest preflight read of %s failed (non-corruption): %s",
+            db_path,
+            err,
+        )
 
 async def _async_open_database(
     hass: HomeAssistant, db_path: Path
@@ -58,11 +104,14 @@ async def _async_open_database(
       existing database file.
 
     Corruption can surface at EITHER stage: a truncated header fails
-    inside open() (the WAL-mode PRAGMA reads the header), while
-    damaged pages fail later, inside migrations.  Both are classified
-    the same way.
+    in the read-only preflight (before the file is ever opened
+    read-write), while damaged later pages fail during migrations —
+    the preflight guarantees no WAL sidecar or header write happens
+    on a corrupt file before it is detected.  Both are classified the
+    same way.
     """
     try:
+        _preflight_existing_file(db_path)
         database = await NestQuestDatabase(hass).open(db_path)
     except asyncio.CancelledError:
         raise
@@ -145,8 +194,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     existing = hass.data[DOMAIN].get(entry.entry_id)
     if existing is not None:
         db = getattr(existing, "database", None)
-        if db is None:
-            db = await NestQuestDatabase(hass).open(await async_get_db_path(hass))
+        if db is None or not db.connected:
+            # Reopen through the SAME safety path as first setup: a
+            # record without a live connection (a previous setup's
+            # close-on-failure, or a hand-replaced file) must get the
+            # missing/valid/corrupt classification too, never a raw
+            # sqlite3 error and never skipped migrations.
+            db = await _async_open_database(
+                hass, await async_get_db_path(hass)
+            )
             existing.database = db
         entry.runtime_data = existing
         return True

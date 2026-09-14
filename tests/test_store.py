@@ -130,8 +130,11 @@ def test_no_sqlite3_import_outside_db_module() -> None:
 
 
 def test_init_module_never_opens_or_executes_sqlite() -> None:
-    """The __init__.py sqlite3 exemption is exception-typing only: no
-    sqlite3.connect, no .execute, no cursor usage may appear there.
+    """The __init__.py sqlite3 usage is limited to (a) exception typing
+    for corruption classification and (b) the ONE read-only preflight
+    connection (mode=ro URI, SELECT-only) that detects corruption in an
+    existing file before the real read-write open.  No read-write
+    connect, no cursor writes, no non-SELECT statements may appear.
     """
     import re
     from pathlib import Path
@@ -139,14 +142,19 @@ def test_init_module_never_opens_or_executes_sqlite() -> None:
     init_path = (
         Path(store.__file__).parent / "__init__.py"
     ).read_text(encoding="utf-8")
-    usage_pattern = re.compile(
-        r"sqlite3\s*\.\s*(connect|Cursor|Row|register|complete_statement)"
-        r"|\bconn(ection)?\s*\.\s*execute\b",
+    # The preflight connect must be the URI read-only form, and only
+    # SELECT statements may run through it.
+    assert "sqlite3.connect(uri, uri=True)" in init_path
+    assert "?mode=ro" in init_path
+    forbidden = re.compile(
+        r"sqlite3\s*\.\s*connect(?!\(\s*uri\s*,)"
+        r"|\bconn(ection)?\s*\.\s*execute\s*\(\s*[\"'](?!SELECT)"
+        r"|\bexecutemany\b|\bexecutescript\b",
         re.IGNORECASE,
     )
-    assert usage_pattern.search(init_path) is None, (
-        "__init__.py must use sqlite3 exception types only, never open "
-        "connections or execute SQL"
+    assert forbidden.search(init_path) is None, (
+        "__init__.py may use sqlite3 only for exception typing and the "
+        "read-only corruption preflight"
     )
 
 
