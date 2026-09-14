@@ -110,7 +110,16 @@ class NestQuestDatabase:
             yield
 
     async def open(self, path: Path | str) -> NestQuestDatabase:
-        """Open the SQLite file with WAL journal mode and foreign keys on."""
+        """Open the SQLite file with WAL journal mode and foreign keys on.
+
+        Cancellation-safe: if this call is cancelled while the connect job
+        is in flight, the job still settles (see :meth:`_await_settled`).
+        A connection the settled job created is never adopted by the
+        cancelled call; it is closed through a settled executor job instead
+        of being abandoned to garbage collection, and the cancellation
+        propagates afterwards, so a follow-up ``open()`` starts from a
+        clean state.
+        """
         if self._conn is not None:
             return self
         async with self._get_lock():
@@ -129,9 +138,20 @@ class NestQuestDatabase:
                     raise
                 return conn
 
-            self._conn = await self._await_settled(
+            settled, cancelled = await self._await_settled_state(
                 self._hass.async_add_executor_job(_open)
             )
+            if cancelled:
+                if isinstance(settled, sqlite3.Connection):
+
+                    def _close_abandoned() -> None:
+                        settled.close()
+
+                    await self._await_settled(
+                        self._hass.async_add_executor_job(_close_abandoned)
+                    )
+                raise asyncio.CancelledError()
+            self._conn = settled
         return self
 
     async def execute(
@@ -336,6 +356,20 @@ class NestQuestDatabase:
         settlement is absorbed the same way; if the job itself fails after
         a cancellation, both errors surface in an ExceptionGroup.
         """
+        result, cancelled = await self._await_settled_state(job)
+        if cancelled:
+            raise asyncio.CancelledError()
+        return result
+
+    async def _await_settled_state(self, job: Awaitable[Any]) -> tuple[Any, bool]:
+        """Await ``job`` to settlement and report ``(result, cancelled)``.
+
+        Same settlement guarantees as :meth:`_await_settled`, but returns
+        the settled outcome together with whether the awaiting task was
+        cancelled, so callers that must act on a settled result before
+        re-raising cancellation (e.g. closing an abandoned connection)
+        can do so without losing the result.
+        """
         cancelled = False
         inner = asyncio.ensure_future(job)
         while not inner.done():
@@ -352,9 +386,7 @@ class NestQuestDatabase:
                     [asyncio.CancelledError(), job_error],
                 ) from job_error
             raise
-        if cancelled:
-            raise asyncio.CancelledError()
-        return result
+        return result, cancelled
 
     async def close(self) -> None:
         """Close the connection in the executor; safe to call repeatedly.

@@ -406,6 +406,71 @@ async def test_commit_failure_rolls_back_and_next_transaction_works(
     await database.close()
 
 
+async def test_cancel_during_open_closes_abandoned_connection(tmp_path) -> None:
+    """NQ-PR12-010: cancel during open() must close the settled connection.
+
+    The _open executor job is gated: the open task is cancelled while the
+    connect is still in flight, then the worker is allowed to complete it
+    anyway.  The settled connection must never be adopted, must be closed
+    through a settled executor-backed close before the cancellation
+    propagates, and a follow-up open() must succeed cleanly.
+    """
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+
+    open_started = asyncio.Event()
+    release_open = asyncio.Event()
+    jobs: list[str] = []
+    captured: dict[str, Any] = {}
+    real_add = hass.async_add_executor_job
+
+    async def _gated_add_executor_job(fn, *args, **kwargs):
+        name = getattr(fn, "__name__", "")
+        jobs.append(name)
+        if name == "_open":
+            open_started.set()
+            await release_open.wait()
+        result = await real_add(fn, *args, **kwargs)
+        if name == "_open":
+            captured["conn"] = result
+        return result
+
+    hass.async_add_executor_job = _gated_add_executor_job
+
+    open_task = asyncio.create_task(database.open(tmp_path / "cancel-open.db"))
+    await open_started.wait()
+    open_task.cancel()
+    await asyncio.sleep(0.05)
+    assert database._conn is None, (
+        "the cancelled open adopted a connection that was still settling"
+    )
+    release_open.set()
+    with pytest.raises(asyncio.CancelledError):
+        await open_task
+
+    assert database.connected is False
+    assert "_close_abandoned" in jobs, (
+        "the abandoned connection was not closed via an executor job"
+    )
+    conn = captured.get("conn")
+    assert conn is not None
+
+    def _probe() -> str:
+        try:
+            conn.execute("SELECT 1")
+        except sqlite3.ProgrammingError:
+            return "closed"
+        return "open"
+
+    assert await real_add(_probe) == "closed"
+
+    hass.async_add_executor_job = real_add
+    await database.open(tmp_path / "cancel-open.db")
+    assert database.connected is True
+    assert await database.fetch_one("SELECT 1") == (1,)
+    await database.close()
+
+
 async def test_cancel_during_begin_settles_then_rolls_back(tmp_path) -> None:
     """NQ-PR12-007: cancel during BEGIN must not leak a stray transaction.
 
