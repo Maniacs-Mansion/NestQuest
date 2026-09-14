@@ -25,35 +25,36 @@ def _d(date: str) -> datetime.date:
 
 
 def test_nth_weekday_helper_first_second_third() -> None:
-    # March 2026: Mar 1 is a Saturday; Wednesdays (2) are 4, 11, 18, 25.
+    """Independently verified: Mar 1 2026 is a Sunday; Wednesdays are
+    4, 11, 18, 25 (four — no 5th)."""
     assert _nth_weekday_of_month(2026, 3, 2, 1) == 4
     assert _nth_weekday_of_month(2026, 3, 2, 2) == 11
     assert _nth_weekday_of_month(2026, 3, 2, 3) == 18
     assert _nth_weekday_of_month(2026, 3, 2, 4) == 25
-    # Mar has only four Wednesdays: no 5th occurrence.
     assert _nth_weekday_of_month(2026, 3, 2, 5) is None
 
 
 def test_nth_weekday_helper_none_when_month_lacks_nth() -> None:
-    # April 2026: Apr 1 is a Wednesday; Fridays (4) are Apr 3, 10, 17, 24.
+    """Independently verified: April 2026 Fridays are 3, 10, 17, 24
+    (four) — no 5th occurrence."""
     assert _nth_weekday_of_month(2026, 4, 4, 5) is None
 
 
 def test_nth_weekday_helper_last() -> None:
-    # March 2026 Fridays: Mar 6, 13, 20, 27 (last = 27).
+    """Independently verified: March 2026 Fridays are 6, 13, 20, 27;
+    February 2028 Saturdays are 5, 12, 19, 26 (Feb 29 2028 is a
+    Tuesday, so the last SATURDAY is the 26th, not the last day)."""
     assert _nth_weekday_of_month(2026, 3, 4, -1) == 27
-    # February 2026 (28 days): Saturdays are Feb 7, 14, 21, 28.
+    # February 2026: 28 days, last day IS a Saturday.
     assert _nth_weekday_of_month(2026, 2, 5, -1) == 28
-    # February 2028 (leap): Saturdays are Feb 7, 14, 21, 28 (last = 29? no:
-    # Feb 29 2028 is a Tuesday; the last Saturday is Feb 22? check below).
-    last_day = _nth_weekday_of_month(2028, 2, 5, -1)
-    assert last_day == 22 or _d(f"2028-02-{last_day:02d}").weekday() == 5
+    # February 2028: the last Saturday is the 26th (Feb 29 is a Tue).
+    assert _nth_weekday_of_month(2028, 2, 5, -1) == 26
 
 
 def test_nth_weekday_helper_last_when_month_has_five() -> None:
-    # October 2026: Fridays are Oct 2, 9, 16, 23, 30 (five; last = 30).
+    """Independently verified: October 2026 Fridays are 2, 9, 16, 23, 30
+    (five) — the last is the 30th, and the 5th is the same day."""
     assert _nth_weekday_of_month(2026, 10, 4, -1) == 30
-    # Both 5th and last agree here.
     assert _nth_weekday_of_month(2026, 10, 4, 5) == 30
 
 
@@ -96,65 +97,98 @@ def test_first_tuesday_of_twelve_consecutive_months() -> None:
 
 
 def test_second_wednesday_of_twelve_consecutive_months() -> None:
+    """Independently verified second Wednesdays of 2026 (Jan 1 is a
+    Thursday; Wednesdays per month from the calendar): the SECOND one
+    fires; the FIRST one does not."""
     rule = ScheduleRule(
         rule_type=RuleType.MONTHLY_WEEKDAY, nth_weekday=2,
         nth_weekday_weekday=2,
         start_date="2026-01-01",
     )
-    for month in range(1, 13):
-        first_wed_day = _nth_weekday_of_month(2026, month, 2, 1)
-        second_wed_day = _nth_weekday_of_month(2026, month, 2, 2)
+    # (month, first_wed, second_wed) from plain datetime arithmetic:
+    verified = [
+        (1, 7, 14), (2, 4, 11), (3, 4, 11), (4, 1, 8),
+        (5, 6, 13), (6, 3, 10), (7, 1, 8), (8, 5, 12),
+        (9, 2, 9), (10, 7, 14), (11, 4, 11), (12, 2, 9),
+    ]
+    for month, first_wed, second_wed in verified:
+        assert _d(f"2026-{month:02d}-{first_wed:02d}").weekday() == 2
+        assert _d(f"2026-{month:02d}-{second_wed:02d}").weekday() == 2
         assert occurs_on(
-            rule, datetime.date(2026, month, second_wed_day)
-        ) is True
+            rule, datetime.date(2026, month, second_wed)
+        ) is True, f"2026-{month:02d}-{second_wed:02d}"
         assert occurs_on(
-            rule, datetime.date(2026, month, first_wed_day)
-        ) is False
+            rule, datetime.date(2026, month, first_wed)
+        ) is False, f"2026-{month:02d}-{first_wed:02d}"
 
 
 def test_third_friday_of_twelve_consecutive_months() -> None:
+    """Independently verified 2026 Fridays; the THIRD fires, the SECOND
+    does not."""
     rule = ScheduleRule(
         rule_type=RuleType.MONTHLY_WEEKDAY, nth_weekday=3,
         nth_weekday_weekday=4,
         start_date="2026-01-01",
     )
-    for month in range(1, 13):
-        third_fri_day = _nth_weekday_of_month(2026, month, 4, 3)
-        assert occurs_on(rule, datetime.date(2026, month, third_fri_day))
-        # Second Friday must not fire.
-        second_fri_day = _nth_weekday_of_month(2026, month, 4, 2)
-        assert occurs_on(
-            rule, datetime.date(2026, month, second_fri_day)
-        ) is False
+    verified = [
+        # (month, first_fri, second_fri, third_fri)
+        (1, 2, 9, 16), (2, 6, 13, 20), (3, 6, 13, 20),
+        (4, 3, 10, 17), (5, 1, 8, 15), (6, 5, 12, 19),
+        (7, 3, 10, 17), (8, 7, 14, 21), (9, 4, 11, 18),
+        (10, 2, 9, 16), (11, 6, 13, 20), (12, 4, 11, 18),
+    ]
+    for month, first_fri, second_fri, third_fri in verified:
+        third = _d(f"2026-{month:02d}-{third_fri:02d}")
+        assert third.weekday() == 4
+        assert occurs_on(rule, third) is True, third
+        second = _d(f"2026-{month:02d}-{second_fri:02d}")
+        assert occurs_on(rule, second) is False, second
 
 
 def test_fourth_wednesday_of_twelve_consecutive_months() -> None:
+    """Independently verified 2026 Wednesdays; the FOURTH fires, the
+    THIRD does not."""
     rule = ScheduleRule(
         rule_type=RuleType.MONTHLY_WEEKDAY, nth_weekday=4,
         nth_weekday_weekday=2,
         start_date="2026-01-01",
     )
-    for month in range(1, 13):
-        fourth_wed_day = _nth_weekday_of_month(2026, month, 2, 4)
-        assert occurs_on(rule, datetime.date(2026, month, fourth_wed_day))
-        # Third Wednesday must not fire.
-        third_wed_day = _nth_weekday_of_month(2026, month, 2, 3)
-        assert not occurs_on(rule, datetime.date(2026, month, third_wed_day))
+    verified = [
+        # (month, third_wed, fourth_wed)
+        (1, 21, 28), (2, 18, 25), (3, 18, 25), (4, 15, 22),
+        (5, 20, 27), (6, 17, 24), (7, 15, 22), (8, 19, 26),
+        (9, 16, 23), (10, 21, 28), (11, 18, 25), (12, 16, 23),
+    ]
+    for month, third_wed, fourth_wed in verified:
+        fourth = _d(f"2026-{month:02d}-{fourth_wed:02d}")
+        assert fourth.weekday() == 2
+        assert occurs_on(rule, fourth) is True, fourth
+        third = _d(f"2026-{month:02d}-{third_wed:02d}")
+        assert not occurs_on(rule, third), third
 
 
 def test_last_monday_of_twelve_consecutive_months() -> None:
+    """Independently verified last Mondays of 2026; each fires, and the
+    PREVIOUS Monday of the same month does not (it is nth-from-last
+    minus one, i.e. the second-to-last)."""
     rule = ScheduleRule(
         rule_type=RuleType.MONTHLY_WEEKDAY, nth_weekday=-1,
         nth_weekday_weekday=0,
         start_date="2026-01-01",
     )
-    for month in range(1, 13):
-        last_monday_day = _nth_weekday_of_month(2026, month, 0, -1)
-        assert occurs_on(rule, datetime.date(2026, month, last_monday_day))
-        # The next Monday (next month's) must not fire in this month.
-        next_month_last = _nth_weekday_of_month(2026, month, 0, -1)
-        # Sanity: the last Monday's day is within the month.
-        assert 1 <= next_month_last <= 31
+    verified = [
+        # (month, last_monday)
+        (1, 26), (2, 23), (3, 30), (4, 27), (5, 25), (6, 29),
+        (7, 27), (8, 31), (9, 28), (10, 26), (11, 30), (12, 28),
+    ]
+    for month, last_monday in verified:
+        date = _d(f"2026-{month:02d}-{last_monday:02d}")
+        assert date.weekday() == 0
+        assert occurs_on(rule, date) is True, date
+        # The Monday a week earlier is NOT the last: must not fire.
+        week_before = date - datetime.timedelta(days=7)
+        if week_before.month == month:
+            assert occurs_on(rule, week_before) is False, week_before
 
 
 # ---------------------------------------------------------------------------
@@ -163,27 +197,38 @@ def test_last_monday_of_twelve_consecutive_months() -> None:
 
 
 def test_fifth_weekday_skips_four_occurrence_months() -> None:
-    """n=5 fires only in months with five occurrences of the weekday."""
+    """Independently verified: 2026 months with FIVE Mondays are March,
+    June, August, November — every other month (four Mondays) must fire
+    on no day at all, and each hit must be the month's FINAL Monday."""
     rule = ScheduleRule(
         rule_type=RuleType.MONTHLY_WEEKDAY, nth_weekday=5,
         nth_weekday_weekday=0,  # fifth Monday
         start_date="2026-01-01",
     )
+    five_monday_months = {3: 30, 6: 29, 8: 31, 11: 30}
     hit_months = set()
     for month in range(1, 13):
-        fifth_day = _nth_weekday_of_month(2026, month, 0, 5)
-        if fifth_day is not None:
+        if month in five_monday_months:
+            day = five_monday_months[month]
+            hit = _d(f"2026-{month:02d}-{day:02d}")
+            assert hit.weekday() == 0
+            assert occurs_on(rule, hit) is True, hit
+            # It is the FINAL Monday of the month: no Monday after it.
+            if day + 7 <= _month_end_days(2026, month):
+                assert occurs_on(
+                    rule, datetime.date(2026, month, day + 7)
+                ) is False
+            # The Monday a week earlier is not the fifth.
             assert occurs_on(
-                rule, datetime.date(2026, month, fifth_day)
-            ) is True
+                rule, datetime.date(2026, month, day - 7)
+            ) is False
             hit_months.add(month)
         else:
-            # A four-occurrence month must not fire on ANY day.
             for day in range(1, _month_end_days(2026, month) + 1):
                 assert occurs_on(
                     rule, datetime.date(2026, month, day)
                 ) is False, f"2026-{month:02d}-{day:02d}"
-    assert len(hit_months) >= 3, hit_months
+    assert hit_months == {3, 6, 8, 11}, hit_months
 
 
 def _month_end_days(year: int, month: int) -> int:
@@ -194,19 +239,25 @@ def _month_end_days(year: int, month: int) -> int:
 
 
 def test_fifth_weekday_fires_in_five_occurrence_months() -> None:
-    """The 5th fires in five-occurrence months only."""
+    """Independently verified: October 2026 Fridays are 2, 9, 16, 23, 30
+    (five) — the 5th (and last) is the 30th; April 2026 has four Fridays
+    (3, 10, 17, 24) so no day in April fires."""
     rule = ScheduleRule(
         rule_type=RuleType.MONTHLY_WEEKDAY, nth_weekday=5,
         nth_weekday_weekday=4,  # Fridays
         start_date="2026-01-01",
     )
-    # October 2026 has five Fridays (2, 9, 16, 23, 30): the 5th fires.
-    fifth_day = _nth_weekday_of_month(2026, 10, 4, 5)
-    assert fifth_day == 30
-    assert occurs_on(rule, datetime.date(2026, 10, 30)) is True
-    # April 2026 has four Fridays (3, 10, 17, 24): no 5th, no firing.
-    assert _nth_weekday_of_month(2026, 4, 4, 5) is None
-    assert occurs_on(rule, datetime.date(2026, 4, 30)) is False
+    # October: the 30th fires, is a Friday, and no Monday-later day
+    # (the 31st) is a Friday: the 30th is the FINAL Friday.
+    oct_30 = datetime.date(2026, 10, 30)
+    assert oct_30.weekday() == 4
+    assert occurs_on(rule, oct_30) is True
+    assert occurs_on(rule, datetime.date(2026, 10, 31)) is False
+    # April: no Friday-5th, so no day fires.
+    for day in range(1, _month_end_days(2026, 4) + 1):
+        assert occurs_on(rule, datetime.date(2026, 4, day)) is False, (
+            f"2026-04-{day:02d}"
+        )
 
 
 # ---------------------------------------------------------------------------
