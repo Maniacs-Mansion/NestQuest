@@ -54,6 +54,20 @@ LOGGER = logging.getLogger(__name__)
 #: never collide with a foreign ``schema_version`` table.
 VERSION_TABLE = "nestquest_schema_version"
 
+#: DDL for the version metadata table.  The singleton-row invariant is
+#: enforced by the schema itself: ``id`` is fixed at 1 by CHECK, keyed
+#: PRIMARY KEY, so the table can never hold a second row, and the
+#: stamp write is an UPDATE (no DELETE+INSERT needed).  ``version`` is
+#: a positive integer: version 0 means "no row" and is never stored,
+#: so a negative or zero stored value is corruption, not a state the
+#: runner can act on.
+VERSION_TABLE_DDL = f"""
+    CREATE TABLE IF NOT EXISTS {VERSION_TABLE} (
+        id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL CHECK (version >= 1)
+    )
+"""
+
 #: One-based index into :data:`MIGRATIONS`: entry ``n`` upgrades
 #: version ``n-1`` to version ``n``.
 MIGRATION_1_V1_DDL: list[str] = list(SCHEMA_V1_STATEMENTS)
@@ -68,17 +82,12 @@ MIGRATIONS: Sequence[Sequence[str]] = [
 async def _create_version_table(database: NestQuestDatabase) -> None:
     """Create the version metadata table if it does not exist.
 
-    The table is created outside the per-migration transaction: it is
-    the runner's own bookkeeping, needed before any migration can stamp
-    a version, and creating it is itself idempotent.
+    The table is created before any version check: it is the runner's
+    own bookkeeping, and creating it is idempotent.  The DDL enforces
+    the singleton-row invariant (``id`` fixed at 1) and a positive
+    integer version at the database level.
     """
-    await database.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {VERSION_TABLE} (
-            version INTEGER NOT NULL
-        )
-        """
-    )
+    await database.execute(VERSION_TABLE_DDL)
 
 
 async def read_schema_version(database: NestQuestDatabase) -> int:
@@ -99,9 +108,13 @@ async def read_schema_version(database: NestQuestDatabase) -> int:
     if row is None:
         return 0
     version = row[0]
-    if not isinstance(version, int):
+    if not isinstance(version, int) or isinstance(version, bool):
         raise RuntimeError(
             f"Schema version metadata is not an integer: {version!r}"
+        )
+    if version < 1:
+        raise RuntimeError(
+            f"Schema version metadata is invalid (must be >= 1): {version!r}"
         )
     return version
 
@@ -144,11 +157,14 @@ async def apply_migrations(
         async with database.transaction():
             for sql in statements:
                 await database.execute(sql)
-            # DELETE + INSERT, not UPDATE: a fresh file has no version
-            # row yet, and UPDATE would silently match zero rows.
-            await database.execute(f"DELETE FROM {VERSION_TABLE}")
+            # UPDATE keyed on the singleton row (id = 1): a fresh file
+            # has no row yet, but migration 1 is the only migration a
+            # version-0 database can run, so the row is seeded by the
+            # same statement batch when needed.  UPDATE alone would
+            # silently match zero rows there, so seed-if-absent first.
             await database.execute(
-                f"INSERT INTO {VERSION_TABLE} (version) VALUES (?)",
+                f"INSERT INTO {VERSION_TABLE} (id, version) VALUES (1, ?) "
+                "ON CONFLICT (id) DO UPDATE SET version = excluded.version",
                 (target,),
             )
         LOGGER.info(

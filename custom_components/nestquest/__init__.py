@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN, LOGGER
 from .db import NestQuestDatabase
-from .schema import SCHEMA_V1_STATEMENTS, async_apply_ddl
+from .migrations import apply_migrations
 from .store import async_get_db_path
 
 _LOGGER = LOGGER
@@ -52,7 +52,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     database = await NestQuestDatabase(hass).open(await async_get_db_path(hass))
     try:
-        await async_apply_ddl(database, SCHEMA_V1_STATEMENTS)
+        await apply_migrations(database)
         remove_update_listener = entry.add_update_listener(_async_update_listener)
     except BaseException:
         await database.close()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import sqlite3
 from unittest.mock import AsyncMock
@@ -12,6 +13,7 @@ from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.migrations import (
     MIGRATIONS,
     VERSION_TABLE,
+    VERSION_TABLE_DDL,
     apply_migrations,
     read_schema_version,
 )
@@ -127,11 +129,7 @@ def test_missing_version_table_raises_on_direct_read(tmp_path) -> None:
 def test_empty_version_table_reads_as_version_0(tmp_path) -> None:
     database = _open_db(tmp_path / "empty-table.db")
     try:
-        _run(
-            database.execute(
-                f"CREATE TABLE {VERSION_TABLE} (version INTEGER NOT NULL)"
-            )
-        )
+        _run(database.execute(VERSION_TABLE_DDL))
         assert _version(database) == 0
     finally:
         _run(database.close())
@@ -177,16 +175,18 @@ def test_second_run_writes_nothing_to_the_file(tmp_path, caplog) -> None:
     try:
         _migrate(database)
         db_file = tmp_path / "noop.db"
-        size_before = db_file.stat().st_size
+        digest_before = hashlib.sha256(db_file.read_bytes()).hexdigest()
         mtime_before = db_file.stat().st_mtime_ns
 
         _migrate(database)
 
         # A no-op run must not open a write transaction: the main
-        # database file is byte-identical and untouched (mtime too), and
-        # no WAL checkpoint traffic dirtied it.
-        assert db_file.stat().st_size == size_before
+        # database file is byte-identical (content hash, not just size)
+        # and untouched (mtime too).
         assert db_file.stat().st_mtime_ns == mtime_before
+        assert (
+            hashlib.sha256(db_file.read_bytes()).hexdigest() == digest_before
+        )
     finally:
         _run(database.close())
 
@@ -333,19 +333,107 @@ def test_future_version_is_rejected(tmp_path) -> None:
 def test_non_integer_version_raises_runtime_error(tmp_path) -> None:
     database = _open_db(tmp_path / "string-version.db")
     try:
+        _run(database.execute(VERSION_TABLE_DDL))
+        # The CHECK enforces version >= 1 but SQLite's loose typing
+        # stores TEXT under an INTEGER-affinity column when it cannot
+        # be losslessly coerced; guard the read path against it.
         _run(
             database.execute(
-                f"CREATE TABLE {VERSION_TABLE} (version TEXT NOT NULL)"
-            )
-        )
-        _run(
-            database.execute(
-                f"INSERT INTO {VERSION_TABLE} (version) VALUES (?)",
+                f"INSERT INTO {VERSION_TABLE} (id, version) VALUES (1, ?)",
                 ("one",),
             )
         )
         with pytest.raises(RuntimeError, match="not an integer"):
             _run(read_schema_version(database))
+    finally:
+        _run(database.close())
+
+
+def test_negative_version_read_guard_rejects_below_one() -> None:
+    """The read path rejects sub-1 versions even if storage missed them.
+
+    The VERSION_TABLE CHECK already makes negative/zero unstorable; this
+    exercises the defense-in-depth guard in read_schema_version itself
+    against a database stub returning such a row (e.g. a future schema
+    relaxing the CHECK, or a hand-edited file).
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    for bad in (-1, 0):
+        database = MagicMock()
+        database.fetch_one = AsyncMock(return_value=(bad,))
+        with pytest.raises(RuntimeError, match="must be >= 1"):
+            _run(read_schema_version(database))
+
+
+def test_non_integer_version_read_guard_rejects_text() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    for bad in ("one", 1.5, True):
+        database = MagicMock()
+        database.fetch_one = AsyncMock(return_value=(bad,))
+        with pytest.raises(RuntimeError, match="not an integer"):
+            _run(read_schema_version(database))
+
+
+def test_zero_version_row_is_unstorable(tmp_path) -> None:
+    """The CHECK makes sub-1 versions impossible through SQL.
+
+    PRAGMA writable_schema does not bypass CHECKs on ordinary tables,
+    so the negative/zero read guard above is pure defense-in-depth;
+    here we prove the storage-level rule the normal path relies on.
+    """
+    database = _open_db(tmp_path / "zero-version.db")
+    try:
+        _run(database.execute(VERSION_TABLE_DDL))
+        for bad in (0, -1):
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+                _run(
+                    database.execute(
+                        f"INSERT INTO {VERSION_TABLE} (id, version) "
+                        "VALUES (1, ?)",
+                        (bad,),
+                    )
+                )
+    finally:
+        _run(database.close())
+
+
+def test_version_table_enforces_singleton_row(tmp_path) -> None:
+    database = _open_db(tmp_path / "singleton.db")
+    try:
+        _run(database.execute(VERSION_TABLE_DDL))
+        _run(
+            database.execute(
+                f"INSERT INTO {VERSION_TABLE} (id, version) VALUES (1, 1)"
+            )
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _run(
+                database.execute(
+                    f"INSERT INTO {VERSION_TABLE} (id, version) "
+                    "VALUES (2, 1)"
+                )
+            )
+    finally:
+        _run(database.close())
+
+
+def test_version_table_check_rejects_version_zero_and_negative(
+    tmp_path,
+) -> None:
+    database = _open_db(tmp_path / "version-check.db")
+    try:
+        _run(database.execute(VERSION_TABLE_DDL))
+        for bad in (0, -1):
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+                _run(
+                    database.execute(
+                        f"INSERT INTO {VERSION_TABLE} (id, version) "
+                        "VALUES (1, ?)",
+                        (bad,),
+                    )
+                )
     finally:
         _run(database.close())
 
@@ -386,3 +474,105 @@ def test_partial_pending_migrations_resume_from_current_version(
         assert "step_b" in _tables(database)
     finally:
         _run(database.close())
+
+
+# ---------------------------------------------------------------------------
+# Startup wiring: setup runs the migration runner, not raw DDL
+# ---------------------------------------------------------------------------
+
+
+async def _setup_entry(hass, entry, registry) -> object:
+    from tests.test_lifecycle import _wire  # reuse the established wiring
+
+    entry = _wire(entry, registry)
+    from custom_components.nestquest import async_setup_entry
+
+    await async_setup_entry(hass, entry)
+    return entry
+
+
+async def test_setup_entry_migrates_fresh_database(hass, make_entry) -> None:
+    import sqlite3 as sqlite3_mod
+
+    from custom_components.nestquest.migrations import read_schema_version
+    from custom_components.nestquest.store import async_get_db_path
+
+    entry = await _setup_entry(hass, make_entry(), hass.registry)
+    database = entry.runtime_data.database
+    assert await read_schema_version(database) == 1
+    # The v1 tables exist because the runner applied migration 1.
+    names = {
+        row[0]
+        for row in await database.fetch_all(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    assert "children" in names and "completion_events" in names
+    # The version table exists with its singleton row stamped.
+    columns = await database.fetch_all(f"PRAGMA table_info({VERSION_TABLE})")
+    assert [(row[1], row[3]) for row in columns] == [("id", 1), ("version", 1)]
+    db_path = await async_get_db_path(hass)
+    conn = sqlite3_mod.connect(db_path)
+    try:
+        conn.execute(f"INSERT INTO {VERSION_TABLE} (id, version) VALUES (2, 1)")
+        violated = False
+    except sqlite3_mod.IntegrityError:
+        violated = True
+    finally:
+        conn.close()
+    assert violated, "singleton-row CHECK must be live in the setup-created DB"
+    await database.close()
+
+
+async def test_setup_entry_twice_keeps_version_and_rows(
+    hass, make_entry
+) -> None:
+    from custom_components.nestquest.migrations import read_schema_version
+
+    entry_a = await _setup_entry(hass, make_entry(), hass.registry)
+    database_a = entry_a.runtime_data.database
+    await database_a.execute(
+        "INSERT INTO children (display_name, created_at) VALUES (?, ?)",
+        ("Ada", "2026-09-13T00:00:00+00:00"),
+    )
+
+    # A reload re-runs setup for the same entry_id against the same
+    # file: setup reuses the domain-data record and its still-open
+    # connection rather than reopening, and nothing is re-applied.
+    entry_b = await _setup_entry(hass, make_entry(), hass.registry)
+    record_a = hass.data["nestquest"][entry_a.entry_id]
+    record_b = hass.data["nestquest"][entry_b.entry_id]
+    assert record_a is record_b
+    assert record_a.database is database_a
+    assert await read_schema_version(database_a) == 1
+    row = await database_a.fetch_one("SELECT COUNT(*) FROM children")
+    assert row == (1,)
+    await database_a.close()
+
+
+async def test_setup_entry_failure_closes_database(
+    hass, make_entry, monkeypatch
+) -> None:
+    import pytest as pytest_module
+
+    import custom_components.nestquest as nestquest_module
+    from custom_components.nestquest.migrations import (
+        MIGRATIONS as _MIGRATIONS,
+    )
+
+    async def _failing(database, migrations=_MIGRATIONS):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        nestquest_module, "apply_migrations", _failing, raising=True
+    )
+    entry = make_entry()
+    with pytest_module.raises(RuntimeError, match="boom"):
+        await _setup_entry(hass, entry, hass.registry)
+    # Setup closed the connection before re-raising: no leaked handle.
+    # The record only lands in hass.data after the listener is added, so
+    # on failure the connection must be gone from the wrapper itself.
+    record = hass.data["nestquest"].get(entry.entry_id)
+    if record is not None:
+        assert not record.database.connected
