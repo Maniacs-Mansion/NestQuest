@@ -199,7 +199,10 @@ class NestQuestDatabase:
 
         The wrapper lock is held for the entire BEGIN..COMMIT span, so no
         other statement can interleave inside the transaction.  Entering a
-        second transaction while one is active raises RuntimeError.
+        second transaction while one is active raises RuntimeError.  A
+        failing COMMIT (e.g. a deferred foreign-key violation) also triggers
+        a ROLLBACK before the commit error propagates, so the real
+        connection is never left inside a stray transaction.
         """
         if self._in_transaction:
             raise RuntimeError(
@@ -229,7 +232,21 @@ class NestQuestDatabase:
                 def _commit() -> None:
                     conn.execute("COMMIT")
 
-                await self._hass.async_add_executor_job(_commit)
+                try:
+                    await self._hass.async_add_executor_job(_commit)
+                except BaseException as commit_error:
+
+                    def _rollback() -> None:
+                        conn.execute("ROLLBACK")
+
+                    try:
+                        await self._hass.async_add_executor_job(_rollback)
+                    except BaseException as rollback_error:
+                        raise RuntimeError(
+                            "COMMIT failed and the follow-up ROLLBACK also "
+                            "raised; the transaction may need manual cleanup"
+                        ) from rollback_error
+                    raise
             finally:
                 self._in_transaction = False
                 self._tx_task = None

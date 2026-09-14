@@ -200,8 +200,11 @@ async def test_real_executor_never_touches_loop_thread(tmp_path, monkeypatch) ->
             return _wrapped
 
     real_connect = sqlite3.connect
+    connect_threads: list[int] = []
 
     def _traced_connect(*args, **kwargs):
+        _note()
+        connect_threads.append(threading.get_ident())
         return _Proxy(real_connect(*args, **kwargs))
 
     monkeypatch.setattr(db_module.sqlite3, "connect", _traced_connect)
@@ -219,6 +222,9 @@ async def test_real_executor_never_touches_loop_thread(tmp_path, monkeypatch) ->
     await database.close()
 
     assert recorded, "expected at least one recorded sqlite3 call"
+    assert len(connect_threads) == 1, (
+        f"expected exactly one traced sqlite3.connect, got {len(connect_threads)}"
+    )
     assert loop_thread not in recorded, (
         f"sqlite3 call ran on the event-loop thread {loop_thread}; "
         f"recorded threads: {sorted(set(recorded))}"
@@ -355,6 +361,49 @@ def test_transaction_rolls_back_on_exception(tmp_path) -> None:
     _run(_block())
     assert _run(database.fetch_all("SELECT name FROM t")) == [("before",)]
     _run(database.close())
+
+
+async def test_commit_failure_rolls_back_and_next_transaction_works(
+    tmp_path,
+) -> None:
+    """A COMMIT failure rolls back and leaves the wrapper reusable.
+
+    With PRAGMA defer_foreign_keys=ON a violating insert succeeds inside
+    the transaction and the foreign-key violation only surfaces at COMMIT.
+    The commit error must propagate, the real connection must end up
+    outside any transaction, and the next transaction() plus statement
+    must run cleanly.
+    """
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "deferred.db")
+    await database.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+    await database.execute(
+        "CREATE TABLE child ("
+        "id INTEGER PRIMARY KEY, "
+        "parent_id INTEGER NOT NULL REFERENCES parent(id))"
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+        async with database.transaction():
+            await database.execute("PRAGMA defer_foreign_keys=ON")
+            await database.execute(
+                "INSERT INTO child (parent_id) VALUES (?)", (999,)
+            )
+
+    assert database._in_transaction is False
+    assert database._tx_task is None
+    assert database._conn is not None
+    assert database._conn.in_transaction is False
+    assert await database.fetch_all("SELECT COUNT(*) FROM child") == [(0,)]
+
+    async with database.transaction():
+        await database.execute("INSERT INTO parent (id) VALUES (?)", (1,))
+        await database.execute(
+            "INSERT INTO child (parent_id) VALUES (?)", (1,)
+        )
+    assert await database.fetch_all("SELECT COUNT(*) FROM child") == [(1,)]
+    await database.close()
 
 
 async def test_transaction_persists_across_connections(tmp_path) -> None:
