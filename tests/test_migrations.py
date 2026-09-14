@@ -174,19 +174,33 @@ def test_second_run_writes_nothing_to_the_file(tmp_path, caplog) -> None:
     database = _open_db(tmp_path / "noop.db")
     try:
         _migrate(database)
+        _run(database.execute("PRAGMA wal_checkpoint(TRUNCATE)"))
         db_file = tmp_path / "noop.db"
+        wal_file = tmp_path / "noop.db-wal"
         digest_before = hashlib.sha256(db_file.read_bytes()).hexdigest()
         mtime_before = db_file.stat().st_mtime_ns
+        wal_digest_before = (
+            hashlib.sha256(wal_file.read_bytes()).hexdigest()
+            if wal_file.exists()
+            else None
+        )
 
         _migrate(database)
 
         # A no-op run must not open a write transaction: the main
         # database file is byte-identical (content hash, not just size)
-        # and untouched (mtime too).
+        # and untouched (mtime too), and the WAL gained no frames.
         assert db_file.stat().st_mtime_ns == mtime_before
         assert (
             hashlib.sha256(db_file.read_bytes()).hexdigest() == digest_before
         )
+        if wal_digest_before is None:
+            assert not wal_file.exists()
+        else:
+            assert (
+                hashlib.sha256(wal_file.read_bytes()).hexdigest()
+                == wal_digest_before
+            )
     finally:
         _run(database.close())
 
@@ -525,30 +539,36 @@ async def test_setup_entry_migrates_fresh_database(hass, make_entry) -> None:
     await database.close()
 
 
-async def test_setup_entry_twice_keeps_version_and_rows(
+async def test_options_reload_reopens_and_rechecks_version(
     hass, make_entry
 ) -> None:
+    """A listener-triggered reload re-runs setup against the same file.
+
+    Unload then setup is the reload lifecycle: the old connection is
+    closed, apply_migrations runs again on the persisted file, keeps
+    version and rows intact, and the reopened connection is live.
+    """
+    from custom_components.nestquest import async_unload_entry
     from custom_components.nestquest.migrations import read_schema_version
 
-    entry_a = await _setup_entry(hass, make_entry(), hass.registry)
-    database_a = entry_a.runtime_data.database
+    entry = await _setup_entry(hass, make_entry(), hass.registry)
+    database_a = entry.runtime_data.database
     await database_a.execute(
         "INSERT INTO children (display_name, created_at) VALUES (?, ?)",
         ("Ada", "2026-09-13T00:00:00+00:00"),
     )
+    assert await async_unload_entry(hass, entry) is True
+    assert not database_a.connected
 
-    # A reload re-runs setup for the same entry_id against the same
-    # file: setup reuses the domain-data record and its still-open
-    # connection rather than reopening, and nothing is re-applied.
-    entry_b = await _setup_entry(hass, make_entry(), hass.registry)
-    record_a = hass.data["nestquest"][entry_a.entry_id]
-    record_b = hass.data["nestquest"][entry_b.entry_id]
-    assert record_a is record_b
-    assert record_a.database is database_a
-    assert await read_schema_version(database_a) == 1
-    row = await database_a.fetch_one("SELECT COUNT(*) FROM children")
-    assert row == (1,)
-    await database_a.close()
+    entry_reloaded = await _setup_entry(hass, make_entry(), hass.registry)
+    database_b = entry_reloaded.runtime_data.database
+    assert database_b is not database_a
+    try:
+        assert await read_schema_version(database_b) == 1
+        row = await database_b.fetch_one("SELECT COUNT(*) FROM children")
+        assert row == (1,)
+    finally:
+        await database_b.close()
 
 
 async def test_setup_entry_failure_closes_database(
