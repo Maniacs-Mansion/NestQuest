@@ -20,6 +20,7 @@ import pytest
 
 from custom_components.nestquest.recurrence import (
     RuleType,
+    RuleValidationError,
     ScheduleRule,
     occurs_on,
     occurrences_between,
@@ -211,17 +212,22 @@ def test_random_rules_never_disagree_between_the_two_functions() -> None:
 
 
 def test_random_ranges_include_year_and_leap_spans() -> None:
-    """Explicit ranges spanning Jan 1 and Feb 29 for every shape."""
+    """Every rule is probed across a range that spans Jan 1 (twice) and
+    a February 29 — the Dec 1..Mar 1 two-year span always covers both."""
     rng = random.Random(42)
     rules = _generate_random_rules(rng, count=12)
     for rule in rules:
         anchor = datetime.date.fromisoformat(rule.start_date)
         probe_start = datetime.date(anchor.year, 12, 1)
         probe_end = datetime.date(anchor.year + 2, 3, 1)
-        if probe_end >= probe_start:
-            _check_consistency(
-                rule, probe_start.isoformat(), probe_end.isoformat()
-            )
+        # The span always contains two Jan 1s and a Feb 28/29 pair.
+        assert probe_end >= probe_start
+        _check_consistency(
+            rule, probe_start.isoformat(), probe_end.isoformat()
+        )
+        # An additional probe pinned ON a Feb 29 window (2028 leap):
+        # every rule is cross-checked over Feb 1 - Mar 15 2028.
+        _check_consistency(rule, "2028-02-01", "2028-03-15")
 
 
 def test_occurrences_between_single_day_range_matches_occurs_on() -> None:
