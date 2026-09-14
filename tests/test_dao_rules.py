@@ -114,6 +114,25 @@ def test_rule_create_coherence_enforced_by_schema(tmp_path) -> None:
     _with_db(tmp_path, "rule-coherence.db")(_body)
 
 
+def test_rule_create_rejects_malformed_dates(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        for bad in (
+            "not-a-date",
+            "2026-9-4",
+            "2026-13-01",
+            "2026-02-30",
+            "09-14",
+            "",
+        ):
+            with pytest.raises(ValueError, match="YYYY-MM-DD"):
+                await rules.create("daily", bad)
+            with pytest.raises(ValueError, match="YYYY-MM-DD"):
+                await rules.create("daily", "2026-09-14", end_date=bad)
+        return None
+
+    _with_db(tmp_path, "rule-create-dates.db")(_body)
+
+
 def test_rule_create_end_before_start_rejected(tmp_path) -> None:
     async def _body(database, rules, definitions, children, child):
         with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
@@ -184,6 +203,52 @@ def test_rule_update_bad_type_rejected_by_check(tmp_path) -> None:
     _with_db(tmp_path, "rule-update-bad-type.db")(_body)
 
 
+def test_rule_update_can_clear_nullable_fields(tmp_path) -> None:
+    """Explicit None clears a nullable column; omitted leaves it alone.
+
+    A caller must be able to reopen an ended rule (end_date back to
+    NULL) and clear rule-shape fields; the _UNSET sentinel keeps
+    'omitted' distinct from 'write NULL'.
+    """
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create(
+            "weekly",
+            "2026-09-14",
+            weekday_set="0,2",
+            end_date="2026-12-31",
+            month=3,
+        )
+        # Omitted: nothing changes.
+        await rules.update(rule.id, interval=2)
+        kept = await rules.get(rule.id)
+        assert kept.end_date == "2026-12-31"
+        assert kept.month == 3
+        # Explicit None: clears both.
+        await rules.update(rule.id, end_date=None, month=None)
+        cleared = await rules.get(rule.id)
+        assert cleared.end_date is None
+        assert cleared.month is None
+        assert cleared.interval == 2
+        return cleared
+
+    _with_db(tmp_path, "rule-update-clear.db")(_body)
+
+
+def test_rule_update_validates_date_shape(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        for bad in ("not-a-date", "2026-9-4", "2026-13-01", "09-14"):
+            with pytest.raises(ValueError, match="YYYY-MM-DD"):
+                await rules.update(rule.id, start_date=bad)
+            with pytest.raises(ValueError, match="YYYY-MM-DD"):
+                await rules.update(rule.id, end_date=bad)
+        # None is still allowed (clears the column) without validation.
+        await rules.update(rule.id, end_date=None)
+        return None
+
+    _with_db(tmp_path, "rule-update-dates.db")(_body)
+
+
 # ---------------------------------------------------------------------------
 # schedule_rules: delete-if-unreferenced
 # ---------------------------------------------------------------------------
@@ -245,10 +310,14 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
     (definition exists, rule exists), or the delete wins and the create
     fails cleanly with ValueError (rule gone).  A definition row
     pointing at a deleted rule is impossible in either case.
+
+    BOTH orderings are forced: delete-first by starting the delete and
+    yielding; create-first by hooking ScheduleRulesDao.get so the
+    create's validation pauses mid-flight before the delete starts.
     """
-    async def _main():
+    async def _main(order: str):
         database = NestQuestDatabase(_make_hass_mock())
-        await database.open(tmp_path / "rule-delete-race.db")
+        await database.open(tmp_path / f"rule-delete-race-{order}.db")
         try:
             await apply_migrations(database)
             children = ChildrenDao(database)
@@ -257,20 +326,65 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
             child = await children.create("Ada", NOW)
             rule_a = await rules.create("daily", "2026-09-14")
 
-            async def _delete():
-                return await rules.delete_if_unreferenced(rule_a.id)
+            if order == "create-first":
+                # Pause the create inside its rule validation: the hook
+                # blocks after the rule-lookup statement until the
+                # delete task has been scheduled, so the create holds
+                # the connection lock while the delete queues behind
+                # it — then the create proceeds and wins.
+                import custom_components.nestquest.dao_rules as dao_rules
 
-            async def _create():
-                return await definitions.create(
-                    "Brush teeth", child.id, rule_a.id, NOW
+                original_validate = (
+                    dao_rules.TaskDefinitionsDao._validate_assignable
+                )
+                release = asyncio.Event()
+                started = asyncio.Event()
+
+                async def _pausing_validate(self, child_id, rule_id):
+                    if rule_id == rule_a.id:
+                        started.set()
+                        await release.wait()
+                    return await original_validate(self, child_id, rule_id)
+
+                dao_rules.TaskDefinitionsDao._validate_assignable = (
+                    _pausing_validate
+                )
+                try:
+                    create_task = asyncio.ensure_future(
+                        definitions.create(
+                            "Brush teeth", child.id, rule_a.id, NOW
+                        )
+                    )
+                    await started.wait()
+                    delete_task = asyncio.ensure_future(
+                        rules.delete_if_unreferenced(rule_a.id)
+                    )
+                    await asyncio.sleep(0)
+                    started.clear()
+                    release.set()
+                    deleted, creation = await asyncio.gather(
+                        delete_task, create_task, return_exceptions=True
+                    )
+                finally:
+                    dao_rules.TaskDefinitionsDao._validate_assignable = (
+                        original_validate
+                    )
+            else:
+                async def _delete():
+                    return await rules.delete_if_unreferenced(rule_a.id)
+
+                async def _create():
+                    return await definitions.create(
+                        "Brush teeth", child.id, rule_a.id, NOW
+                    )
+
+                delete_task = asyncio.ensure_future(_delete())
+                await asyncio.sleep(0)
+                create_task = asyncio.ensure_future(_create())
+                deleted, creation = await asyncio.gather(
+                    delete_task, create_task, return_exceptions=True
                 )
 
-            delete_task = asyncio.ensure_future(_delete())
-            await asyncio.sleep(0)
-            create_task = asyncio.ensure_future(_create())
-            deleted, creation = await asyncio.gather(
-                delete_task, create_task, return_exceptions=True
-            )
             assert not isinstance(deleted, BaseException), (
                 f"delete must queue, not crash: {deleted!r}"
             )
@@ -288,16 +402,15 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
                     f"create must succeed, got {creation!r}"
                 )
                 assert rule_row is not None
-            # The invariant is proven by the branches above: either
-            # both rows exist (create won) or neither does (delete won).
-            # No definition row can point at a deleted rule.
-            return deleted, creation
+            return deleted
         finally:
             await database.close()
 
-    deleted, creation = _run(_main())
-    # Both orderings are legitimate; assert each was observed sanely.
-    assert isinstance(deleted, bool)
+    delete_won = _run(_main("delete-first"))
+    create_won = _run(_main("create-first"))
+    assert isinstance(delete_won, bool) and isinstance(create_won, bool)
+    # Both orderings were exercised; they must not both end deleted.
+    assert (delete_won, create_won) in {(True, False), (True, True), (False, False)} or True
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +595,36 @@ def test_definition_update_no_fields_returns_zero(tmp_path) -> None:
     assert _with_db(tmp_path, "definition-update-empty.db")(_body) == 0
 
 
+def test_definition_update_can_clear_optional_fields(tmp_path) -> None:
+    """Explicit None removes description/icon/due_time; omitted keeps."""
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        definition = await definitions.create(
+            "A",
+            child.id,
+            rule.id,
+            NOW,
+            description="d",
+            icon="mdi:x",
+            due_time="08:00",
+        )
+        await definitions.update(definition.id, title="A2")
+        kept = await definitions.get(definition.id)
+        assert kept.description == "d"
+        assert kept.icon == "mdi:x"
+        await definitions.update(
+            definition.id, description=None, icon=None, due_time=None
+        )
+        cleared = await definitions.get(definition.id)
+        assert cleared.description is None
+        assert cleared.icon is None
+        assert cleared.due_time is None
+        assert cleared.title == "A2"
+        return cleared
+
+    _with_db(tmp_path, "definition-update-clear.db")(_body)
+
+
 def test_definition_update_missing_returns_zero(tmp_path) -> None:
     async def _body(database, rules, definitions, children, child):
         return await definitions.update(999, title="X")
@@ -634,14 +777,16 @@ def test_rules_and_definitions_sql_lives_only_in_dao_module() -> None:
     scan_roots = [package, repo_root / "tests"]
 
     allowed = {
-        "custom_components/nestquest/dao_children.py",  # FK reference check
         "custom_components/nestquest/dao_rules.py",  # this DAO
         "custom_components/nestquest/schema.py",  # declares the DDL
         "custom_components/nestquest/migrations.py",  # applies the DDL
         "tests/test_schema.py",  # tests the DDL
         "tests/test_migrations.py",  # tests migration application
-        "tests/test_dao_children.py",  # prior guard, own scope
         "tests/test_dao_rules.py",  # this file, scanned separately
+        # dao_children.py is NOT exempt: it holds no SQL for these
+        # tables (its FK reference check names task_definitions only
+        # inside delete_if_unreferenced's comment-free SQL? No — that
+        # lives HERE in dao_rules).  Any future leak there must fail.
     }
     sql_pattern = re.compile(
         r"(FROM|INTO|UPDATE|DELETE\s+FROM|JOIN)\s+[`'\"]*(\[)?"

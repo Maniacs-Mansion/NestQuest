@@ -28,10 +28,41 @@ rule cannot appear between check and delete on this connection.
 """
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass
 
 from .dao_children import _connection_lock
 from .db import NestQuestDatabase
+
+#: Sentinel distinguishing "argument omitted" from "explicit SQL NULL"
+#: in update methods: passing ``None`` must mean clearing a nullable
+#: column, not skipping it.
+_UNSET = object()
+
+#: Date-shape policy: schedule-rule dates are ISO YYYY-MM-DD.  The
+#: schema's lexical end>=start CHECK cannot prove a value is a real
+#: calendar date, so the DAO validates the shape it accepts.
+_DATE_FORMAT = "%Y-%m-%d"
+
+
+def _validate_date(value: str, field: str) -> None:
+    """Raise ValueError unless ``value`` is a YYYY-MM-DD calendar date.
+
+    ``datetime.date.fromisoformat`` accepts ISO dates but is lenient on
+    some builds (e.g. '2026-9-4'); strptime with an exact format is
+    strict, and strptime round-trips the parsed value to reject zero
+    padding ('2026-9-4' parses but its isoformat differs).
+    """
+    try:
+        parsed = datetime.datetime.strptime(value, _DATE_FORMAT).date()
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{field} must be an ISO date (YYYY-MM-DD), got {value!r}"
+        ) from None
+    if parsed.isoformat() != value:
+        raise ValueError(
+            f"{field} must be a strict YYYY-MM-DD date, got {value!r}"
+        )
 
 
 @dataclass(frozen=True)
@@ -124,8 +155,14 @@ class ScheduleRulesDao:
 
         Rule-type coherence (a weekly rule needs ``weekday_set``, a
         yearly rule needs ``month``, etc.) is enforced by the schema
-        CHECKs and surfaces as :class:`sqlite3.IntegrityError`.
+        CHECKs and surfaces as :class:`sqlite3.IntegrityError`.  Date
+        shape (strict YYYY-MM-DD) is validated here because the
+        schema's lexical end>=start CHECK cannot prove a real calendar
+        date.
         """
+        _validate_date(start_date, "start_date")
+        if end_date is not None:
+            _validate_date(end_date, "end_date")
         result = await self._database.execute(
             "INSERT INTO schedule_rules (rule_type, interval, weekday_set, "
             "day_of_month, nth_weekday, month, start_date, end_date) "
@@ -157,21 +194,33 @@ class ScheduleRulesDao:
         self,
         rule_id: int,
         *,
-        rule_type: str | None = None,
-        interval: int | None = None,
-        weekday_set: str | None = None,
-        day_of_month: int | None = None,
-        nth_weekday: int | None = None,
-        month: int | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
+        rule_type: str | None | object = _UNSET,
+        interval: int | None | object = _UNSET,
+        weekday_set: str | None | object = _UNSET,
+        day_of_month: int | None | object = _UNSET,
+        nth_weekday: int | None | object = _UNSET,
+        month: int | None | object = _UNSET,
+        start_date: str | None | object = _UNSET,
+        end_date: str | None | object = _UNSET,
     ) -> int:
         """Update the given fields; returns rows updated (0 if absent).
 
-        Only non-None arguments are written.  Editing a rule that a
-        definition references changes future materializations only —
-        this method touches no instances (Feature 06/07 separation).
+        Arguments default to the module sentinel ``_UNSET`` meaning
+        "leave this column alone"; passing ``None`` explicitly writes
+        SQL NULL, so callers can reopen an ended rule (``end_date``
+        back to NULL) or clear nullable shape fields.  Passing
+        ``None``/a new value for a date field validates its shape.
+        Editing a rule that a definition references changes future
+        materializations only — this method touches no instances
+        (Feature 06/07 separation).
         """
+        date_args = (
+            ("start_date", start_date),
+            ("end_date", end_date),
+        )
+        for field, value in date_args:
+            if value is not _UNSET and value is not None:
+                _validate_date(value, field)
         assignments: list[str] = []
         parameters: list[object] = []
         for column, value in (
@@ -184,7 +233,7 @@ class ScheduleRulesDao:
             ("start_date", start_date),
             ("end_date", end_date),
         ):
-            if value is not None:
+            if value is not _UNSET:
                 assignments.append(f"{column} = ?")
                 parameters.append(value)
         if not assignments:
@@ -247,44 +296,58 @@ class TaskDefinitionsDao:
     ) -> TaskDefinitionRecord:
         """Insert one definition and return the record as stored.
 
-        Validates the assignment target before saving: the child must
-        exist and be active, and the rule must exist.  The schema
-        foreign keys would reject unknown ids anyway, but an INACTIVE
-        child would pass them — that check must happen here.
+        Validates the assignment target as part of the same serialized
+        transaction as the insert: the child must exist and be active,
+        and the rule must exist, AT INSERT TIME — a child deactivated
+        or a rule deleted concurrently cannot slip between the checks
+        and the INSERT, which would otherwise create an invalid
+        assignment or surface as a raw FK IntegrityError instead of
+        the documented ValueError.  An INACTIVE child would pass the
+        schema foreign keys, which is why the activeness check lives
+        here.
         """
-        child = await self._database.fetch_one(
-            "SELECT is_active FROM children WHERE id = ?", (child_id,)
-        )
-        if child is None:
-            raise ValueError(f"child {child_id} does not exist")
-        if not child[0]:
-            raise ValueError(
-                f"child {child_id} is inactive and cannot be assigned"
-            )
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                await self._validate_assignable(
+                    child_id, schedule_rule_id
+                )
+                result = await self._database.execute(
+                    "INSERT INTO task_definitions (title, description, "
+                    "icon, child_id, schedule_rule_id, due_time, "
+                    "is_active, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        title,
+                        description,
+                        icon,
+                        child_id,
+                        schedule_rule_id,
+                        due_time,
+                        int(is_active),
+                        created_at,
+                    ),
+                )
+                definition = await self.get(result.lastrowid)
+        assert definition is not None
+        return definition
+
+    async def _validate_assignable(
+        self, child_id: int, schedule_rule_id: int
+    ) -> None:
+        """Raise ValueError unless child (active) and rule both exist.
+
+        MUST be called inside the connection lock so the verdict cannot
+        go stale before the caller's INSERT commits.
+        """
+        await self._validate_assignable_child(child_id)
         rule = await self._database.fetch_one(
             "SELECT 1 FROM schedule_rules WHERE id = ?",
             (schedule_rule_id,),
         )
         if rule is None:
-            raise ValueError(f"schedule rule {schedule_rule_id} does not exist")
-        result = await self._database.execute(
-            "INSERT INTO task_definitions (title, description, icon, "
-            "child_id, schedule_rule_id, due_time, is_active, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                title,
-                description,
-                icon,
-                child_id,
-                schedule_rule_id,
-                due_time,
-                int(is_active),
-                created_at,
-            ),
-        )
-        definition = await self.get(result.lastrowid)
-        assert definition is not None
-        return definition
+            raise ValueError(
+                f"schedule rule {schedule_rule_id} does not exist"
+            )
 
     async def get(self, definition_id: int) -> TaskDefinitionRecord | None:
         """Return the definition with ``definition_id``, or None."""
@@ -316,17 +379,20 @@ class TaskDefinitionsDao:
         self,
         definition_id: int,
         *,
-        title: str | None = None,
-        description: str | None = None,
-        icon: str | None = None,
-        due_time: str | None = None,
+        title: str | None | object = _UNSET,
+        description: str | None | object = _UNSET,
+        icon: str | None | object = _UNSET,
+        due_time: str | None | object = _UNSET,
     ) -> int:
         """Update the given fields; returns rows updated (0 if absent).
 
-        Assignment and activation are deliberately NOT settable here:
-        they have their own explicit operations (:meth:`set_assignee`,
-        :meth:`set_active`) so they stay separately loggable and
-        permission-gateable.
+        Arguments default to the module sentinel ``_UNSET`` meaning
+        "leave this column alone"; passing ``None`` explicitly writes
+        SQL NULL, so callers can remove optional metadata
+        (description, icon, due_time).  Assignment and activation are
+        deliberately NOT settable here: they have their own explicit
+        operations (:meth:`set_assignee`, :meth:`set_active`) so they
+        stay separately loggable and permission-gateable.
         """
         assignments: list[str] = []
         parameters: list[object] = []
@@ -336,7 +402,7 @@ class TaskDefinitionsDao:
             ("icon", icon),
             ("due_time", due_time),
         ):
-            if value is not None:
+            if value is not _UNSET:
                 assignments.append(f"{column} = ?")
                 parameters.append(value)
         if not assignments:
@@ -366,9 +432,27 @@ class TaskDefinitionsDao:
     ) -> int:
         """Reassign the definition to ``child_id``; rows updated (0 if absent).
 
-        Validates the new assignee like :meth:`create` (existing and
-        active).  Changes future instances only: already-generated
+        Validates the new assignee inside the same serialized
+        transaction as the UPDATE (existing and active AT ASSIGNMENT
+        TIME), so a child deactivated concurrently cannot become the
+        assignee.  Changes future instances only: already-generated
         instances and completion history are never rewritten here.
+        """
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                await self._validate_assignable_child(child_id)
+                result = await self._database.execute(
+                    "UPDATE task_definitions SET child_id = ? "
+                    "WHERE id = ?",
+                    (child_id, definition_id),
+                )
+        return result.rowcount
+
+    async def _validate_assignable_child(self, child_id: int) -> None:
+        """Raise ValueError unless the child exists and is active.
+
+        MUST be called inside the connection lock so the verdict cannot
+        go stale before the caller's UPDATE commits.
         """
         child = await self._database.fetch_one(
             "SELECT is_active FROM children WHERE id = ?", (child_id,)
@@ -379,8 +463,3 @@ class TaskDefinitionsDao:
             raise ValueError(
                 f"child {child_id} is inactive and cannot be assigned"
             )
-        result = await self._database.execute(
-            "UPDATE task_definitions SET child_id = ? WHERE id = ?",
-            (child_id, definition_id),
-        )
-        return result.rowcount
