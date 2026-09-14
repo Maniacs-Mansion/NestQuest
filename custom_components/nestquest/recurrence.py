@@ -387,3 +387,92 @@ class ScheduleRule:
             start_date=data.get("start_date", "1970-01-01"),
             end_date=data.get("end_date"),
         )
+
+
+# ---------------------------------------------------------------------------
+# Evaluation engine (Feature 04): pure date arithmetic on ScheduleRule
+# ---------------------------------------------------------------------------
+
+
+def _parse_date(value: str) -> datetime.date:
+    """Parse a strict ISO date already validated by the model."""
+    return datetime.datetime.strptime(value, _DATE_FORMAT).date()
+
+
+def _anchor_offset(rule: ScheduleRule, target: datetime.date) -> int:
+    """Day offset from the rule's anchor date to ``target``.
+
+    The anchor for DAILY/WEEKLY-interval arithmetic is start_date: the
+    first day the rule CAN fire.  A negative offset means the target
+    precedes the rule's window entirely.
+    """
+    return (target - _parse_date(rule.start_date)).days
+
+
+def _within_window(rule: ScheduleRule, target: datetime.date) -> bool:
+    """True when ``target`` is inside the rule's [start, end] window."""
+    if target < _parse_date(rule.start_date):
+        return False
+    if rule.end_date is not None and target > _parse_date(rule.end_date):
+        return False
+    return True
+
+
+def occurs_on(rule: ScheduleRule, target: datetime.date) -> bool:
+    """Return True when ``rule`` fires on ``target``.
+
+    Pure function: no I/O, no timezone awareness, no mutation.  Dates
+    are plain calendar dates (Feature 04 guardrail); the caller decides
+    the timezone that produced them.
+    """
+    # Dispatch FIRST: an unimplemented shape must raise loudly even for
+    # dates outside the window, never silently evaluate to False.
+    shape = rule.rule_type
+    if shape is not RuleType.DAILY:
+        raise NotImplementedError(
+            f"occurs_on for {shape} lands with its own engine task "
+            "(Features 04 task sequence)"
+        )
+    if not _within_window(rule, target):
+        return False
+    offset = (target - _parse_date(rule.start_date)).days
+    return offset % rule.interval == 0
+
+
+def occurrences_between(
+    rule: ScheduleRule, start: str, end: str
+) -> list[str]:
+    """Return every date string in [start, end] the rule fires on.
+
+    Inclusive on both ends.  Raises RuleValidationError on malformed or
+    inverted bounds; a window entirely outside [rule.start_date,
+    rule.end_date] yields an empty list.
+    """
+    if rule.rule_type is not RuleType.DAILY:
+        raise NotImplementedError(
+            f"occurrences_between for {rule.rule_type} lands with its own "
+            "engine task (Features 04 task sequence)"
+        )
+    _validate_date(start, "start")
+    _validate_date(end, "end")
+    start_date = _parse_date(start)
+    end_date = _parse_date(end)
+    if end_date < start_date:
+        raise RuleValidationError(
+            f"end {end!r} must be on or after start {start!r}"
+        )
+    rule_start = _parse_date(rule.start_date)
+    if end_date < rule_start:
+        return []
+    # Clamp the walk to the rule's own window and the queried range.
+    effective_start = max(start_date, rule_start)
+    effective_end = end_date
+    if rule.end_date is not None:
+        effective_end = min(effective_end, _parse_date(rule.end_date))
+    results: list[str] = []
+    cursor = effective_start
+    while cursor <= effective_end:
+        if occurs_on(rule, cursor):
+            results.append(cursor.isoformat())
+        cursor += datetime.timedelta(days=1)
+    return results
