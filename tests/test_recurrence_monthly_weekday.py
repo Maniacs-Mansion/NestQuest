@@ -213,11 +213,12 @@ def test_fifth_weekday_skips_four_occurrence_months() -> None:
             hit = _d(f"2026-{month:02d}-{day:02d}")
             assert hit.weekday() == 0
             assert occurs_on(rule, hit) is True, hit
-            # It is the FINAL Monday of the month: no Monday after it.
-            if day + 7 <= _month_end_days(2026, month):
+            # It is the FINAL Monday of the month: sweep EVERY remaining
+            # calendar day after the hit — none may fire.
+            for later in range(day + 1, _month_end_days(2026, month) + 1):
                 assert occurs_on(
-                    rule, datetime.date(2026, month, day + 7)
-                ) is False
+                    rule, datetime.date(2026, month, later)
+                ) is False, f"2026-{month:02d}-{later:02d}"
             # The Monday a week earlier is not the fifth.
             assert occurs_on(
                 rule, datetime.date(2026, month, day - 7)
