@@ -172,15 +172,24 @@ def test_upsert_concurrent_same_child_serializes(tmp_path) -> None:
         # Everything before arming (open, migrations, child create)
         # and everything after (B's jobs, A's remaining jobs, reads)
         # pass straight through.
-        armed = {"active": False, "gated_once": False}
+        armed = {"active": False, "gated": False}
         gate_open = asyncio.Event()
         a_started = asyncio.Event()
 
         async def _gated_executor(fn, *args):
-            if armed["active"] and not armed["gated_once"]:
-                armed["gated_once"] = True
-                a_started.set()
-                await gate_open.wait()
+            # Gate the SECOND gated-window job: the first is the
+            # transaction's BEGIN (submitted and awaited by
+            # transaction() before upsert_by_child's child-SELECT
+            # runs).  Pausing the child-existence SELECT proves the
+            # BEGIN has EXECUTED — SQLite is actually inside the open
+            # transaction, with A holding the connection lock — when
+            # task B gets scheduled and must queue.
+            if armed["active"]:
+                name = getattr(fn, "__name__", "")
+                if name == "_fetch_one" and not armed["gated"]:
+                    armed["gated"] = True
+                    a_started.set()
+                    await gate_open.wait()
             return fn(*args)
 
         hass.async_add_executor_job = _gated_executor
@@ -198,9 +207,10 @@ def test_upsert_concurrent_same_child_serializes(tmp_path) -> None:
                     child.id, 2, "2026-09-07", "0,2|1,3"
                 )
             )
-            # Wait until task A's first transactional job is paused
-            # (A holds the connection lock, transaction open), then
-            # schedule task B so it must queue behind A.
+            # Wait until task A's child-existence SELECT (inside its
+            # open transaction, BEGIN already executed) is paused, then
+            # schedule task B so it must queue behind the open
+            # transaction.
             await a_started.wait()
             armed["active"] = False
             task_b = asyncio.ensure_future(
