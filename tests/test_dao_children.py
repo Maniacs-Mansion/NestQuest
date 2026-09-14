@@ -657,12 +657,21 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
             """Yield (block, is_pytest_integrity) for pytest.raises blocks.
 
             Structurally exact: the call func must resolve to
-            pytest.raises (Attribute pytest.raises, or a bare Name
-            imported from pytest — checked against the file's import
-            section), and the matcher argument must be an AST chain
-            whose final segment is exactly IntegrityError (so
+            pytest.raises — Attribute(pytest, raises) or a bare Name
+            whose id is bound to pytest via the file's own import
+            section (validated below).  The matcher argument must be an
+            AST chain whose final segment is exactly IntegrityError (so
             NotIntegrityError and fake.IntegrityError fail).
             """
+            # Names this file imports from pytest as `raises` (e.g.
+            # `from pytest import raises`): a bare Name is only trusted
+            # when bound that way.  `from x import raises` for x != pytest
+            # is rejected.
+            imported_as_raises = re.search(
+                r"from\s+pytest\s+import\s+.*\braises\b",
+                text,
+                re.IGNORECASE,
+            )
             for sub in ast.walk(node):
                 if not (
                     isinstance(sub, ast.With)
@@ -680,7 +689,7 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
                     ):
                         continue
                 elif isinstance(func, ast.Name):
-                    if func.id != "raises":
+                    if func.id != "raises" or not imported_as_raises:
                         continue
                 else:
                     continue
@@ -730,28 +739,33 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
             last = segments[-1].strip("`'\"[]")
             return last.casefold() == table.casefold()
 
+        # In a sanctioned function, EVERY raw statement naming either
+        # table must be exactly that function's one expected-table
+        # constraint insert — an admin_users insert inside the children
+        # function (or vice versa) is a bypass attempt and fails here,
+        # as does any second insert of the expected table.
         for insert, rendered in raw_statements:
             if not any_table.search(rendered):
                 continue
-            assert allowed_stmt.match(rendered.strip()) is not None, (
-                f"{node.name}: raw {table} table SQL "
-                f"must be INSERT or SELECT, got: {rendered[:80]!r}"
+            assert _is_insert_into_table(rendered, table), (
+                f"{node.name}: raw statement naming the other table is "
+                f"forbidden; only the {table} probe is sanctioned: "
+                f"{rendered[:80]!r}"
             )
-            if _is_insert_into_table(rendered, table):
-                # This is the sanctioned probe: require pytest.raises
-                # with an exact IntegrityError matcher around it.
-                inside = any(
-                    block.lineno <= insert.lineno
-                    and insert.end_lineno <= block.end_lineno
-                    and matcher_ok
-                    for block, matcher_ok in _raises_blocks()
-                )
-                assert inside, (
-                    f"the raw {table} insert in {node.name} must be nested "
-                    "in a pytest.raises(...IntegrityError...) block "
-                    "(expected-to-fail constraint probe, not a write)"
-                )
-                probes_per_function[node.name] += 1
+            # This is the sanctioned probe: require pytest.raises
+            # with an exact IntegrityError matcher around it.
+            inside = any(
+                block.lineno <= insert.lineno
+                and insert.end_lineno <= block.end_lineno
+                and matcher_ok
+                for block, matcher_ok in _raises_blocks()
+            )
+            assert inside, (
+                f"the raw {table} insert in {node.name} must be nested "
+                "in a pytest.raises(...IntegrityError...) block "
+                "(expected-to-fail constraint probe, not a write)"
+            )
+            probes_per_function[node.name] += 1
         # UPDATE/DELETE naming the tables anywhere in a sanctioned
         # function is forbidden outright.
         for _, rendered in raw_statements:
