@@ -687,13 +687,25 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
                 matcher_ok = False
                 if call.args:
                     matcher = call.args[0]
-                    # Accept a Name IntegrityError or an Attribute chain
-                    # ending in the exact Name IntegrityError.
-                    if isinstance(matcher, ast.Name):
-                        matcher_ok = matcher.id == "IntegrityError"
-                    elif isinstance(matcher, ast.Attribute):
-                        matcher_ok = matcher.attr == "IntegrityError"
+                    matcher_ok = _is_integrity_error_node(matcher)
                 yield sub, matcher_ok
+
+        def _is_integrity_error_node(matcher) -> bool:
+            """True for an AST chain of Name/Attribute ending exactly at
+            IntegrityError: every Attribute base must itself be a Name
+            or Attribute (a Call base like __import__('x') fails)."""
+            node = matcher
+            while isinstance(node, ast.Attribute):
+                node = node.value
+            if not isinstance(node, ast.Name):
+                return False
+            final = matcher
+            while isinstance(final, ast.Attribute):
+                final = final.attr
+            return (
+                isinstance(final, str)
+                and ast.unparse(matcher).split(".")[-1] == "IntegrityError"
+            )
 
         # INSERT OR variant / quoted / qualified / schema-qualified
         # names: normalize the SQL so ANY spelling of an insert into
@@ -710,11 +722,13 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
                 return False
             target = insert_match.group(2)
             # Tokenize the target's leading identifier: strip quotes
-            # and brackets, take the LAST dot-separated segment.
+            # and brackets, take the LAST dot-separated segment,
+            # casefolded so 'CHILDREN' cannot bypass the lowercase
+            # table name the scan looks for.
             identifier = re.split(r"[\s(]", target, maxsplit=1)[0]
             segments = re.split(r"\.", identifier)
             last = segments[-1].strip("`'\"[]")
-            return last == table
+            return last.casefold() == table.casefold()
 
         for insert, rendered in raw_statements:
             if not any_table.search(rendered):
