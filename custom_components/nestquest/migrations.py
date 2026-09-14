@@ -131,6 +131,13 @@ async def apply_migrations(
     migrations (database already current) is a no-op that logs at debug
     level and opens no write transaction.
 
+    The version is re-read inside each migration transaction before
+    deciding to apply it: the outer read is advisory only (loop bounds,
+    no-op fast path), and on one shared connection two interleaved
+    runners would otherwise both read the same version and both apply
+    a non-idempotent migration.  Under the transaction's lock the
+    second runner sees the first runner's stamp and skips.
+
     Raises whatever the failing migration raised, with the database
     rolled back to its prior version and prior rows untouched.
     """
@@ -153,25 +160,46 @@ async def apply_migrations(
         return current
 
     for target in range(current + 1, latest + 1):
-        statements = migrations[target - 1]
+        applied = False
         async with database.transaction():
-            for sql in statements:
-                await database.execute(sql)
-            # UPDATE keyed on the singleton row (id = 1): a fresh file
-            # has no row yet, but migration 1 is the only migration a
-            # version-0 database can run, so the row is seeded by the
-            # same statement batch when needed.  UPDATE alone would
-            # silently match zero rows there, so seed-if-absent first.
-            await database.execute(
-                f"INSERT INTO {VERSION_TABLE} (id, version) VALUES (1, ?) "
-                "ON CONFLICT (id) DO UPDATE SET version = excluded.version",
-                (target,),
+            # Re-read the version INSIDE the write transaction.  The
+            # version read before the loop is advisory (it sizes the
+            # loop and enables the byte-identical no-op fast path), but
+            # two runners on one connection interleave between their
+            # reads: the wrapper serializes individual statements, not
+            # the read-decide-apply decision.  Re-reading under the
+            # transaction's lock means the loser of the race sees the
+            # winner's stamp and skips instead of re-applying a
+            # non-idempotent migration with a stale version.
+            in_tx_version = await read_schema_version(database)
+            if in_tx_version > latest:
+                raise RuntimeError(
+                    f"Database schema version {in_tx_version} is newer "
+                    f"than this integration understands (latest known: "
+                    f"{latest}); downgrades are not supported"
+                )
+            if in_tx_version < target:
+                for sql in migrations[target - 1]:
+                    await database.execute(sql)
+                # INSERT keyed on the singleton row (id = 1): a fresh
+                # file has no row yet, and migration 1 is the only
+                # migration a version-0 database can run, so the row is
+                # seeded by the same statement batch when needed.
+                # UPDATE alone would silently match zero rows there.
+                await database.execute(
+                    f"INSERT INTO {VERSION_TABLE} (id, version) "
+                    "VALUES (1, ?) "
+                    "ON CONFLICT (id) DO UPDATE SET version = "
+                    "excluded.version",
+                    (target,),
+                )
+                applied = True
+        if applied:
+            LOGGER.info(
+                "NestQuest schema migrated to version %d (%d statement%s)",
+                target,
+                len(migrations[target - 1]),
+                "s" if len(migrations[target - 1]) != 1 else "",
             )
-        LOGGER.info(
-            "NestQuest schema migrated to version %d (%d statement%s)",
-            target,
-            len(statements),
-            "s" if len(statements) != 1 else "",
-        )
 
     return latest

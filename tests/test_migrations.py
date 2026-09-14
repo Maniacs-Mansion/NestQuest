@@ -574,9 +574,16 @@ async def test_options_reload_reopens_and_rechecks_version(
 async def test_setup_entry_failure_closes_database(
     hass, make_entry, monkeypatch
 ) -> None:
+    """A failing migration closes the opened connection before re-raising.
+
+    Spies on the real wrapper instance: records whether close() ran and
+    whether the connection is left disconnected, rather than inferring
+    from hass.data (a failed setup never stores a runtime record).
+    """
     import pytest as pytest_module
 
     import custom_components.nestquest as nestquest_module
+    from custom_components.nestquest.db import NestQuestDatabase
     from custom_components.nestquest.migrations import (
         MIGRATIONS as _MIGRATIONS,
     )
@@ -587,12 +594,22 @@ async def test_setup_entry_failure_closes_database(
     monkeypatch.setattr(
         nestquest_module, "apply_migrations", _failing, raising=True
     )
+
+    close_calls: list[bool] = []
+    original_close = NestQuestDatabase.close
+
+    async def _spy_close(self):
+        close_calls.append(True)
+        return await original_close(self)
+
+    monkeypatch.setattr(NestQuestDatabase, "close", _spy_close)
+
     entry = make_entry()
     with pytest_module.raises(RuntimeError, match="boom"):
         await _setup_entry(hass, entry, hass.registry)
-    # Setup closed the connection before re-raising: no leaked handle.
-    # The record only lands in hass.data after the listener is added, so
-    # on failure the connection must be gone from the wrapper itself.
+
+    assert close_calls == [True], (
+        "failed setup must close the connection it opened"
+    )
     record = hass.data["nestquest"].get(entry.entry_id)
-    if record is not None:
-        assert not record.database.connected
+    assert record is None, "failed setup must not store runtime data"
