@@ -237,3 +237,22 @@ async def test_unload_closes_database_even_when_listener_removal_raises() -> Non
     assert database.connected is False, "database leaked despite remover error"
     assert entry.runtime_data is None
     assert DOMAIN not in hass.data
+
+
+async def test_setup_applies_all_v1_tables(hass, make_entry) -> None:
+    """Setup applies the full v1 DDL: all four v1 tables exist afterwards."""
+    entry = _wire(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    database = entry.runtime_data.database
+    rows = await database.fetch_all(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name IN ('children', 'admin_users', 'schedule_rules', "
+        "'task_definitions') ORDER BY name"
+    )
+    assert [row[0] for row in rows] == [
+        "admin_users",
+        "children",
+        "schedule_rules",
+        "task_definitions",
+    ]
+    await async_unload_entry(hass, entry)
