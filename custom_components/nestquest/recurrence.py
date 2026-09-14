@@ -40,15 +40,15 @@ reach storage):
   when present, on or after ``start_date``.
 
 Month-end policy (implemented in :func:`_occurs_monthly_day` and
-documented for Feature 04): a MONTHLY_DAY rule for a day that does not
-exist in a given month — the 31st in April, the 30th or 29th in
-February, February 29th in a non-leap year — fires on the LAST day of
-that month instead of being skipped.  A monthly chore still happens
-every month, pinned to the month's end when its nominal date is
-absent; exactly one day per month matches the rule (nominal day when
-it exists, month end when it does not).  The interval anchors on
-nominal months elapsed from start_date's month, so clamping never
-shifts the cadence.
+documented for Feature 04): in each interval-eligible month, a
+MONTHLY_DAY rule for a day that does not exist in that month — the
+31st in April, the 30th or 29th in February, February 29th in a
+non-leap year — fires on the LAST day of the month instead of being
+skipped.  A monthly chore still happens in every eligible month,
+pinned to the month's end when its nominal date is absent; exactly one
+day per eligible month matches the rule (nominal day when it exists,
+month end when it does not).  The interval anchors on nominal months
+elapsed from start_date's month, so clamping never shifts the cadence.
 """
 from __future__ import annotations
 
@@ -434,11 +434,12 @@ def _month_end(year: int, month: int) -> int:
 def _occurs_monthly_day(rule: ScheduleRule, target: datetime.date) -> bool:
     """MONTHLY_DAY evaluation with the documented month-end policy.
 
-    Policy: a rule for a day-of-month that does not exist in a given
-    month (the 31st in April, the 30th in February, the 29th of
-    February in a non-leap year) fires on the LAST day of that month
-    instead of being skipped — a monthly chore still happens monthly,
-    pinned to the month's end when its nominal date is absent.
+    Policy: in each interval-eligible month, a rule for a day-of-month
+    that does not exist in that month (the 31st in April, the 30th in
+    February, the 29th of February in a non-leap year) fires on the
+    LAST day of that month instead of being skipped — the chore still
+    happens that month, pinned to the month's end when its nominal date
+    is absent.
 
     The interval anchors on months ELAPSED from start_date's month: the
     rule fires when the months between the anchor month and the target's
