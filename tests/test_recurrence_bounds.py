@@ -108,11 +108,26 @@ BOUNDARY_RULES = [
 def test_no_firing_before_start_date(index) -> None:
     fixture = BOUNDARY_RULES[index]
     rule = ScheduleRule(**fixture["kwargs"])
-    first = fixture["first_firing"]
-    # Every day BEFORE start_date never fires — sweep the week before
-    # plus the full prior month.
     before_start = _d(rule.start_date)
-    sweep_from = before_start - datetime.timedelta(days=30)
+    # The sweep must cover the shape's PRIOR nominal occurrence:
+    # - MONTHLY_DAY: the prior month's clamped day (e.g. Feb 28/31)
+    # - YEARLY: the prior year's nominal day
+    # - WEEKLY/CUSTOM_DAYS: the prior week's matching weekday
+    # - MONTHLY_WEEKDAY: the prior month's nth weekday
+    if rule.rule_type is RuleType.MONTHLY_DAY:
+        sweep_from = _month_end(2026, 2)  # Feb 28, a nominal clamp day
+    elif rule.rule_type is RuleType.YEARLY:
+        sweep_from = datetime.date(
+            _d(rule.start_date).year - 1, rule.month, rule.day_of_month
+        )
+    elif rule.rule_type is RuleType.MONTHLY_WEEKDAY:
+        sweep_from = _tuesday(2026, 2, 2)  # prior month's 2nd Tuesday
+    elif rule.rule_type is RuleType.WEEKLY:
+        sweep_from = before_start - datetime.timedelta(days=7)
+    elif rule.rule_type is RuleType.CUSTOM_DAYS:
+        sweep_from = before_start - datetime.timedelta(days=7)
+    else:
+        sweep_from = before_start - datetime.timedelta(days=30)
     cursor = sweep_from
     while cursor < before_start:
         assert occurs_on(rule, cursor) is False, cursor
@@ -175,6 +190,15 @@ def test_no_firing_after_end_date_at_nominal_shapes() -> None:
     # Monday, not in the set).
     assert occurs_on(rule_weekly, _d("2026-09-29")) is True
     assert occurs_on(rule_weekly, _d("2026-10-06")) is False
+
+    rule_monthly_weekday = ScheduleRule(
+        rule_type=RuleType.MONTHLY_WEEKDAY, nth_weekday=2,
+        nth_weekday_weekday=1, start_date="2026-03-03",
+        end_date="2026-10-05",
+    )
+    # The next nominal second Tuesday (Oct 13) is past end_date: silent.
+    assert occurs_on(rule_monthly_weekday, _d("2026-09-08")) is True
+    assert occurs_on(rule_monthly_weekday, _d("2026-10-13")) is False
 
 
 def test_no_end_date_means_no_upper_bound() -> None:
@@ -241,11 +265,30 @@ def test_end_date_equal_to_start_date_allows_one_day_window() -> None:
     assert occurs_on(weekly, _d("2026-03-10")) is True
     assert occurs_on(weekly, _d("2026-03-17")) is False
 
+    custom = ScheduleRule(
+        rule_type=RuleType.CUSTOM_DAYS, weekday_set={2, 4},
+        start_date="2026-03-11", end_date="2026-03-11",
+    )
+    # Mar 11 2026 is a Wednesday: fires. Next Wed (18) is out of window.
+    assert _d("2026-03-11").weekday() == 2
+    assert occurs_on(custom, _d("2026-03-11")) is True
+    assert occurs_on(custom, _d("2026-03-18")) is False
+
     monthly_day = ScheduleRule(
         rule_type=RuleType.MONTHLY_DAY, day_of_month=15,
         start_date="2026-03-15", end_date="2026-03-15",
     )
     assert occurs_on(monthly_day, _d("2026-03-15")) is True
+
+    monthly_weekday = ScheduleRule(
+        rule_type=RuleType.MONTHLY_WEEKDAY, nth_weekday=2,
+        nth_weekday_weekday=1, start_date="2026-03-10",
+        end_date="2026-03-10",
+    )
+    # Mar 10 2026 is the second Tuesday: the one-day window admits it.
+    assert _d("2026-03-10").weekday() == 1
+    assert occurs_on(monthly_weekday, _d("2026-03-10")) is True
+    assert occurs_on(monthly_weekday, _d("2026-04-14")) is False
 
     yearly = ScheduleRule(
         rule_type=RuleType.YEARLY, month=3, day_of_month=15,
