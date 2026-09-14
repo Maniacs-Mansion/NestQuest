@@ -307,14 +307,11 @@ def test_monthly_weekday_occurrences_between_span() -> None:
         start_date="2026-01-01", end_date="2026-04-30",
     )
     result = occurrences_between(rule, "2026-01-01", "2026-04-30")
-    second_fridays = [
-        _nth_weekday_of_month(2026, month, 4, 2) for month in (1, 2, 3, 4)
+    # Independently verified second Fridays: Jan 9 (Jan 1 Thu), Feb 13
+    # (Feb 1 Sun), Mar 13 (Mar 1 Sun), Apr 10 (Apr 1 Wed).
+    assert result == [
+        "2026-01-09", "2026-02-13", "2026-03-13", "2026-04-10",
     ]
-    expected = [
-        f"2026-{month:02d}-{day:02d}"
-        for month, day in zip((1, 2, 3, 4), second_fridays)
-    ]
-    assert result == expected
 
 
 def test_monthly_weekday_occurrences_between_rejects_inverted() -> None:
