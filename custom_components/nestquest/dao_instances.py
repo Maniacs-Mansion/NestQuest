@@ -31,11 +31,54 @@ instance that has a completion event.
 """
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass
 
 from .dao_children import _connection_lock
 from .dao_rules import _validate_date
 from .db import NestQuestDatabase
+
+#: Timestamp policy for completion_events.occurred_at: strict UTC
+#: ISO-8601 with explicit '+00:00' offset (module timestamp policy).
+#: One accepted shape bounds lexicographic range queries correctly, so
+#: the occurred-at scope does not guess at timestamp spellings.
+_UTC_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S+00:00"
+
+
+def _validate_utc_timestamp(value: str, field: str) -> None:
+    """Raise ValueError unless ``value`` is a strict UTC ISO-8601 stamp.
+
+    Same strictness policy as _validate_date: parse with the exact
+    format, then round-trip the parsed value against the input so
+    non-padded or re-ordered shapes are rejected.  The round-trip
+    strips the UTC offset (isoformat() omits it when the offset is
+    zero), so the suffix is appended before comparing.
+    """
+    try:
+        parsed = datetime.datetime.strptime(
+            value, _UTC_TIMESTAMP_FORMAT
+        )
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{field} must be a UTC ISO-8601 timestamp "
+            f"(YYYY-MM-DDTHH:MM:SS+00:00), got {value!r}"
+        ) from None
+    if parsed.isoformat() + "+00:00" != value:
+        raise ValueError(
+            f"{field} must be a strict UTC timestamp "
+            f"(YYYY-MM-DDTHH:MM:SS+00:00), got {value!r}"
+        )
+
+
+def _next_day_start(date_str: str) -> str:
+    """Return the UTC timestamp one second past ``date_str``'s last second.
+
+    Gives range queries an exact half-open upper bound without
+    fractional-second guessing.
+    """
+    day = datetime.date.fromisoformat(date_str)
+    next_day = day + datetime.timedelta(days=1)
+    return f"{next_day.isoformat()}T00:00:00+00:00"
 
 
 @dataclass(frozen=True)
@@ -123,12 +166,29 @@ class TaskInstancesDao:
         yields ONE row: the ON CONFLICT path refreshes the
         generation-time snapshot columns (child_id, due_time) and
         regenerates the stamp, but can never create a duplicate — the
-        schema UNIQUE(definition_id, due_date) backs this up.  The
-        definition must exist (validated atomically under the
+        schema UNIQUE(definition_id, due_date) backs this up.
+
+        Guardrails enforced here:
+
+        - ``due_date`` must be TODAY or later: instances are never
+          generated in the past (Feature 07).  The caller's
+          materialization horizon is future-dated by definition.
+        - An existing instance WITH a completion event is IMMUTABLE:
+          the conflict path must not rewrite its snapshot columns
+          (Feature 07/08).  The upsert refuses with ValueError in that
+          case — silently no-oping would mask a materialization bug.
+
+        The definition must exist (validated atomically under the
         connection lock so a concurrent definition deactivation or
         child deletion cannot slip between check and insert).
         """
         _validate_date(due_date, "due_date")
+        today = datetime.date.today().isoformat()
+        if due_date < today:
+            raise ValueError(
+                f"instances are never generated in the past: due_date "
+                f"{due_date!r} is before today {today!r}"
+            )
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 definition = await self._database.fetch_one(
@@ -150,6 +210,18 @@ class TaskInstancesDao:
                 )
                 if child is None:
                     raise ValueError(f"child {child_id} does not exist")
+                existing = await self._database.fetch_one(
+                    "SELECT 1 FROM completion_events "
+                    "WHERE instance_id = (SELECT id FROM task_instances "
+                    "WHERE definition_id = ? AND due_date = ?)",
+                    (definition_id, due_date),
+                )
+                if existing is not None:
+                    raise ValueError(
+                        f"instance for (definition {definition_id}, "
+                        f"due_date {due_date!r}) already has a completion "
+                        "event and is immutable; it cannot be regenerated"
+                    )
                 await self._database.execute(
                     "INSERT INTO task_instances (definition_id, child_id, "
                     "due_date, due_time, generated_at) "
@@ -226,16 +298,23 @@ class TaskInstancesDao:
     async def delete_future_uncompleted(
         self, definition_id: int, cutoff_date: str
     ) -> int:
-        """Delete the definition's instances at/after cutoff with no events.
+        """Delete the definition's open instances at/after cutoff.
 
         Implements regeneration after a definition edit or reassignment
-        (Features 06/07): only future, never-completed instances are
-        removed, inside one transaction — an instance that gains a
-        completion event mid-flight cannot be deleted.  Instances
-        before the cutoff and any instance with a completion event are
-        never touched.  Returns the number deleted.
+        (Features 06/07): only instances at or after the cutoff with NO
+        completion event are removed, inside one transaction — an
+        instance that gains a completion event mid-flight cannot be
+        deleted.  The cutoff cannot be backdated below today: "future"
+        is measured against TODAY (materialization regenerates the
+        rolling horizon from now), so a caller cannot use this to
+        rewrite past open instances either — the day-rollover missed
+        sweep (Feature 11) handles past-due instances instead.  Any
+        instance with a completion event is never touched, regardless
+        of its date.  Returns the number deleted.
         """
         _validate_date(cutoff_date, "cutoff_date")
+        today = datetime.date.today().isoformat()
+        effective_cutoff = max(cutoff_date, today)
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 result = await self._database.execute(
@@ -244,7 +323,7 @@ class TaskInstancesDao:
                     "  SELECT 1 FROM completion_events "
                     "  WHERE instance_id = task_instances.id"
                     ")",
-                    (definition_id, cutoff_date),
+                    (definition_id, effective_cutoff),
                 )
         return result.rowcount
 
@@ -271,7 +350,7 @@ class CompletionEventsDao:
         event_type: str,
         actor_source: str,
         occurred_at: str,
-        was_on_time: bool,
+        was_on_time: bool | None,
         *,
         actor_user_id: str | None = None,
     ) -> CompletionEventRecord:
@@ -280,11 +359,13 @@ class CompletionEventsDao:
         ``actor_source`` is 'user' (with ``actor_user_id`` set) or
         'panel' (no user id — the tapped child is ``child_id``); the
         actor-pair CHECK enforces this shape at the schema level.
-        ``was_on_time`` is required for completions; for un-completions
-        it may be None or the reversed completion's flag (Feature 08
-        still deciding), so pass ``was_on_time=...`` or omit via
-        ``None``.  The instance and child must exist — validated
-        atomically under the connection lock.
+        ``occurred_at`` must be the module's one strict UTC shape
+        (YYYY-MM-DDTHH:MM:SS+00:00) so lexicographic range queries
+        stay exact.  ``was_on_time`` is required (True/False) for
+        completions; for un-completions it may be None or the reversed
+        completion's flag (Feature 08 still deciding).  The instance
+        and child must exist — validated atomically under the
+        connection lock.
         """
         if event_type not in (EVENT_COMPLETED, EVENT_UNCOMPLETED):
             raise ValueError(
@@ -304,10 +385,16 @@ class CompletionEventsDao:
             raise ValueError(
                 "actor_source 'panel' must not carry actor_user_id"
             )
+        if was_on_time is not None and type(was_on_time) is not bool:
+            raise ValueError(
+                f"was_on_time must be True, False or None, got "
+                f"{was_on_time!r}"
+            )
         if event_type == EVENT_COMPLETED and was_on_time is None:
             raise ValueError(
                 "a completed event requires was_on_time (True/False)"
             )
+        _validate_utc_timestamp(occurred_at, "occurred_at")
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 instance = await self._database.fetch_one(
@@ -391,19 +478,23 @@ class CompletionEventsDao:
             )
             parameters: list[object] = [child_id, range_start, range_end]
         else:
-            predicate = (
-                "SELECT id FROM task_instances WHERE child_id = ?"
-            )
-            parameters = [child_id]
-            occurred_start = f"{range_start}T00:00:00"
-            occurred_end = f"{range_end}T23:59:59.999999"
+            # Occurred-at scope: occurred_at is validated to the one
+            # accepted UTC shape at append time, so half-open day
+            # bounds in that same shape are exact (no spelling drift).
+            occurred_start = f"{range_start}T00:00:00+00:00"
+            occurred_end = f"{range_end}T23:59:59+00:00"
             query = (
                 f"SELECT {_EVENT_COLUMNS} FROM completion_events "
                 "WHERE child_id = ? AND occurred_at >= ? "
-                "AND occurred_at <= ? ORDER BY instance_id, id"
+                "AND occurred_at < ? ORDER BY instance_id, id"
             )
             rows = await self._database.fetch_all(
-                query, [child_id, occurred_start, occurred_end]
+                query,
+                [
+                    child_id,
+                    occurred_start,
+                    _next_day_start(range_end),
+                ],
             )
             return [_event_from_row(row) for row in rows]
         rows = await self._database.fetch_all(
