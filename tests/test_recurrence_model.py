@@ -297,25 +297,26 @@ def test_recurrence_module_imports_only_stdlib() -> None:
         elif isinstance(node, ast.ImportFrom):
             module = (node.module or "").lower()
             level = node.level  # 1+ means relative import
-            # 'from . import db' has module=None and the name in the
-            # aliases: check BOTH the module and every imported name.
-            imported_names = [alias.name for alias in node.names]
+            # Forbidden regardless of relative level: the leaf module
+            # names ('from . import db', 'from .db import x') AND any
+            # absolute custom_components.nestquest DB/store import.
             forbidden_targets = {
                 "db", "schema", "dao_children", "dao_rules",
                 "dao_presence", "dao_instances", "migrations", "store",
             }
-            if level:
-                for name in imported_names:
-                    assert name not in forbidden_targets, (
-                        f"recurrence.py must not import {name!r} from a "
-                        "relative import"
-                    )
+            imported_names = [alias.name for alias in node.names]
+            for name in imported_names:
+                leaf = name.split(".")[-1]
+                assert leaf not in forbidden_targets, (
+                    f"recurrence.py must not import {name!r}"
+                )
             if module:
+                full = f".{module}" if level else module
                 assert module not in forbidden_targets, (
-                    f"recurrence.py must not import from .{module}"
+                    f"recurrence.py must not import from {full}"
                 )
                 assert "db" not in module.split("."), (
-                    f"recurrence.py must not import from {module}"
+                    f"recurrence.py must not import from {full}"
                 )
             assert "homeassistant" not in module, (
                 f"recurrence.py must not import from {module}"
@@ -323,6 +324,43 @@ def test_recurrence_module_imports_only_stdlib() -> None:
             assert "sqlite" not in module, (
                 f"recurrence.py must not import from {module}"
             )
+
+
+def test_purity_guard_blocks_absolute_db_import(tmp_path) -> None:
+    """Absolute custom_components.nestquest DB imports (level=0) are
+    caught by the same alias-leaf scan the guard uses."""
+    import ast as ast_module
+
+    forbidden_targets = {
+        "db", "schema", "dao_children", "dao_rules", "dao_presence",
+        "dao_instances", "migrations", "store",
+    }
+    # The guard's own logic, exercised against probe statements:
+    from custom_components.nestquest import recurrence as recurrence_mod
+    probe_lines = (
+        "from custom_components.nestquest import db",
+        "from custom_components.nestquest.db import NestQuestDatabase",
+        "import custom_components.nestquest.dao_rules",
+    )
+    for line in probe_lines:
+        node = ast_module.parse(line).body[0]
+        caught = False
+        for item in ast_module.walk(node):
+            if isinstance(item, ast_module.ImportFrom):
+                module = (item.module or "").lower()
+                if module:
+                    leaf = module.split(".")[-1]
+                    if leaf in forbidden_targets:
+                        caught = True
+                for alias in item.names:
+                    if alias.name.split(".")[-1] in forbidden_targets:
+                        caught = True
+            elif isinstance(item, ast_module.Import):
+                for alias in item.names:
+                    leaf = alias.name.split(".")[-1]
+                    if leaf in forbidden_targets:
+                        caught = True
+        assert caught, f"probe import must be caught: {line}"
 
 
 def test_non_string_rule_type_rejected() -> None:

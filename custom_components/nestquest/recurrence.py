@@ -113,7 +113,9 @@ def _validate_weekday_set(weekday_set) -> frozenset[int]:
     """
     if isinstance(weekday_set, (list, tuple)):
         for entry in weekday_set:
-            if isinstance(entry, bool) or not isinstance(entry, int):
+            # _is_plain_int: bool and int subclasses (potentially
+            # unhashable) are rejected before set() coercion.
+            if not _is_plain_int(entry):
                 raise RuleValidationError(
                     f"weekday_set entries must be plain integers, got "
                     f"{entry!r}"
