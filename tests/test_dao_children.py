@@ -459,10 +459,11 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
     DELETE FROM/JOIN against either table — including DELETE FROM
     children, the hard-delete path the guardrail forbids.
 
-    Exclusions are narrowly justified: schema.py declares the tables'
-    DDL; migrations.py applies that DDL; test_schema.py and
-    test_migrations.py test exactly those DDL/migration layers.  None
-    of them touch the tables' data paths — that is the DAO's job.
+    Exclusions are exact repo-relative paths, narrowly justified:
+    schema.py declares the tables' DDL; migrations.py applies that DDL;
+    test_schema.py and test_migrations.py test exactly those
+    DDL/migration layers.  None of them touch the tables' data paths —
+    that is the DAO's job.
     """
     import re
     from pathlib import Path
@@ -476,12 +477,12 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
     scan_roots = [package, repo_root / "tests"]
 
     allowed = {
-        "dao_children.py",  # the DAO itself
-        "schema.py",  # declares the DDL
-        "migrations.py",  # applies the DDL
-        "test_schema.py",  # tests the DDL
-        "test_migrations.py",  # tests migration application of the DDL
-        "test_dao_children.py",  # this file, scanned separately below
+        "custom_components/nestquest/dao_children.py",  # the DAO itself
+        "custom_components/nestquest/schema.py",  # declares the DDL
+        "custom_components/nestquest/migrations.py",  # applies the DDL
+        "tests/test_schema.py",  # tests the DDL
+        "tests/test_migrations.py",  # tests migration application
+        "tests/test_dao_children.py",  # this file, scanned separately
     }
     sql_pattern = re.compile(
         r"(FROM|INTO|UPDATE|DELETE\s+FROM|JOIN)\s+"
@@ -491,10 +492,11 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
     offenders: list[str] = []
     for root in scan_roots:
         for py in sorted(root.rglob("*.py")):
-            if py.name in allowed:
+            relative = str(py.relative_to(repo_root))
+            if relative in allowed:
                 continue
             if sql_pattern.search(py.read_text()):
-                offenders.append(str(py.relative_to(repo_root)))
+                offenders.append(relative)
     assert offenders == [], (
         f"SQL touching children/admin_users leaked into: {offenders}"
     )
@@ -502,10 +504,14 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
 
 def test_dao_test_file_uses_dao_not_raw_table_sql() -> None:
     """This test module must exercise the DAO, not raw SQL, for these
-    tables — except inside the two guard functions themselves, whose
-    source spans are excluded precisely (by line range), so any code
-    added elsewhere in this file, before or after the guards, is still
-    scanned.
+    tables.  The two guard functions in this file necessarily mention
+    the table names inside their regex patterns; their source spans are
+    removed BEFORE the scan, and the remaining lines are then scanned
+    as ONE combined blob (not line-by-line), so SQL split across
+    physical lines — e.g. an implicitly concatenated string ending in
+    FROM children — is still caught.  The guard regexes themselves
+    cannot match the SQL keyword pattern, so removing the spans only
+    spares regex text, not executable SQL.
     """
     import ast
     import re
@@ -519,29 +525,29 @@ def test_dao_test_file_uses_dao_not_raw_table_sql() -> None:
         "test_children_and_admin_sql_lives_only_in_dao_module",
         "test_dao_test_file_uses_dao_not_raw_table_sql",
     }
-    excluded: list[tuple[int, int]] = []
+    excluded: set[int] = set()
     for node in ast.walk(tree):
         if (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name in guard_names
         ):
-            excluded.append((node.lineno, node.end_lineno or node.lineno))
+            excluded.update(
+                range(node.lineno, (node.end_lineno or node.lineno) + 1)
+            )
 
+    # Scan the source minus excluded lines as ONE blob so SQL split
+    # across physical lines cannot evade the pattern.
+    remaining = "".join(
+        line
+        for number, line in enumerate(lines, start=1)
+        if number not in excluded
+    )
     sql_pattern = re.compile(
-        r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+"
-        r'["\`]*(children|admin_users)\b',
+        r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE\s+SET|"
+        r"DELETE\s+FROM|FROM|JOIN)\s+['\"]*"
+        r"(children|admin_users)\b",
         re.IGNORECASE,
     )
-    offenders: list[str] = []
-    excluded_ranges = set()
-    for start, end in excluded:
-        excluded_ranges.update(range(start, end + 1))
-    for number, line in enumerate(lines, start=1):
-        if number in excluded_ranges:
-            continue
-        if sql_pattern.search(line):
-            offenders.append(f"{path.name}:{number}")
-    assert offenders == [], (
-        "tests must go through the DAO, not raw SQL, for these tables; "
-        f"found: {offenders}"
+    assert sql_pattern.search(remaining) is None, (
+        "tests must go through the DAO, not raw SQL, for these tables"
     )
