@@ -1,13 +1,17 @@
 """The NestQuest integration."""
 from __future__ import annotations
 
+import asyncio
 import inspect
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import DOMAIN, LOGGER
 from .db import NestQuestDatabase
@@ -15,6 +19,109 @@ from .migrations import apply_migrations
 from .store import async_get_db_path
 
 _LOGGER = LOGGER
+
+#: SQLite reports "file is not a database" for corruption in every
+#: sqlite3 version this integration targets; the version-specific
+#: "encrypted or malformed" spelling (3.41+) maps to the same failure.
+_CORRUPTION_MARKERS = (
+    "file is not a database",
+    "encrypted or malformed",
+)
+
+
+def _is_corruption_error(error: BaseException) -> bool:
+    """Return True when ``error`` indicates a corrupt database file.
+
+    Matching happens on the message: sqlite3.DatabaseError is the base
+    of several non-corruption errors too (e.g. OperationalError), and
+    only the corruption spellings warrant refusing to open.
+    """
+    message = str(error).lower()
+    return isinstance(error, sqlite3.DatabaseError) and any(
+        marker in message for marker in _CORRUPTION_MARKERS
+    )
+
+async def _async_open_database(
+    hass: HomeAssistant, db_path: Path
+) -> NestQuestDatabase:
+    """Open the NestQuest database, mapping failure modes for setup.
+
+    Three startup cases (Feature 02 done-condition):
+
+    - file missing: SQLite creates it fresh on open — no special path,
+      migrations stamp version 1 on the next step.
+    - file present and valid: opens normally.
+    - file present but corrupt: log an ERROR with the path, close
+      anything opened, and raise ConfigEntryNotReady so HA retries —
+      the file is left byte-for-byte untouched so the owner can
+      restore a backup.  No code path here deletes or overwrites an
+      existing database file.
+
+    Corruption can surface at EITHER stage: a truncated header fails
+    inside open() (the WAL-mode PRAGMA reads the header), while
+    damaged pages fail later, inside migrations.  Both are classified
+    the same way.
+    """
+    try:
+        database = await NestQuestDatabase(hass).open(db_path)
+    except asyncio.CancelledError:
+        raise
+    except sqlite3.DatabaseError as err:
+        if _is_corruption_error(err):
+            _LOGGER.error(
+                "NestQuest database at %s is corrupt: %s. Refusing to "
+                "start with a corrupt database; the file was left "
+                "untouched so a backup can be restored. Home Assistant "
+                "will retry setup.",
+                db_path,
+                err,
+            )
+            raise ConfigEntryNotReady(
+                f"NestQuest database corrupt: {db_path}"
+            ) from err
+        # open() failed for a non-corruption reason (locked file,
+        # permission problem): retryable, but nothing was opened.
+        _LOGGER.error(
+            "NestQuest database at %s failed to open: %s. Home "
+            "Assistant will retry setup.",
+            db_path,
+            err,
+        )
+        raise ConfigEntryNotReady(
+            f"NestQuest database unavailable: {db_path}"
+        ) from err
+    try:
+        await apply_migrations(database)
+    except (sqlite3.DatabaseError, RuntimeError) as err:
+        await database.close()
+        if _is_corruption_error(err):
+            _LOGGER.error(
+                "NestQuest database at %s is corrupt: %s. Refusing to "
+                "start with a corrupt database; the file was left "
+                "untouched so a backup can be restored. Home Assistant "
+                "will retry setup.",
+                db_path,
+                err,
+            )
+            raise ConfigEntryNotReady(
+                f"NestQuest database corrupt: {db_path}"
+            ) from err
+        # A non-corruption failure (e.g. a locked file, a future schema
+        # version) is also a retryable setup problem, but without the
+        # corruption framing.
+        _LOGGER.error(
+            "NestQuest database at %s failed to open: %s. Home "
+            "Assistant will retry setup.",
+            db_path,
+            err,
+        )
+        raise ConfigEntryNotReady(
+            f"NestQuest database unavailable: {db_path}"
+        ) from err
+    except asyncio.CancelledError:
+        await database.close()
+        raise
+    return database
 
 
 @dataclass
@@ -50,9 +157,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Reload the entry when its options change."""
         await listener_hass.config_entries.async_reload(listener_entry.entry_id)
 
-    database = await NestQuestDatabase(hass).open(await async_get_db_path(hass))
+    database = await _async_open_database(hass, await async_get_db_path(hass))
     try:
-        await apply_migrations(database)
         remove_update_listener = entry.add_update_listener(_async_update_listener)
     except BaseException:
         await database.close()

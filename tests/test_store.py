@@ -101,12 +101,20 @@ def test_executor_helper_creates_directory(tmp_path) -> None:
 
 
 def test_no_sqlite3_import_outside_db_module() -> None:
-    """sqlite3 is banned package-wide except db.py, the connection wrapper."""
+    """sqlite3 is banned package-wide except two justified modules.
+
+    db.py is the connection wrapper (all statement execution lives
+    there).  __init__.py imports sqlite3 ONLY for its exception types
+    to classify corruption on startup (done-condition: corrupt file ->
+    ConfigEntryNotReady); it never opens a connection or executes
+    SQL — that is asserted separately below.
+    """
     pkg_dir = Path(store.__file__).parent
     py_files = list(pkg_dir.glob("*.py"))
     assert py_files
+    allowed = {"db.py", "__init__.py"}
     for py_file in py_files:
-        if py_file.name == "db.py":
+        if py_file.name in allowed:
             continue
         tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
         for node in ast.walk(tree):
@@ -119,6 +127,27 @@ def test_no_sqlite3_import_outside_db_module() -> None:
                 raise AssertionError(
                     f"Found sqlite3 import in {py_file.name}:{node.lineno}"
                 )
+
+
+def test_init_module_never_opens_or_executes_sqlite() -> None:
+    """The __init__.py sqlite3 exemption is exception-typing only: no
+    sqlite3.connect, no .execute, no cursor usage may appear there.
+    """
+    import re
+    from pathlib import Path
+
+    init_path = (
+        Path(store.__file__).parent / "__init__.py"
+    ).read_text(encoding="utf-8")
+    usage_pattern = re.compile(
+        r"sqlite3\s*\.\s*(connect|Cursor|Row|register|complete_statement)"
+        r"|\bconn(ection)?\s*\.\s*execute\b",
+        re.IGNORECASE,
+    )
+    assert usage_pattern.search(init_path) is None, (
+        "__init__.py must use sqlite3 exception types only, never open "
+        "connections or execute SQL"
+    )
 
 
 def test_no_file_creation_calls_in_store() -> None:
