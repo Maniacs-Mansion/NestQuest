@@ -457,6 +457,53 @@ def _occurs_monthly_day(rule: ScheduleRule, target: datetime.date) -> bool:
     return target.day == min(rule.day_of_month, month_end)
 
 
+def _nth_weekday_of_month(
+    year: int, month: int, weekday: int, nth: int
+) -> int | None:
+    """The day-of-month of the ``nth`` ``weekday``, or None when the
+    month has no such occurrence (``nth`` 5 beyond four occurrences).
+
+    Positive ``nth`` counts forward (1 = first); ``-1`` counts from the
+    end (last occurrence, whatever the total).  Pure calendar math.
+    """
+    if nth == -1:
+        last = datetime.date(year, month, _month_end(year, month))
+        back = (last.weekday() - weekday) % 7
+        return last.day - back
+    first = datetime.date(year, month, 1)
+    first_offset = (weekday - first.weekday()) % 7
+    day = 1 + first_offset + (nth - 1) * 7
+    if day > _month_end(year, month):
+        return None
+    return day
+
+
+def _occurs_monthly_weekday(
+    rule: ScheduleRule, target: datetime.date
+) -> bool:
+    """MONTHLY_WEEKDAY evaluation.
+
+    Fires when the target is the ``nth`` occurrence of
+    ``nth_weekday_weekday`` in its month (1..4 forward, -1 last).  A
+    month with fewer occurrences than ``nth`` (5 on a four-occurrence
+    month) does not fire — n 5 is accepted by the model but skips such
+    months, matching the done-condition.  The interval anchors on
+    nominal months elapsed from start_date's month.
+    """
+    anchor = _parse_date(rule.start_date)
+    months_elapsed = (
+        (target.year - anchor.year) * 12 + (target.month - anchor.month)
+    )
+    if months_elapsed % rule.interval != 0:
+        return False
+    if target.weekday() != rule.nth_weekday_weekday:
+        return False
+    nth_day = _nth_weekday_of_month(
+        target.year, target.month, rule.nth_weekday_weekday, rule.nth_weekday
+    )
+    return nth_day is not None and target.day == nth_day
+
+
 def occurs_on(rule: ScheduleRule, target: datetime.date) -> bool:
     """Return True when ``rule`` fires on ``target``.
 
@@ -469,7 +516,7 @@ def occurs_on(rule: ScheduleRule, target: datetime.date) -> bool:
     shape = rule.rule_type
     if shape not in (
         RuleType.DAILY, RuleType.WEEKLY, RuleType.CUSTOM_DAYS,
-        RuleType.MONTHLY_DAY,
+        RuleType.MONTHLY_DAY, RuleType.MONTHLY_WEEKDAY,
     ):
         raise NotImplementedError(
             f"occurs_on for {shape} lands with its own engine task "
@@ -482,6 +529,8 @@ def occurs_on(rule: ScheduleRule, target: datetime.date) -> bool:
         return offset % rule.interval == 0
     if shape is RuleType.MONTHLY_DAY:
         return _occurs_monthly_day(rule, target)
+    if shape is RuleType.MONTHLY_WEEKDAY:
+        return _occurs_monthly_weekday(rule, target)
     # WEEKLY / CUSTOM_DAYS: whole-week anchoring from start_date, never
     # ISO week numbers (Feature 04/05 guardrail: 53-week years flip ISO
     # parity on January 1st; anchor arithmetic does not).
@@ -507,7 +556,7 @@ def occurrences_between(
     """
     if rule.rule_type not in (
         RuleType.DAILY, RuleType.WEEKLY, RuleType.CUSTOM_DAYS,
-        RuleType.MONTHLY_DAY,
+        RuleType.MONTHLY_DAY, RuleType.MONTHLY_WEEKDAY,
     ):
         raise NotImplementedError(
             f"occurrences_between for {rule.rule_type} lands with its own "
