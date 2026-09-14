@@ -346,8 +346,9 @@ def test_upsert_refuses_immutable_completed_instance(tmp_path) -> None:
     """An instance with a completion event can never be regenerated."""
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
+        generated_at = _now_stamp()
         instance = await instances.upsert(
-            definition.id, child.id, D1, _now_stamp(), due_time="08:00"
+            definition.id, child.id, D1, generated_at, due_time="08:00"
         )
         await events.append(
             instance.id, child.id, "completed", "user", _now_stamp(), True,
@@ -361,7 +362,7 @@ def test_upsert_refuses_immutable_completed_instance(tmp_path) -> None:
         assert fetched.due_time == "08:00", (
             "failed regeneration must not touch the completed instance"
         )
-        assert fetched.generated_at == _now_stamp()
+        assert fetched.generated_at == generated_at
         return fetched
 
     _with_db(tmp_path, "upsert-immutable.db")(_body)
@@ -860,9 +861,10 @@ def test_list_events_occurred_at_scope_variant(tmp_path) -> None:
             child.id, D20, D20
         )
         assert [e.id for e in by_due] == [event.id]
-        # Derive the query date from the stamp itself so the test is
-        # midnight-safe: the stamp's date IS the day to query.
-        stamp_date = _now_stamp()[:10]
+        # Derive the query date from the EVENT's stamp so the test is
+        # midnight-safe: the event's own date IS the day to query,
+        # whatever the wall clock says now.
+        stamp_date = event.occurred_at[:10]
         by_occurrence = await events.list_by_child_and_date_range(
             child.id, stamp_date, stamp_date,
             due_date_scope=False,
