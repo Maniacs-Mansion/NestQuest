@@ -395,13 +395,18 @@ def test_monthly_day_rejects_month() -> None:
 def test_yearly_rejects_day_and_nth_fields() -> None:
     with pytest.raises(RuleValidationError, match="must not set"):
         ScheduleRule(
-            rule_type=RuleType.YEARLY, month=6, day_of_month=15,
-            start_date="2026-09-01",
-        )
-    with pytest.raises(RuleValidationError, match="must not set"):
-        ScheduleRule(
             rule_type=RuleType.YEARLY, month=6, nth_weekday=1,
             nth_weekday_weekday=0, start_date="2026-09-01",
+        )
+    # YEARLY MAY carry an optional day_of_month (Feb 29 rules need it):
+    rule = ScheduleRule(rule_type=RuleType.YEARLY, month=2,
+                        day_of_month=29, start_date="2026-09-01")
+    assert rule.day_of_month == 29
+    # ...but it is still validated when present.
+    with pytest.raises(RuleValidationError, match="day_of_month"):
+        ScheduleRule(
+            rule_type=RuleType.YEARLY, month=6, day_of_month=32,
+            start_date="2026-09-01",
         )
 
 
