@@ -341,10 +341,17 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
                 started = asyncio.Event()
 
                 async def _pausing_validate(self, child_id, rule_id):
-                    if rule_id == rule_a.id:
+                    # Run the real validation FIRST (this is the
+                    # time-of-check), THEN pause: the delete task gets
+                    # scheduled while the create sits between its
+                    # passed validation and its INSERT.  The serialized
+                    # transaction must keep the delete queued until the
+                    # insert commits, so the create must win the race
+                    # and the delete must be rejected as referenced.
+                    await original_validate(self, child_id, rule_id)
+                    if rule_id == rule_a.id and not started.is_set():
                         started.set()
                         await release.wait()
-                    return await original_validate(self, child_id, rule_id)
 
                 dao_rules.TaskDefinitionsDao._validate_assignable = (
                     _pausing_validate
@@ -408,9 +415,13 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
 
     delete_won = _run(_main("delete-first"))
     create_won = _run(_main("create-first"))
-    assert isinstance(delete_won, bool) and isinstance(create_won, bool)
-    # Both orderings were exercised; they must not both end deleted.
-    assert (delete_won, create_won) in {(True, False), (True, True), (False, False)} or True
+    # delete-first: the delete acquires the lock before the create can
+    # validate, so the rule is gone and the create fails cleanly.
+    assert delete_won is True
+    # create-first: validation passed, the create holds the lock across
+    # its INSERT, so the queued delete must find the definition and be
+    # rejected — the create must NOT lose its rule after validating it.
+    assert create_won is False
 
 
 # ---------------------------------------------------------------------------
