@@ -1,5 +1,48 @@
 # NestQuest Release Notes
 
+## Version 0.3.0 — 2026-09-14
+
+### Scope
+
+Third release of NestQuest, shipping Feature 04 — the recurrence rule engine:
+
+- `ScheduleRule`: an immutable, validated rule model (frozen dataclass) covering six recurrence shapes — daily, weekly (weekday sets), monthly by day-of-month, monthly by nth-weekday, yearly, and custom day-sets — with interval multipliers (every N days/weeks/months) and optional start/end dates.
+- `occurs_on(rule, date)`: pure calendar evaluation answering "does this rule fire on this date?"
+- `occurrences_between(rule, start, end)`: ordered, duplicate-free date lists, inclusive bounds, clamped to the rule's window.
+- Documented month-end policy: a rule for a day absent from a month (the 31st in April, the 30th/29th in February) fires on that month's LAST day — one firing per eligible month, interval anchored on nominal months elapsed.
+- Documented leap-day policy: a YEARLY February 29th rule fires February 28th in non-leap years (clamp, never skip).
+- Week offsets anchored at `start_date` by whole weeks elapsed — never ISO week numbers or parity (53-week years cannot silently invert schedules).
+- The engine is pure: no Home Assistant imports, no database access, no timezone logic.
+
+### Requirements
+
+- Minimum Home Assistant version: **2024.6.0**.
+
+### Known Limitations
+
+- No entities, services, or calendar platforms yet — the integration does not expose sensors, calendar events, or service calls in this release (data layer + recurrence engine only).
+- No business logic yet: nothing materializes task instances (Feature 07 combines this engine with presence schedules) — storage and scheduling math only.
+- Single-instance only — one NestQuest config entry is permitted per Home Assistant instance.
+
+### Rollback
+
+Downgrading from 0.3.0 to 0.2.0 removes the recurrence engine's code but leaves the `nestquest.db` file in place (untouched by both releases; no code path deletes an existing database). The file's schema version stamp is unaffected — this release ships no schema migration.
+
+**HACS installs:**
+
+1. Downgrade via HACS (HACS > Integrations > NestQuest > Redownload > 0.2.0) or Remove entirely.
+2. Restart Home Assistant.
+3. If removing: delete the integration in Home Assistant (Settings > Devices & Services > NestQuest > Delete), then restart Home Assistant again.
+
+**Manual installs:**
+
+1. Replace or delete the `custom_components/nestquest/` directory in your Home Assistant configuration directory.
+2. Restart Home Assistant.
+
+**Data:** the `nestquest.db` file (plus any `-wal`/`-shm` sidecars) is intentionally left untouched by both upgrade and rollback — back it up before upgrading.
+
+**Repository operators:** instead of uninstalling, git-revert the release merge on `main`.
+
 ## Version 0.2.0 — 2026-09-14
 
 ### Scope
