@@ -525,6 +525,73 @@ async def test_cancel_during_commit_settles_then_propagates_cancellation(
     await database.close()
 
 
+async def test_cancel_during_in_transaction_execute_settles_then_rolls_back(
+    tmp_path,
+) -> None:
+    """NQ-PR12-009: cancel during an in-transaction statement must not race ROLLBACK.
+
+    The in-transaction INSERT executor job is gated: the transaction task
+    is cancelled while the statement is still in flight, then the worker
+    is allowed to complete it anyway.  The ROLLBACK must only run after
+    the statement has settled — while the statement is in flight the
+    transaction is still open — and the cancelled statement's write must
+    not persist.
+    """
+    hass, _registry = make_hass()
+    database = NestQuestDatabase(hass)
+    await database.open(tmp_path / "cancel-execute.db")
+    await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+    await database.execute("INSERT INTO t (name) VALUES (?)", ("before",))
+
+    insert_started = asyncio.Event()
+    release_insert = asyncio.Event()
+    real_add = hass.async_add_executor_job
+
+    async def _gated_add_executor_job(fn, *args, **kwargs):
+        if getattr(fn, "__name__", "") == "_execute":
+            insert_started.set()
+            await release_insert.wait()
+        return await real_add(fn, *args, **kwargs)
+
+    hass.async_add_executor_job = _gated_add_executor_job
+
+    async def _txn() -> None:
+        async with database.transaction():
+            await database.execute("INSERT INTO t (name) VALUES (?)", ("lost",))
+
+    txn_task = asyncio.create_task(_txn())
+    await insert_started.wait()
+    txn_task.cancel()
+    await asyncio.sleep(0.05)
+    assert database._in_transaction is True, (
+        "ownership was released while the cancelled statement was in flight"
+    )
+    assert database._conn is not None
+    assert database._conn.in_transaction is True, (
+        "ROLLBACK ran before the cancelled statement settled"
+    )
+    release_insert.set()
+    with pytest.raises(asyncio.CancelledError):
+        await txn_task
+
+    assert database._in_transaction is False
+    assert database._tx_task is None
+    assert database._conn is not None
+    assert database._conn.in_transaction is False
+
+    hass.async_add_executor_job = real_add
+    assert await database.fetch_all("SELECT name FROM t ORDER BY id") == [
+        ("before",)
+    ]
+    async with database.transaction():
+        await database.execute("INSERT INTO t (name) VALUES (?)", ("kept",))
+    assert await database.fetch_all("SELECT name FROM t ORDER BY id") == [
+        ("before",),
+        ("kept",),
+    ]
+    await database.close()
+
+
 async def test_commit_and_rollback_failures_are_both_preserved(tmp_path) -> None:
     """NQ-PR12-008: both errors survive when COMMIT and ROLLBACK both fail.
 

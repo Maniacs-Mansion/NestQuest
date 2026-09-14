@@ -41,6 +41,13 @@ class NestQuestDatabase:
     not supported: a second ``transaction()`` entered while one is active
     raises :class:`RuntimeError`.  ``close()`` serializes on the same lock
     and is idempotent.
+
+    Every connection-affecting executor job (connect, pragmas, statements,
+    transaction lifecycle and close) is awaited through the settlement
+    helper :meth:`_await_settled`: if the awaiting task is cancelled while
+    a job is in flight, the job still settles on the worker thread before
+    the cancellation propagates, so the wrapper lock is never released
+    while the executor thread is mid-job.
     """
 
     def __init__(self, hass: HomeAssistant) -> None:
@@ -122,7 +129,9 @@ class NestQuestDatabase:
                     raise
                 return conn
 
-            self._conn = await self._hass.async_add_executor_job(_open)
+            self._conn = await self._await_settled(
+                self._hass.async_add_executor_job(_open)
+            )
         return self
 
     async def execute(
@@ -136,7 +145,9 @@ class NestQuestDatabase:
                 cursor = conn.execute(sql, parameters)
                 return ExecutionResult(cursor.rowcount, cursor.lastrowid)
 
-            result = await self._hass.async_add_executor_job(_execute)
+            result = await self._await_settled(
+                self._hass.async_add_executor_job(_execute)
+            )
             self._rowcount = result.rowcount
             self._lastrowid = result.lastrowid
             return result
@@ -152,7 +163,9 @@ class NestQuestDatabase:
                 cursor = conn.executemany(sql, parameters)
                 return ExecutionResult(cursor.rowcount, cursor.lastrowid)
 
-            result = await self._hass.async_add_executor_job(_execute_many)
+            result = await self._await_settled(
+                self._hass.async_add_executor_job(_execute_many)
+            )
             self._rowcount = result.rowcount
             self._lastrowid = result.lastrowid
             return result
@@ -168,8 +181,8 @@ class NestQuestDatabase:
                 cursor = conn.execute(sql, parameters)
                 return cursor.fetchone(), cursor.rowcount, cursor.lastrowid
 
-            row, rowcount, lastrowid = await self._hass.async_add_executor_job(
-                _fetch_one
+            row, rowcount, lastrowid = await self._await_settled(
+                self._hass.async_add_executor_job(_fetch_one)
             )
             self._rowcount = rowcount
             self._lastrowid = lastrowid
@@ -186,8 +199,8 @@ class NestQuestDatabase:
                 cursor = conn.execute(sql, parameters)
                 return cursor.fetchall(), cursor.rowcount, cursor.lastrowid
 
-            rows, rowcount, lastrowid = await self._hass.async_add_executor_job(
-                _fetch_all
+            rows, rowcount, lastrowid = await self._await_settled(
+                self._hass.async_add_executor_job(_fetch_all)
             )
             self._rowcount = rowcount
             self._lastrowid = lastrowid
@@ -367,7 +380,7 @@ class NestQuestDatabase:
             def _close() -> None:
                 conn.close()
 
-            await self._hass.async_add_executor_job(_close)
+            await self._await_settled(self._hass.async_add_executor_job(_close))
 
     def _require_conn(self) -> sqlite3.Connection:
         if self._conn is None:
