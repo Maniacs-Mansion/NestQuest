@@ -484,6 +484,8 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
         "custom_components/nestquest/dao_presence.py",  # validates the
         # schedule/override child exists before writing (same FK shape
         # as dao_rules: one existence SELECT per write)
+        "custom_components/nestquest/dao_instances.py",  # validates the
+        # instance/event child exists before writing (same FK shape)
         "custom_components/nestquest/schema.py",  # declares the DDL
         "custom_components/nestquest/migrations.py",  # applies the DDL
         "tests/test_schema.py",  # tests the DDL

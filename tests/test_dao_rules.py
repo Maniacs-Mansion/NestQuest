@@ -789,15 +789,15 @@ def test_rules_and_definitions_sql_lives_only_in_dao_module() -> None:
 
     allowed = {
         "custom_components/nestquest/dao_rules.py",  # this DAO
+        "custom_components/nestquest/dao_instances.py",  # validates the
+        # definition exists + fetches its assignee before generating an
+        # instance (the instance must snapshot the definition's child)
         "custom_components/nestquest/schema.py",  # declares the DDL
         "custom_components/nestquest/migrations.py",  # applies the DDL
         "tests/test_schema.py",  # tests the DDL
         "tests/test_migrations.py",  # tests migration application
         "tests/test_dao_rules.py",  # this file, scanned separately
-        # dao_children.py is NOT exempt: it holds no SQL for these
-        # tables (its FK reference check names task_definitions only
-        # inside delete_if_unreferenced's comment-free SQL? No — that
-        # lives HERE in dao_rules).  Any future leak there must fail.
+        "tests/test_dao_instances.py",  # instances guard, own scope
     }
     sql_pattern = re.compile(
         r"(FROM|INTO|UPDATE|DELETE\s+FROM|JOIN)\s+[`'\"]*(\[)?"
@@ -815,6 +815,50 @@ def test_rules_and_definitions_sql_lives_only_in_dao_module() -> None:
     assert offenders == [], (
         f"SQL touching schedule_rules/task_definitions leaked into: "
         f"{offenders}"
+    )
+
+
+def test_dao_instances_test_file_uses_dao_not_raw_rules_sql() -> None:
+    """Compensating self-scan for the test_dao_instances.py exemption:
+    that file may query task_instances/completion_events raw (its own
+    guard's scope) but must go through the DAO for schedule_rules and
+    task_definitions, except its single sanctioned definition-create
+    helper usage and guard spans.
+    """
+    import ast
+    import re
+    from pathlib import Path
+
+    instances_test = Path(__file__).parent / "test_dao_instances.py"
+    text = instances_test.read_text()
+    lines = text.splitlines(keepends=True)
+    tree = ast.parse(text)
+    guard_names = {
+        "test_rules_and_definitions_sql_lives_only_in_dao_module",
+        "test_no_mutation_sql_for_completion_events_anywhere",
+    }
+    excluded: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name in guard_names:
+            excluded.update(
+                range(node.lineno, (node.end_lineno or node.lineno) + 1)
+            )
+
+    remaining = "".join(
+        line
+        for number, line in enumerate(lines, start=1)
+        if number not in excluded
+    )
+    sql_pattern = re.compile(
+        r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM|"
+        r"FROM|JOIN)\s+[`'\"]*(\[)?(schedule_rules|task_definitions)\b",
+        re.IGNORECASE,
+    )
+    assert sql_pattern.search(remaining) is None, (
+        "test_dao_instances.py must go through the DAO, not raw SQL, "
+        "for schedule_rules/task_definitions"
     )
 
 
