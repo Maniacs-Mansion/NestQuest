@@ -544,7 +544,7 @@ def test_dao_test_file_uses_dao_not_raw_table_sql() -> None:
     )
     sql_pattern = re.compile(
         r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|"
-        r"DELETE\s+FROM|FROM|JOIN)\s+['\"]*"
+        r"DELETE\s+FROM|FROM|JOIN)\s+[`'\"]*(\[)?"
         r"(children|admin_users)\b",
         re.IGNORECASE,
     )
