@@ -42,6 +42,49 @@ does NOT forbid ``month`` on weekly/monthly rules (an "every 2 weeks"
 rule or a monthly rule could later be pinned to a month) nor extra
 fields on weekly/monthly/yearly rules generally, so the CHECKs only
 reject what the rule engine definitively cannot express now.
+
+Presence pattern format: ``presence_schedules.pattern`` encodes the
+whole N-week repeating cycle in one TEXT column as pipe-separated
+segments, one per week of the cycle: segment ``i`` is a ``weekday_set``
+CSV (same single-digit 0-6 convention as ``schedule_rules.weekday_set``)
+for week ``i``, e.g. ``'0,2,4|1,3'`` = Mon/Wed/Fri in week 0, Tue/Thu in
+week 1.  An empty segment means the child is absent every day of that
+week; a wholly empty pattern with ``cycle_length_weeks = 1`` means
+absent every day of every week, which is distinct from having no
+schedule row at all (a child with no schedule is present every day, per
+the feature guardrails).  Chosen over JSON or per-week rows to stay
+consistent with the CSV ``weekday_set`` convention and fully checkable
+by plain CHECKs.  DB-level validation is pure CHECK, no triggers or
+custom functions: char-class GLOBs reject every character outside
+digits 0-6, comma and pipe; adjacency GLOBs reject empty elements
+(double comma, comma next to a pipe, leading/trailing comma) and
+two-digit runs; a further GLOB rejects contiguous runs of 8+ comma
+separated digits, which caps a segment at 7 elements — the GLOB cannot
+match across a ``|``, so cross-segment boundaries stay safe; and the
+segment count is pinned to ``cycle_length_weeks`` by
+``LENGTH(pattern) - LENGTH(REPLACE(pattern, '|', '')) + 1``.  Per
+weekday_set this is not full CSV-set normalisation (duplicates like
+``'0,0'`` or unsorted sets stay storable, as with ``schedule_rules``);
+the engine treats the segment as a set.  A
+one-row-per-``week_index`` normalization was considered and rejected:
+the flat single-column encoding keeps the done-condition's table shape
+and proved fully checkable with plain CHECKs.
+
+``cycle_length_weeks`` is capped at 4: 2 (alternating weeks) is the
+common case, and a small cap keeps anchor arithmetic and the encoded
+pattern human-readable.  Revisit the cap — and re-run the pattern
+validation matrix in tests — if a longer cycle is ever needed.
+``anchor_date`` is an ISO date string pinning the cycle: the week index
+of a date is (days since anchor) // 7 mod ``cycle_length_weeks``,
+computed by the presence engine (Feature 05) from anchor-date
+arithmetic, never ISO week parity.  Like other date columns it carries
+no shape CHECK, matching the established date policy.
+
+Presence overrides: ``presence_overrides.end_date`` is NOT NULL,
+unlike ``schedule_rules.end_date`` — an override is always a concrete
+date range; a single-day override stores the same date in both columns.
+``is_present`` 0/1 marks the child absent/present for the whole range;
+``note`` is optional free text.
 """
 from __future__ import annotations
 
@@ -130,11 +173,49 @@ SCHEMA_V1_TASK_DEFINITIONS_DDL: list[str] = [
     """,
 ]
 
+SCHEMA_V1_PRESENCE_SCHEDULES_DDL: list[str] = [
+    f"""
+    CREATE TABLE IF NOT EXISTS presence_schedules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        child_id INTEGER NOT NULL UNIQUE REFERENCES children(id),
+        cycle_length_weeks INTEGER NOT NULL CHECK (typeof(cycle_length_weeks) = 'integer' AND cycle_length_weeks >= 1 AND cycle_length_weeks <= 4),
+        anchor_date TEXT NOT NULL,
+        pattern TEXT NOT NULL CHECK (
+            NOT pattern GLOB '*[^0-6,|]*'
+            AND NOT pattern GLOB '*[0-6][0-6]*'
+            AND NOT pattern GLOB '*,,*'
+            AND NOT pattern GLOB '*,|*'
+            AND NOT pattern GLOB '*|,*'
+            AND NOT pattern GLOB ',*'
+            AND NOT pattern GLOB '*,'
+            AND NOT pattern GLOB '*[0-6],[0-6],[0-6],[0-6],[0-6],[0-6],[0-6],[0-6]*'
+            AND (LENGTH(pattern) - LENGTH(REPLACE(pattern, '|', '')) + 1) = cycle_length_weeks
+        )
+    )
+    """,
+]
+
+SCHEMA_V1_PRESENCE_OVERRIDES_DDL: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS presence_overrides (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        is_present INTEGER NOT NULL CHECK (typeof(is_present) = 'integer' AND is_present IN (0, 1)),
+        note TEXT,
+        CHECK (end_date >= start_date)
+    )
+    """,
+]
+
 SCHEMA_V1_STATEMENTS: list[str] = [
     *SCHEMA_V1_CHILDREN_DDL,
     *SCHEMA_V1_ADMIN_USERS_DDL,
     *SCHEMA_V1_SCHEDULE_RULES_DDL,
     *SCHEMA_V1_TASK_DEFINITIONS_DDL,
+    *SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
+    *SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
 ]
 
 

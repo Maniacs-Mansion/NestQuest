@@ -10,6 +10,8 @@ from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.schema import (
     SCHEMA_V1_ADMIN_USERS_DDL,
     SCHEMA_V1_CHILDREN_DDL,
+    SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
+    SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
     SCHEMA_V1_SCHEDULE_RULES_DDL,
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V1_TASK_DEFINITIONS_DDL,
@@ -95,17 +97,71 @@ def _insert_definition(database, child_id=1, rule_id=1, **overrides):
     return result.lastrowid
 
 
+def _insert_schedule(database, child_id, **overrides):
+    """Insert one valid presence_schedule, returning the schedule id.
+
+    Pass ``_OMIT`` as a value to leave that column out of the INSERT so
+    its DDL DEFAULT applies.
+    """
+    values: dict[str, object] = {
+        "child_id": child_id,
+        "cycle_length_weeks": 2,
+        "anchor_date": "2026-09-13",
+        "pattern": "0,2,4|1,3",
+    }
+    values.update(overrides)
+    values = {k: v for k, v in values.items() if v is not _OMIT}
+    columns = ", ".join(values)
+    placeholders = ", ".join("?" for _ in values)
+    result = _run(
+        database.execute(
+            f"INSERT INTO presence_schedules ({columns}) VALUES ({placeholders})",
+            tuple(values.values()),
+        )
+    )
+    assert result.lastrowid is not None
+    return result.lastrowid
+
+
+def _insert_override(database, child_id, **overrides):
+    """Insert one valid presence_override, returning the override id.
+
+    Pass ``_OMIT`` as a value to leave that column out of the INSERT so
+    its DDL DEFAULT applies.
+    """
+    values: dict[str, object] = {
+        "child_id": child_id,
+        "start_date": "2026-09-13",
+        "end_date": "2026-09-13",
+        "is_present": 1,
+    }
+    values.update(overrides)
+    values = {k: v for k, v in values.items() if v is not _OMIT}
+    columns = ", ".join(values)
+    placeholders = ", ".join("?" for _ in values)
+    result = _run(
+        database.execute(
+            f"INSERT INTO presence_overrides ({columns}) VALUES ({placeholders})",
+            tuple(values.values()),
+        )
+    )
+    assert result.lastrowid is not None
+    return result.lastrowid
+
+
 # ---------------------------------------------------------------------------
 # DDL constants
 # ---------------------------------------------------------------------------
 
 
-def test_schema_v1_statements_compose_the_four_tables() -> None:
+def test_schema_v1_statements_compose_the_six_tables() -> None:
     assert SCHEMA_V1_STATEMENTS == [
         *SCHEMA_V1_CHILDREN_DDL,
         *SCHEMA_V1_ADMIN_USERS_DDL,
         *SCHEMA_V1_SCHEDULE_RULES_DDL,
         *SCHEMA_V1_TASK_DEFINITIONS_DDL,
+        *SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
+        *SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
     ]
 
 
@@ -913,5 +969,433 @@ def test_applying_extended_ddl_twice_keeps_new_table_rows(tmp_path) -> None:
             row = _run(database.fetch_one(f"SELECT COUNT(*) FROM {table}"))
             counts.append(row[0])
         assert counts == [1, 1, 1]
+    finally:
+        _run(database.close())
+
+
+# ---------------------------------------------------------------------------
+# presence_schedules and presence_overrides constraint enforcement
+# ---------------------------------------------------------------------------
+
+
+def _child(database, name="Ada") -> int:
+    _run(
+        database.execute(
+            "INSERT INTO children (display_name, created_at) VALUES (?, ?)",
+            (name, "2026-09-13T00:00:00+00:00"),
+        )
+    )
+    return 1
+
+
+def test_presence_schedules_table_exists_after_applying_ddl(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-schedules.db")
+    try:
+        _apply(database)
+        row = _run(
+            database.fetch_one(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'presence_schedules'"
+            )
+        )
+        assert row is not None and row[0] == "presence_schedules"
+    finally:
+        _run(database.close())
+
+
+def test_presence_overrides_table_exists_after_applying_ddl(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-overrides.db")
+    try:
+        _apply(database)
+        row = _run(
+            database.fetch_one(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'presence_overrides'"
+            )
+        )
+        assert row is not None and row[0] == "presence_overrides"
+    finally:
+        _run(database.close())
+
+
+def test_presence_schedules_columns_types_and_constraints(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-schedules-columns.db")
+    try:
+        _apply(database)
+        columns = _run(database.fetch_all("PRAGMA table_info(presence_schedules)"))
+        # cid, name, type, notnull, dflt_value, pk
+        assert [(row[1], row[2], row[3], row[4], row[5]) for row in columns] == [
+            ("id", "INTEGER", 0, None, 1),
+            ("child_id", "INTEGER", 1, None, 0),
+            ("cycle_length_weeks", "INTEGER", 1, None, 0),
+            ("anchor_date", "TEXT", 1, None, 0),
+            ("pattern", "TEXT", 1, None, 0),
+        ]
+    finally:
+        _run(database.close())
+
+
+def test_presence_overrides_columns_types_and_constraints(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-overrides-columns.db")
+    try:
+        _apply(database)
+        columns = _run(database.fetch_all("PRAGMA table_info(presence_overrides)"))
+        assert [(row[1], row[2], row[3], row[4], row[5]) for row in columns] == [
+            ("id", "INTEGER", 0, None, 1),
+            ("child_id", "INTEGER", 1, None, 0),
+            ("start_date", "TEXT", 1, None, 0),
+            ("end_date", "TEXT", 1, None, 0),
+            ("is_present", "INTEGER", 1, None, 0),
+            ("note", "TEXT", 0, None, 0),
+        ]
+    finally:
+        _run(database.close())
+
+
+def test_presence_schedules_foreign_key_declared(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-schedules-fks.db")
+    try:
+        _apply(database)
+        fks = _run(database.fetch_all("PRAGMA foreign_key_list(presence_schedules)"))
+        declared = {(row[2], row[3], row[4]) for row in fks}
+        assert declared == {("children", "child_id", "id")}
+    finally:
+        _run(database.close())
+
+
+def test_presence_overrides_foreign_key_declared(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-overrides-fks.db")
+    try:
+        _apply(database)
+        fks = _run(database.fetch_all("PRAGMA foreign_key_list(presence_overrides)"))
+        declared = {(row[2], row[3], row[4]) for row in fks}
+        assert declared == {("children", "child_id", "id")}
+    finally:
+        _run(database.close())
+
+
+def test_presence_schedules_valid_insert_round_trips(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-schedules-valid.db")
+    try:
+        _apply(database)
+        _child(database)
+        schedule_id = _insert_schedule(database, child_id=1)
+        row = _run(
+            database.fetch_one(
+                "SELECT child_id, cycle_length_weeks, anchor_date, pattern "
+                "FROM presence_schedules WHERE id = ?",
+                (schedule_id,),
+            )
+        )
+        assert row == (1, 2, "2026-09-13", "0,2,4|1,3")
+    finally:
+        _run(database.close())
+
+
+def test_presence_schedules_second_schedule_for_same_child_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-schedules-unique.db")
+    try:
+        _apply(database)
+        _child(database)
+        _insert_schedule(database, child_id=1)
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+            _insert_schedule(database, child_id=1)
+    finally:
+        _run(database.close())
+
+
+def test_presence_schedules_unknown_child_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-schedules-bad-child.db")
+    try:
+        _apply(database)
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            _insert_schedule(database, child_id=999)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize("bad_cycle", [0, 5, "abc", 1.5])
+def test_presence_schedules_cycle_length_out_of_range_or_type_fails(
+    tmp_path, bad_cycle
+) -> None:
+    database = _open_db(tmp_path / f"cycle-{type(bad_cycle).__name__}.db")
+    try:
+        _apply(database)
+        _child(database)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_schedule(database, child_id=1, cycle_length_weeks=bad_cycle)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize(
+    ("cycle", "pattern"),
+    [
+        (1, ""),
+        (1, "0"),
+        (1, "0,2,4"),
+        (2, "0,2,4|1,3"),
+        (2, "|0"),
+        (2, "0|"),
+        (2, "0,1,2,3,4,5,6|"),
+        (3, "0||1"),
+        (4, "|||"),
+        (4, "0|1|2|3"),
+        (4, "0,1|0,1|0,1|0,1"),
+    ],
+)
+def test_presence_schedules_valid_patterns_succeed(tmp_path, cycle, pattern) -> None:
+    database = _open_db(tmp_path / "presence-schedules-patterns-valid.db")
+    try:
+        _apply(database)
+        _child(database)
+        schedule_id = _insert_schedule(
+            database, child_id=1, cycle_length_weeks=cycle, pattern=pattern
+        )
+        row = _run(
+            database.fetch_one(
+                "SELECT pattern FROM presence_schedules WHERE id = ?",
+                (schedule_id,),
+            )
+        )
+        assert row == (pattern,)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize(
+    ("cycle", "pattern"),
+    [
+        (2, "0,2,4"),  # too few segments
+        (1, "0|1"),  # too many segments
+        (4, "0|1|2"),  # too few segments
+        (2, "0,2,4||1,3"),  # empty middle segment is only valid if empty everywhere
+        (2, "x|1"),
+        (2, "7|1"),
+        (2, "0,8|1"),
+        (2, "0,|1"),
+        (2, "0|,1"),
+        (2, "0|1,"),
+        (2, ",0|1"),
+        (2, "0,,1|2"),
+        (2, "00,1|2"),
+        (2, "0;1|2"),
+        (2, "0 1|2"),
+        (2, "0,2,4|1,7"),
+        (2, "0,2,4|10,3"),
+        (1, "0,1,2,3,4,5,6,0"),  # more than 7 elements
+    ],
+)
+def test_presence_schedules_invalid_patterns_fail(tmp_path, cycle, pattern) -> None:
+    database = _open_db(tmp_path / "presence-schedules-patterns-invalid.db")
+    try:
+        _apply(database)
+        _child(database)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_schedule(
+                database, child_id=1, cycle_length_weeks=cycle, pattern=pattern
+            )
+    finally:
+        _run(database.close())
+
+
+def test_presence_schedules_cycle_length_bounds_pass(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-schedules-cycle-bounds.db")
+    try:
+        _apply(database)
+        _child(database)
+        _insert_schedule(database, child_id=1, cycle_length_weeks=1, pattern="0")
+        _run(
+            database.execute(
+                "INSERT INTO children (display_name, created_at) VALUES (?, ?)",
+                ("Bo", "2026-09-13T00:00:00+00:00"),
+            )
+        )
+        _insert_schedule(database, child_id=2, cycle_length_weeks=4, pattern="|||")
+    finally:
+        _run(database.close())
+
+
+def test_presence_overrides_valid_insert_round_trips(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-overrides-valid.db")
+    try:
+        _apply(database)
+        _child(database)
+        override_id = _insert_override(
+            database,
+            child_id=1,
+            note="Grandma's birthday",
+        )
+        row = _run(
+            database.fetch_one(
+                "SELECT child_id, start_date, end_date, is_present, note "
+                "FROM presence_overrides WHERE id = ?",
+                (override_id,),
+            )
+        )
+        assert row == (1, "2026-09-13", "2026-09-13", 1, "Grandma's birthday")
+    finally:
+        _run(database.close())
+
+
+def test_presence_overrides_range_and_absent_round_trip(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-overrides-range.db")
+    try:
+        _apply(database)
+        _child(database)
+        override_id = _insert_override(
+            database,
+            child_id=1,
+            start_date="2026-12-21",
+            end_date="2027-01-04",
+            is_present=0,
+        )
+        row = _run(
+            database.fetch_one(
+                "SELECT start_date, end_date, is_present, note "
+                "FROM presence_overrides WHERE id = ?",
+                (override_id,),
+            )
+        )
+        assert row == ("2026-12-21", "2027-01-04", 0, None)
+    finally:
+        _run(database.close())
+
+
+def test_presence_overrides_unknown_child_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-overrides-bad-child.db")
+    try:
+        _apply(database)
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            _insert_override(database, child_id=999)
+    finally:
+        _run(database.close())
+
+
+def test_presence_overrides_is_present_check_enforced(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-overrides-is-present.db")
+    try:
+        _apply(database)
+        _child(database)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_override(database, child_id=1, is_present=2)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize(
+    "bad_is_present",
+    ["abc", 1.5, 2.5],
+)
+def test_presence_overrides_is_present_non_integer_fails(
+    tmp_path, bad_is_present
+) -> None:
+    database = _open_db(tmp_path / "presence-overrides-is-present-typeof.db")
+    try:
+        _apply(database)
+        _child(database)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_override(database, child_id=1, is_present=bad_is_present)
+    finally:
+        _run(database.close())
+
+
+def test_presence_overrides_end_date_before_start_date_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-overrides-end-before-start.db")
+    try:
+        _apply(database)
+        _child(database)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_override(
+                database, child_id=1, start_date="2026-09-13", end_date="2026-09-12"
+            )
+    finally:
+        _run(database.close())
+
+
+def test_presence_overrides_end_date_equal_to_start_date_allowed(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-overrides-end-equals-start.db")
+    try:
+        _apply(database)
+        _child(database)
+        override_id = _insert_override(
+            database, child_id=1, start_date="2026-09-13", end_date="2026-09-13"
+        )
+        row = _run(
+            database.fetch_one(
+                "SELECT end_date FROM presence_overrides WHERE id = ?",
+                (override_id,),
+            )
+        )
+        assert row == ("2026-09-13",)
+    finally:
+        _run(database.close())
+
+
+def test_presence_overrides_start_date_not_null_enforced(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-overrides-start-null.db")
+    try:
+        _apply(database)
+        _child(database)
+        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+            _insert_override(database, child_id=1, start_date=None)
+    finally:
+        _run(database.close())
+
+
+def test_presence_overrides_end_date_not_null_enforced(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-overrides-end-null.db")
+    try:
+        _apply(database)
+        _child(database)
+        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+            _insert_override(database, child_id=1, end_date=None)
+    finally:
+        _run(database.close())
+
+
+def test_presence_overrides_is_present_not_null_enforced(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-overrides-is-present-null.db")
+    try:
+        _apply(database)
+        _child(database)
+        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+            _insert_override(database, child_id=1, is_present=None)
+    finally:
+        _run(database.close())
+
+
+def test_presence_overrides_multiple_children_allowed(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-overrides-multi-child.db")
+    try:
+        _apply(database)
+        _child(database, "Ada")
+        _run(
+            database.execute(
+                "INSERT INTO children (display_name, created_at) VALUES (?, ?)",
+                ("Bo", "2026-09-13T00:00:00+00:00"),
+            )
+        )
+        _insert_override(database, child_id=1)
+        _insert_override(database, child_id=2)
+        row = _run(database.fetch_one("SELECT COUNT(*) FROM presence_overrides"))
+        assert row == (2,)
+    finally:
+        _run(database.close())
+
+
+def test_applying_presence_ddl_twice_keeps_rows(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-idempotent.db")
+    try:
+        _apply(database)
+        _child(database)
+        _insert_schedule(database, child_id=1)
+        _insert_override(database, child_id=1)
+        _apply(database)
+        counts = []
+        for table in ("presence_schedules", "presence_overrides"):
+            row = _run(database.fetch_one(f"SELECT COUNT(*) FROM {table}"))
+            counts.append(row[0])
+        assert counts == [1, 1]
     finally:
         _run(database.close())
