@@ -166,10 +166,13 @@ def test_upsert_concurrent_same_child_serializes(tmp_path) -> None:
         from unittest.mock import MagicMock
 
         hass = MagicMock()
-        # Gate exactly ONE job: the first executor job issued after
+        # Gate exactly ONE job: the first _fetch_one issued after
         # arming, which is task A's child-existence SELECT inside its
-        # transaction (A holds the connection lock from that moment).
-        # Everything before arming (open, migrations, child create)
+        # transaction.  The transaction's BEGIN runs first and is NOT
+        # gated, so when the gated fetch signals, BEGIN has executed
+        # and SQLite is inside the open transaction (A holds the
+        # connection lock from BEGIN until commit).  Everything before
+        # arming (open, migrations, child create)
         # and everything after (B's jobs, A's remaining jobs, reads)
         # pass straight through.
         armed = {"active": False, "gated": False}

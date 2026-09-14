@@ -11,7 +11,7 @@ Semantics per the done-condition and Feature 05:
 - A child has AT MOST ONE presence schedule (schema UNIQUE); upserting
   by child updates the existing row rather than raising.
 - A child with NO schedule row is present every day — the absence of a
-  row is meaningful state, expressed by :meth:`PresenceSchedulesDao.get`
+  row is meaningful state, expressed by :meth:`PresenceSchedulesDao.get_by_child`
   returning None, never by an empty pattern row.
 - Overrides beat the pattern for their date range (that resolution is
   the presence engine's job, Feature 05); the DAO only stores and
