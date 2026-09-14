@@ -251,22 +251,79 @@ def test_reorder_unknown_id_leaves_it_untouched(tmp_path) -> None:
         _run(database.close())
 
 
-def test_reorder_survives_partial_state_on_rollback(tmp_path) -> None:
+def test_reorder_rolls_back_to_original_order_on_failure(tmp_path) -> None:
+    """A failing finalize batch rolls the whole reorder back.
+
+    The two-phase staging is only meaningful if a crash between the
+    batches leaves the original order intact: monkeypatch execute_many
+    so the finalize (non-negative) batch raises, then assert every
+    sort_order is unchanged.
+    """
     database = _open_db(tmp_path / "reorder-rollback.db")
     try:
         dao, _ = _daos(database)
-        a = _make_child(dao, "Ada")
-        b = _make_child(dao, "Bo")
-        _run(dao.reorder([b.id, a.id]))
-        # After a successful reorder no staged negative offsets remain.
-        rows = _run(
-            database.fetch_all(
-                "SELECT display_name, sort_order FROM children"
-            )
-        )
-        assert all(row[1] >= 0 for row in rows)
+        a = _make_child(dao, "Ada", sort_order=0)
+        b = _make_child(dao, "Bo", sort_order=1)
+
+        original_execute_many = database.execute_many
+
+        async def _failing_execute_many(sql, parameters):
+            # The staging batch writes negative positions; the finalize
+            # batch writes 0..n-1.  Fail the finalize batch.
+            if all(position >= 0 for position, _ in parameters):
+                raise sqlite3.OperationalError("boom")
+            return await original_execute_many(sql, parameters)
+
+        database.execute_many = _failing_execute_many
+        with pytest.raises(sqlite3.OperationalError, match="boom"):
+            _run(dao.reorder([b.id, a.id]))
+        children = _run(dao.list_all())
+        assert [(c.display_name, c.sort_order) for c in children] == [
+            ("Ada", 0),
+            ("Bo", 1),
+        ], "failed reorder must leave original sort orders intact"
     finally:
         _run(database.close())
+
+
+def test_reorder_rejects_duplicate_ids(tmp_path) -> None:
+    database = _open_db(tmp_path / "reorder-duplicate.db")
+    try:
+        dao, _ = _daos(database)
+        a = _make_child(dao, "Ada")
+        with pytest.raises(ValueError, match="duplicate"):
+            _run(dao.reorder([a.id, a.id]))
+        fetched = _run(dao.get(a.id))
+        assert fetched is not None and fetched.sort_order == 0
+    finally:
+        _run(database.close())
+
+
+def test_reorder_concurrent_calls_serialize(tmp_path) -> None:
+    """Two concurrent reorders queue on the transaction, both succeed.
+
+    The second call sees the first call's final positions as its
+    starting state; both end with a consistent 0..n-1 assignment.
+    """
+    async def _main() -> None:
+        database = NestQuestDatabase(_make_hass_mock())
+        await database.open(tmp_path / "reorder-concurrent.db")
+        try:
+            await apply_migrations(database)
+            dao, _ = _daos(database)
+            a = await dao.create("Ada", NOW)
+            b = await dao.create("Bo", NOW)
+            task_1 = asyncio.ensure_future(dao.reorder([b.id, a.id]))
+            await asyncio.sleep(0)
+            task_2 = asyncio.ensure_future(dao.reorder([a.id, b.id]))
+            await asyncio.gather(task_1, task_2)
+            children = await dao.list_all()
+            orders = {c.display_name: c.sort_order for c in children}
+            assert sorted(orders.values()) == [0, 1]
+        finally:
+            await database.close()
+
+    _run(_main())
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +353,35 @@ def test_admin_add_is_idempotent(tmp_path) -> None:
         assert records[0].added_at == NOW
     finally:
         _run(database.close())
+
+
+def test_admin_add_concurrent_calls_are_idempotent(tmp_path) -> None:
+    """Concurrent add() calls of the same user: one inserts, rest False.
+
+    The single-statement ON CONFLICT DO NOTHING makes the decision and
+    the write atomic per statement, so racing coroutines cannot both
+    'see no row' and one of them raise IntegrityError.
+    """
+    async def _main() -> None:
+        database = NestQuestDatabase(_make_hass_mock())
+        await database.open(tmp_path / "admin-race.db")
+        try:
+            await apply_migrations(database)
+            _, dao = _daos(database)
+            tasks = [
+                asyncio.ensure_future(dao.add("user-1", NOW))
+                for _ in range(5)
+            ]
+            await asyncio.sleep(0)
+            results = list(await asyncio.gather(*tasks))
+            assert sorted(results) == [False, False, False, False, True]
+            records = await dao.list()
+            assert len(records) == 1
+            assert records[0].added_at == NOW
+        finally:
+            await database.close()
+
+    _run(_main())
 
 
 def test_admin_add_preserves_original_added_at(tmp_path) -> None:
@@ -358,28 +444,77 @@ def test_admin_records_are_typed_not_raw_rows(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# No SQL for these tables outside the module
+# No SQL for these tables outside the DAO module
 # ---------------------------------------------------------------------------
 
 
 def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
+    """Guardrail: children/admin_users SQL may appear only in the DAO
+    (and the schema DDL declarations).  Scans the integration package
+    AND the repo's test files, matching FROM/INTO/UPDATE/DELETE FROM/
+    JOIN against either table — including DELETE FROM children, the
+    hard-delete path the guardrail forbids.
+
+    Exclusions are narrowly justified: schema.py declares the tables'
+    DDL; migrations.py applies that DDL; test_schema.py and
+    test_migrations.py test exactly those DDL/migration layers.  None
+    of them touch the tables' data paths — that is the DAO's job.
+    """
     import re
     from pathlib import Path
 
     package = Path(
-        __import__("custom_components.nestquest", fromlist=["__file__"]).__file__
+        __import__(
+            "custom_components.nestquest", fromlist=["__file__"]
+        ).__file__
     ).parent
-    offenders = []
-    pattern = re.compile(
-        r"(FROM|INTO|UPDATE)\s+children\b|(FROM|INTO|DELETE FROM)\s+admin_users\b",
+    repo_root = package.parent.parent
+    scan_roots = [package, repo_root / "tests"]
+
+    allowed = {
+        "dao_children.py",  # the DAO itself
+        "schema.py",  # declares the DDL
+        "migrations.py",  # applies the DDL
+        "test_schema.py",  # tests the DDL
+        "test_migrations.py",  # tests migration application of the DDL
+        "test_dao_children.py",  # this file, scanned separately below
+    }
+    sql_pattern = re.compile(
+        r"(FROM|INTO|UPDATE|DELETE\s+FROM|JOIN)\s+"
+        r'["\`]*(children|admin_users)["\`]*\b',
         re.IGNORECASE,
     )
-    for py in package.glob("*.py"):
-        if py.name == "dao_children.py" or py.name == "schema.py":
-            continue
-        text = py.read_text()
-        if pattern.search(text):
-            offenders.append(py.name)
+    offenders: list[str] = []
+    for root in scan_roots:
+        for py in sorted(root.glob("*.py")):
+            if py.name in allowed:
+                continue
+            if sql_pattern.search(py.read_text()):
+                offenders.append(py.name)
     assert offenders == [], (
-        f"SQL for children/admin_users leaked into: {offenders}"
+        f"SQL touching children/admin_users leaked into: {offenders}"
+    )
+
+
+def test_dao_test_file_uses_dao_not_raw_table_sql() -> None:
+    """This test module must exercise the DAO, not raw SQL, for these
+    tables — except inside this guard itself.  Any SQL statement naming
+    children or admin_users in a string literal elsewhere here is a
+    violation.
+    """
+    import re
+    from pathlib import Path
+
+    text = Path(__file__).read_text()
+    # Cut everything from the guard function to the end of file: the
+    # guard's own patterns mention the keywords in regex strings, not
+    # executable SQL.
+    head = text[: text.index("def test_children_and_admin_sql_lives")]
+    sql_pattern = re.compile(
+        r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+"
+        r'["\`]*(children|admin_users)\b',
+        re.IGNORECASE,
+    )
+    assert sql_pattern.search(head) is None, (
+        "tests must go through the DAO, not raw SQL, for these tables"
     )

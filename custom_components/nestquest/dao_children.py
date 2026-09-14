@@ -16,6 +16,7 @@ the admin remove/set paths).
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from .db import NestQuestDatabase
@@ -70,6 +71,10 @@ class ChildrenDao:
 
     def __init__(self, database) -> None:
         self._database = database
+        #: Serializes whole reorder() runs on this DAO instance: the
+        #: wrapper rejects concurrent transactions, so racing reorders
+        #: must queue here instead of colliding.
+        self._reorder_lock = asyncio.Lock()
 
     async def create(
         self,
@@ -173,26 +178,42 @@ class ChildrenDao:
         Runs inside one transaction; positions are staged at offset
         -len (all negative, so any permutation of the same ids never
         collides mid-reorder under the wrapper's single-connection
-        serialization), then finalized 0..n-1.
+        serialization), then finalized 0..n-1.  Duplicate ids are
+        rejected up front: they cannot all hold distinct positions, and
+        silently assigning the last occurrence's index would hide a
+        caller bug.
+
+        Concurrent reorder() calls on one connection are serialized by
+        a per-instance asyncio lock: the wrapper's transaction()
+        rejects a second concurrent transaction with RuntimeError, so
+        racing callers would crash instead of queueing.  The lock makes
+        the second call wait, then run against the first call's final
+        state.
         """
         if not ordered_ids:
             return
-        async with self._database.transaction():
-            offset = len(ordered_ids)
-            await self._database.execute_many(
-                "UPDATE children SET sort_order = ? WHERE id = ?",
-                [
-                    (-(offset + index), child_id)
-                    for index, child_id in enumerate(ordered_ids)
-                ],
+        if len(set(ordered_ids)) != len(ordered_ids):
+            raise ValueError(
+                "reorder() received duplicate child ids; every id must "
+                "appear at most once"
             )
-            await self._database.execute_many(
-                "UPDATE children SET sort_order = ? WHERE id = ?",
-                [
-                    (index, child_id)
-                    for index, child_id in enumerate(ordered_ids)
-                ],
-            )
+        async with self._reorder_lock:
+            async with self._database.transaction():
+                offset = len(ordered_ids)
+                await self._database.execute_many(
+                    "UPDATE children SET sort_order = ? WHERE id = ?",
+                    [
+                        (-(offset + index), child_id)
+                        for index, child_id in enumerate(ordered_ids)
+                    ],
+                )
+                await self._database.execute_many(
+                    "UPDATE children SET sort_order = ? WHERE id = ?",
+                    [
+                        (index, child_id)
+                        for index, child_id in enumerate(ordered_ids)
+                    ],
+                )
 
 
 class AdminUsersDao:
@@ -209,20 +230,19 @@ class AdminUsersDao:
     async def add(self, ha_user_id: str, added_at: str) -> bool:
         """Add a user to the allowlist; True if inserted, False if present.
 
-        Idempotent by design: allowlist management UIs re-adding an
-        existing admin must not raise.
+        Idempotent under concurrency: a single INSERT ... ON CONFLICT DO
+        NOTHING decides and inserts in one statement (the wrapper
+        serializes statements, not check-then-insert sequences, so a
+        SELECT/INSERT pair would let two concurrent adds both see no
+        row and the second one raise IntegrityError).  rowcount reports
+        whether the insert actually happened.
         """
-        existing = await self._database.fetch_one(
-            "SELECT 1 FROM admin_users WHERE ha_user_id = ?",
-            (ha_user_id,),
-        )
-        if existing is not None:
-            return False
-        await self._database.execute(
-            "INSERT INTO admin_users (ha_user_id, added_at) VALUES (?, ?)",
+        result = await self._database.execute(
+            "INSERT INTO admin_users (ha_user_id, added_at) VALUES (?, ?) "
+            "ON CONFLICT (ha_user_id) DO NOTHING",
             (ha_user_id, added_at),
         )
-        return True
+        return result.rowcount > 0
 
     async def remove(self, ha_user_id: str) -> bool:
         """Remove a user from the allowlist; True if a row was removed."""
