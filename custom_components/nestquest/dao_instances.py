@@ -183,6 +183,11 @@ class TaskInstancesDao:
         child deletion cannot slip between check and insert).
         """
         _validate_date(due_date, "due_date")
+        # Fail fast on obviously-past dates BEFORE queuing on the
+        # connection lock (a nice early error); the AUTHORITATIVE
+        # check runs after the lock is acquired, because a caller can
+        # wait on the lock across midnight — a date that was "today"
+        # at call time may be "yesterday" by the time the INSERT runs.
         today = datetime.date.today().isoformat()
         if due_date < today:
             raise ValueError(
@@ -191,6 +196,16 @@ class TaskInstancesDao:
             )
         async with _connection_lock(self._database):
             async with self._database.transaction():
+                # Re-read "today" under the lock: this is the date the
+                # insert actually executes on, so the no-past rule
+                # holds across midnight rollovers.
+                today = datetime.date.today().isoformat()
+                if due_date < today:
+                    raise ValueError(
+                        f"instances are never generated in the past: "
+                        f"due_date {due_date!r} is before today "
+                        f"{today!r}"
+                    )
                 definition = await self._database.fetch_one(
                     "SELECT child_id FROM task_definitions WHERE id = ?",
                     (definition_id,),
@@ -313,10 +328,15 @@ class TaskInstancesDao:
         of its date.  Returns the number deleted.
         """
         _validate_date(cutoff_date, "cutoff_date")
-        today = datetime.date.today().isoformat()
-        effective_cutoff = max(cutoff_date, today)
         async with _connection_lock(self._database):
             async with self._database.transaction():
+                # "today" is read under the lock: the DELETE actually
+                # executes on this date, so a caller queued across
+                # midnight cannot delete instances that became past
+                # while it waited (backdating is clamped to the
+                # execution date, not the call date).
+                today = datetime.date.today().isoformat()
+                effective_cutoff = max(cutoff_date, today)
                 result = await self._database.execute(
                     "DELETE FROM task_instances WHERE definition_id = ? "
                     "AND due_date >= ? AND NOT EXISTS ("

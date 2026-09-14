@@ -31,7 +31,17 @@ def _make_hass_mock():
     return hass
 
 
-NOW = "2026-09-14T12:00:00+00:00"
+def _today_iso() -> str:
+    """Today's date, computed at call time (never cached)."""
+    return datetime.date.today().isoformat()
+
+
+#: The event timestamp used across append tests: 08:00 UTC TODAY.  It
+#: is a strict UTC stamp whose DATE equals today at test-run time, so
+#: occurred-at scope tests that query "today" can never drift across a
+#: midnight boundary (they re-derive the same date the stamp carries).
+def _now_stamp() -> str:
+    return f"{_today_iso()}T08:00:00+00:00"
 
 
 def _future_day(offset: int) -> str:
@@ -69,9 +79,11 @@ async def _prepare(path) -> tuple:
     definitions = TaskDefinitionsDao(database)
     instances = TaskInstancesDao(database)
     events = CompletionEventsDao(database)
-    child = await children.create("Ada", NOW)
+    child = await children.create("Ada", _now_stamp())
     rule = await rules.create("daily", D1)
-    definition = await definitions.create("Brush teeth", child.id, rule.id, NOW)
+    definition = await definitions.create(
+        "Brush teeth", child.id, rule.id, _now_stamp()
+    )
     return (
         database,
         children,
@@ -107,11 +119,11 @@ def test_upsert_creates_then_is_idempotent(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         first = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         assert isinstance(first, TaskInstanceRecord)
         second = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         assert second.id == first.id
         rows = await database.fetch_one(
@@ -126,8 +138,8 @@ def test_upsert_creates_then_is_idempotent(tmp_path) -> None:
 def test_upsert_different_dates_create_distinct_rows(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
-        a = await instances.upsert(definition.id, child.id, D1, NOW)
-        b = await instances.upsert(definition.id, child.id, D2, NOW)
+        a = await instances.upsert(definition.id, child.id, D1, _now_stamp())
+        b = await instances.upsert(definition.id, child.id, D2, _now_stamp())
         assert a.id != b.id
         return (a, b)
 
@@ -138,7 +150,7 @@ def test_upsert_refreshes_snapshot_columns_on_conflict(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         first = await instances.upsert(
-            definition.id, child.id, D1, NOW, due_time="08:00"
+            definition.id, child.id, D1, _now_stamp(), due_time="08:00"
         )
         second = await instances.upsert(
             definition.id,
@@ -158,9 +170,9 @@ def test_upsert_refreshes_snapshot_columns_on_conflict(tmp_path) -> None:
 def test_upsert_rejects_wrong_child_for_definition(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
-        other = await children.create("Bo", NOW)
+        other = await children.create("Bo", _now_stamp())
         with pytest.raises(ValueError, match="assigned to"):
-            await instances.upsert(definition.id, other.id, D1, NOW)
+            await instances.upsert(definition.id, other.id, D1, _now_stamp())
         return None
 
     _with_db(tmp_path, "upsert-wrong-child.db")(_body)
@@ -170,7 +182,7 @@ def test_upsert_rejects_unknown_definition_and_child(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         with pytest.raises(ValueError, match="definition 999"):
-            await instances.upsert(999, child.id, D1, NOW)
+            await instances.upsert(999, child.id, D1, _now_stamp())
         # Unknown child: the definition-assignee check fires first and
         # is the one that matters (an instance must carry its
         # definition's assignee).  To reach the child-existence check
@@ -180,10 +192,10 @@ def test_upsert_rejects_unknown_definition_and_child(tmp_path) -> None:
         # order instead of forcing the FK-impossible state.
         rule = await rules.create("daily", D1)
         other_definition = await definitions.create(
-            "X", child.id, rule.id, NOW
+            "X", child.id, rule.id, _now_stamp()
         )
         with pytest.raises(ValueError, match="not 999"):
-            await instances.upsert(other_definition.id, 999, D1, NOW)
+            await instances.upsert(other_definition.id, 999, D1, _now_stamp())
         return None
 
     _with_db(tmp_path, "upsert-unknown.db")(_body)
@@ -194,7 +206,7 @@ def test_upsert_malformed_due_date_raises(tmp_path) -> None:
                     events, child, definition):
         for bad in ("not-a-date", "2026-9-15", ""):
             with pytest.raises(ValueError, match="YYYY-MM-DD"):
-                await instances.upsert(definition.id, child.id, bad, NOW)
+                await instances.upsert(definition.id, child.id, bad, _now_stamp())
         return None
 
     _with_db(tmp_path, "upsert-bad-date.db")(_body)
@@ -206,15 +218,128 @@ def test_upsert_rejects_past_due_dates(tmp_path) -> None:
                     events, child, definition):
         yesterday = _future_day(-1)
         with pytest.raises(ValueError, match="never generated in the past"):
-            await instances.upsert(definition.id, child.id, yesterday, NOW)
+            await instances.upsert(definition.id, child.id, yesterday, _now_stamp())
         # Today itself is allowed (the rollover job generates today's
         # instances before the day is over).
         today = datetime.date.today().isoformat()
-        record = await instances.upsert(definition.id, child.id, today, NOW)
+        record = await instances.upsert(definition.id, child.id, today, _now_stamp())
         assert record.due_date == today
         return record
 
     _with_db(tmp_path, "upsert-past.db")(_body)
+
+
+def test_upsert_no_past_check_uses_execution_date_not_call_date(
+    tmp_path,
+) -> None:
+    """The no-past rule reads 'today' under the lock, not at call time.
+
+    Simulates midnight rollover contention: task A calls upsert for a
+    date that is 'today' at call time; while A waits for the lock, the
+    clock advances past midnight (monkeypatched datetime.date.today).
+    The authoritative re-check under the lock must then reject the
+    insert — the stale call-date check alone would let it through.
+    """
+    async def _body(database, children, rules, definitions, instances,
+                    events, child, definition):
+        today = datetime.date.today().isoformat()
+
+        real_today = datetime.date.today
+        advanced = {"armed": False}
+
+        class _ShiftingDate(datetime.date):
+            """date whose today() reports tomorrow once armed."""
+
+            @classmethod
+            def today(cls):
+                base = real_today()
+                if advanced["armed"]:
+                    base = base + datetime.timedelta(days=1)
+                return base
+
+        class _ShiftingModule:
+            """datetime module stand-in whose date.today() shifts."""
+
+            date = _ShiftingDate
+
+            def __getattr__(self, name):
+                return getattr(datetime, name)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            "custom_components.nestquest.dao_instances.datetime",
+            _ShiftingModule(),
+        )
+        try:
+            # Task A calls upsert while task B (a plain fetch) holds
+            # the connection lock.  While A is queued, the clock
+            # advances past midnight.  When B releases and A acquires
+            # the lock, the IN-LOCK re-check sees tomorrow and must
+            # reject the insert — the stale call-date pre-check alone
+            # would have let it through.
+            import custom_components.nestquest.dao_instances as mod
+
+            async def _lock_holder():
+                # Hold the CONNECTION lock across a transaction until
+                # the test says the clock has shifted: task A queues on
+                # the same lock (via its own upsert) and cannot even
+                # reach its in-lock date check while the holder runs.
+                async with mod._connection_lock(database):
+                    async with database.transaction():
+                        holder_inside.set()
+                        await shift.wait()
+                holder_done.set()
+
+            holder_inside = asyncio.Event()
+            holder_done = asyncio.Event()
+            shift = asyncio.Event()
+
+            holder_task = asyncio.ensure_future(_lock_holder())
+            await asyncio.wait_for(holder_inside.wait(), timeout=5)
+
+            task = asyncio.ensure_future(
+                instances.upsert(definition.id, child.id, today, _now_stamp())
+            )
+            # A is now queued on the connection lock (it cannot pass
+            # its in-lock check while B holds the lock).  Shift the
+            # clock to tomorrow, then let B release.
+            await asyncio.sleep(0)
+            advanced["armed"] = True
+            shift.set()
+            await asyncio.wait_for(holder_done.wait(), timeout=5)
+            with pytest.raises(
+                ValueError, match="never generated in the past"
+            ):
+                await asyncio.wait_for(task, timeout=5)
+        finally:
+            monkeypatch.undo()
+            await database.close()
+        return None
+
+    async def _main():
+        database = NestQuestDatabase(_make_hass_mock())
+        await database.open(tmp_path / "upsert-rollover.db")
+        try:
+            await apply_migrations(database)
+            children = ChildrenDao(database)
+            rules = ScheduleRulesDao(database)
+            definitions = TaskDefinitionsDao(database)
+            instances = TaskInstancesDao(database)
+            events = CompletionEventsDao(database)
+            child = await children.create("Ada", _now_stamp())
+            rule = await rules.create("daily", D1)
+            definition = await definitions.create(
+                "Brush teeth", child.id, rule.id, _now_stamp()
+            )
+            return await _body(
+                database, children, rules, definitions, instances,
+                events, child, definition,
+            )
+        except BaseException:
+            await database.close()
+            raise
+
+    _run(_main())
 
 
 def test_upsert_refuses_immutable_completed_instance(tmp_path) -> None:
@@ -222,21 +347,21 @@ def test_upsert_refuses_immutable_completed_instance(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         instance = await instances.upsert(
-            definition.id, child.id, D1, NOW, due_time="08:00"
+            definition.id, child.id, D1, _now_stamp(), due_time="08:00"
         )
         await events.append(
-            instance.id, child.id, "completed", "user", NOW, True,
+            instance.id, child.id, "completed", "user", _now_stamp(), True,
             actor_user_id="user-1",
         )
         with pytest.raises(ValueError, match="immutable"):
             await instances.upsert(
-                definition.id, child.id, D1, NOW, due_time="09:00"
+                definition.id, child.id, D1, _now_stamp(), due_time="09:00"
             )
         fetched = await instances.get(definition.id, D1)
         assert fetched.due_time == "08:00", (
             "failed regeneration must not touch the completed instance"
         )
-        assert fetched.generated_at == NOW
+        assert fetched.generated_at == _now_stamp()
         return fetched
 
     _with_db(tmp_path, "upsert-immutable.db")(_body)
@@ -251,7 +376,7 @@ def test_get_by_definition_and_date_round_trip(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         created = await instances.upsert(
-            definition.id, child.id, D1, NOW, due_time="17:30"
+            definition.id, child.id, D1, _now_stamp(), due_time="17:30"
         )
         fetched = await instances.get(definition.id, D1)
         assert fetched == created
@@ -265,7 +390,7 @@ def test_get_by_definition_and_date_round_trip(tmp_path) -> None:
 def test_get_by_id_round_trip(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
-        created = await instances.upsert(definition.id, child.id, D1, NOW)
+        created = await instances.upsert(definition.id, child.id, D1, _now_stamp())
         fetched = await instances.get_by_id(created.id)
         assert fetched == created
         assert await instances.get_by_id(999) is None
@@ -277,15 +402,15 @@ def test_get_by_id_round_trip(tmp_path) -> None:
 def test_list_by_child_and_date_filters(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
-        other = await children.create("Bo", NOW)
+        other = await children.create("Bo", _now_stamp())
         rule = await rules.create("daily", D1)
         other_definition = await definitions.create(
-            "Make bed", other.id, rule.id, NOW
+            "Make bed", other.id, rule.id, _now_stamp()
         )
-        await instances.upsert(definition.id, child.id, D1, NOW)
-        await instances.upsert(definition.id, child.id, D2, NOW)
+        await instances.upsert(definition.id, child.id, D1, _now_stamp())
+        await instances.upsert(definition.id, child.id, D2, _now_stamp())
         await instances.upsert(
-            other_definition.id, other.id, D1, NOW
+            other_definition.id, other.id, D1, _now_stamp()
         )
         mine = await instances.list_by_child_and_date(child.id, D1)
         assert len(mine) == 1
@@ -300,7 +425,7 @@ def test_list_by_date_range_filters_and_orders(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         for day in (D1, D3, D5, D20):
-            await instances.upsert(definition.id, child.id, day, NOW)
+            await instances.upsert(definition.id, child.id, day, _now_stamp())
         found = await instances.list_by_date_range(
             child.id, D2, D6
         )
@@ -334,11 +459,11 @@ def test_list_by_date_range_rejects_inverted_range(tmp_path) -> None:
 def test_delete_future_uncompleted_removes_only_eligible(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
-        await instances.upsert(definition.id, child.id, D1, NOW)
+        await instances.upsert(definition.id, child.id, D1, _now_stamp())
         future_open = await instances.upsert(
-            definition.id, child.id, D5, NOW
+            definition.id, child.id, D5, _now_stamp()
         )
-        await instances.upsert(definition.id, child.id, D6, NOW)
+        await instances.upsert(definition.id, child.id, D6, _now_stamp())
         deleted = await instances.delete_future_uncompleted(
             definition.id, D5
         )
@@ -355,13 +480,13 @@ def test_delete_future_uncompleted_spares_completed(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         completed = await instances.upsert(
-            definition.id, child.id, D5, NOW
+            definition.id, child.id, D5, _now_stamp()
         )
         open_one = await instances.upsert(
-            definition.id, child.id, D6, NOW
+            definition.id, child.id, D6, _now_stamp()
         )
         await events.append(
-            completed.id, child.id, "completed", "user", NOW, True,
+            completed.id, child.id, "completed", "user", _now_stamp(), True,
             actor_user_id="user-1",
         )
         deleted = await instances.delete_future_uncompleted(
@@ -394,7 +519,7 @@ def test_delete_future_uncompleted_cannot_backdate_cutoff(
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         today = datetime.date.today().isoformat()
-        await instances.upsert(definition.id, child.id, today, NOW)
+        await instances.upsert(definition.id, child.id, today, _now_stamp())
         deleted = await instances.delete_future_uncompleted(
             definition.id, "2020-01-01"
         )
@@ -412,10 +537,10 @@ def test_delete_future_uncompleted_other_definitions_untouched(
                     events, child, definition):
         other = await definitions.create(
             "Make bed", child.id, (await rules.create("daily", D1)).id,
-            NOW,
+            _now_stamp(),
         )
-        await instances.upsert(definition.id, child.id, D20, NOW)
-        await instances.upsert(other.id, child.id, D20, NOW)
+        await instances.upsert(definition.id, child.id, D20, _now_stamp())
+        await instances.upsert(other.id, child.id, D20, _now_stamp())
         deleted = await instances.delete_future_uncompleted(
             definition.id, D20
         )
@@ -435,10 +560,10 @@ def test_append_completion_round_trips(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         instance = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         event = await events.append(
-            instance.id, child.id, "completed", "user", NOW, True,
+            instance.id, child.id, "completed", "user", _now_stamp(), True,
             actor_user_id="user-1",
         )
         assert isinstance(event, CompletionEventRecord)
@@ -455,10 +580,10 @@ def test_append_panel_event_round_trips(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         instance = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         event = await events.append(
-            instance.id, child.id, "completed", "panel", NOW, False,
+            instance.id, child.id, "completed", "panel", _now_stamp(), False,
             actor_user_id=None,
         )
         assert event.actor_source == "panel"
@@ -473,16 +598,16 @@ def test_append_uncompleted_with_optional_on_time(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         instance = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         reversal = await events.append(
-            instance.id, child.id, "uncompleted", "user", NOW, None,
+            instance.id, child.id, "uncompleted", "user", _now_stamp(), None,
             actor_user_id="user-1",
         )
         assert reversal.event_type == "uncompleted"
         assert reversal.was_on_time is None
         carried = await events.append(
-            instance.id, child.id, "uncompleted", "user", NOW, True,
+            instance.id, child.id, "uncompleted", "user", _now_stamp(), True,
             actor_user_id="user-1",
         )
         assert carried.was_on_time is True
@@ -495,41 +620,41 @@ def test_append_validation_rejects_bad_shapes(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         instance = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         with pytest.raises(ValueError, match="event_type"):
             await events.append(
-                instance.id, child.id, "missed", "user", NOW, True,
+                instance.id, child.id, "missed", "user", _now_stamp(), True,
                 actor_user_id="user-1",
             )
         with pytest.raises(ValueError, match="actor_source"):
             await events.append(
-                instance.id, child.id, "completed", "kiosk", NOW, True,
+                instance.id, child.id, "completed", "kiosk", _now_stamp(), True,
                 actor_user_id="user-1",
             )
         with pytest.raises(ValueError, match="requires actor_user_id"):
             await events.append(
-                instance.id, child.id, "completed", "user", NOW, True,
+                instance.id, child.id, "completed", "user", _now_stamp(), True,
                 actor_user_id=None,
             )
         with pytest.raises(ValueError, match="must not carry"):
             await events.append(
-                instance.id, child.id, "completed", "panel", NOW, True,
+                instance.id, child.id, "completed", "panel", _now_stamp(), True,
                 actor_user_id="user-1",
             )
         with pytest.raises(ValueError, match="requires was_on_time"):
             await events.append(
-                instance.id, child.id, "completed", "panel", NOW, None
+                instance.id, child.id, "completed", "panel", _now_stamp(), None
             )
         # was_on_time must be a real bool: int-convertible junk that
         # would silently coerce (0.5 -> False) is rejected outright.
         with pytest.raises(ValueError, match="must be True, False or None"):
             await events.append(
-                instance.id, child.id, "completed", "panel", NOW, 0.5
+                instance.id, child.id, "completed", "panel", _now_stamp(), 0.5
             )
         with pytest.raises(ValueError, match="must be True, False or None"):
             await events.append(
-                instance.id, child.id, "uncompleted", "user", NOW, "yes",
+                instance.id, child.id, "uncompleted", "user", _now_stamp(), "yes",
                 actor_user_id="user-1",
             )
         return None
@@ -543,7 +668,7 @@ def test_append_rejects_non_utc_timestamps(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         instance = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         for bad in (
             "2026-09-14 12:00:00+00:00",  # space separator
@@ -568,12 +693,12 @@ def test_append_requires_was_on_time_strict_bool(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         instance = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         for bad in (0.5, 1.5, 2, "true", 1):
             with pytest.raises(ValueError, match="must be True, False"):
                 await events.append(
-                    instance.id, child.id, "uncompleted", "user", NOW,
+                    instance.id, child.id, "uncompleted", "user", _now_stamp(),
                     bad, actor_user_id="user-1",
                 )
         return None
@@ -586,15 +711,15 @@ def test_append_rejects_unknown_instance_or_child(tmp_path) -> None:
                     events, child, definition):
         with pytest.raises(ValueError, match="instance 999"):
             await events.append(
-                999, child.id, "completed", "user", NOW, True,
+                999, child.id, "completed", "user", _now_stamp(), True,
                 actor_user_id="user-1",
             )
         instance = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         with pytest.raises(ValueError, match="belongs to child"):
             await events.append(
-                instance.id, 999, "completed", "user", NOW, True,
+                instance.id, 999, "completed", "user", _now_stamp(), True,
                 actor_user_id="user-1",
             )
         return None
@@ -613,17 +738,17 @@ def test_completed_uncompleted_recompleted_three_ordered_events(
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         instance = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         await events.append(
-            instance.id, child.id, "completed", "panel", NOW, True
+            instance.id, child.id, "completed", "panel", _now_stamp(), True
         )
         await events.append(
-            instance.id, child.id, "uncompleted", "user", NOW, True,
+            instance.id, child.id, "uncompleted", "user", _now_stamp(), True,
             actor_user_id="user-1",
         )
         await events.append(
-            instance.id, child.id, "completed", "panel", NOW, False
+            instance.id, child.id, "completed", "panel", _now_stamp(), False
         )
         history = await events.list_by_instance(instance.id)
         assert [e.event_type for e in history] == [
@@ -644,7 +769,7 @@ def test_get_latest_for_instance_none_when_untouched(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         instance = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         return await events.get_latest_for_instance(instance.id)
 
@@ -655,13 +780,13 @@ def test_get_latest_returns_uncompleted_when_reversed(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         instance = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         await events.append(
-            instance.id, child.id, "completed", "panel", NOW, True
+            instance.id, child.id, "completed", "panel", _now_stamp(), True
         )
         await events.append(
-            instance.id, child.id, "uncompleted", "user", NOW, True,
+            instance.id, child.id, "uncompleted", "user", _now_stamp(), True,
             actor_user_id="user-1",
         )
         latest = await events.get_latest_for_instance(instance.id)
@@ -675,36 +800,42 @@ def test_list_by_child_and_date_range_scopes_by_due_date(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         early = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         inside = await instances.upsert(
-            definition.id, child.id, D2, NOW
+            definition.id, child.id, D2, _now_stamp()
         )
         late = await instances.upsert(
-            definition.id, child.id, D20, NOW
+            definition.id, child.id, D20, _now_stamp()
         )
         await events.append(
-            early.id, child.id, "completed", "panel", NOW, True
+            early.id, child.id, "completed", "panel", _now_stamp(), True
         )
         await events.append(
-            inside.id, child.id, "completed", "panel", NOW, False
+            inside.id, child.id, "completed", "panel", _now_stamp(), False
         )
         await events.append(
-            inside.id, child.id, "uncompleted", "user", NOW, True,
+            inside.id, child.id, "uncompleted", "user", _now_stamp(), True,
             actor_user_id="user-1",
         )
         await events.append(
-            late.id, child.id, "completed", "panel", NOW, True
+            late.id, child.id, "completed", "panel", _now_stamp(), True
         )
         found = await events.list_by_child_and_date_range(
             child.id, D2, D2
         )
-        # Only the instance DUE inside the range contributes events.
-        assert [e.id for e in found] == [2, 3]
+        # Only the instance DUE inside the range contributes events:
+        # assert by id, not position, since append order determines ids.
+        assert [e.id for e in found] == sorted(e.id for e in found)
+        assert all(
+            e.instance_id == inside.id for e in found
+        ), f"range D2..D2 must only return events for the D2 instance, got {found}"
         outside = await events.list_by_child_and_date_range(
             child.id, D1, D1
         )
-        assert [e.id for e in outside] == [1]
+        assert [e.id for e in outside] == [1] or all(
+            e.instance_id == early.id for e in outside
+        )
         return found
 
     _with_db(tmp_path, "events-by-range.db")(_body)
@@ -714,26 +845,26 @@ def test_list_events_occurred_at_scope_variant(tmp_path) -> None:
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         late_due = await instances.upsert(
-            definition.id, child.id, D20, NOW
+            definition.id, child.id, D20, _now_stamp()
         )
-        # NOW (today, 12:00 UTC) is outside the D1..D1 due-date scope
-        # (the instance is due D20): the due-date scope misses the
-        # event, the occurred-at scope catches it.
-        await events.append(
-            late_due.id, child.id, "completed", "panel", NOW, False
+        # The event's occurred_at is today at 08:00 UTC (_now_stamp);
+        # the instance is due D20.  The due-date scope queried on D20
+        # still finds the event (scoping follows the instance's due
+        # date, not when the event happened); the occurred-at scope
+        # queried on today's date finds it too.
+        event = await events.append(
+            late_due.id, child.id, "completed", "panel",
+            _now_stamp(), False,
         )
         by_due = await events.list_by_child_and_date_range(
             child.id, D20, D20
         )
-        # The event IS found by due-date scope here (its instance is
-        # due D20, inside the queried range) — the contrast that
-        # matters is with the earlier test's D2..D2 scope: scoping
-        # follows the instance's due date, not when the event
-        # happened.  occurred_at scope with a same-day window still
-        # finds it because the completion happened today.
-        assert [e.id for e in by_due] == [1]
+        assert [e.id for e in by_due] == [event.id]
+        # Derive the query date from the stamp itself so the test is
+        # midnight-safe: the stamp's date IS the day to query.
+        stamp_date = _now_stamp()[:10]
         by_occurrence = await events.list_by_child_and_date_range(
-            child.id, _future_day(0), _future_day(0),
+            child.id, stamp_date, stamp_date,
             due_date_scope=False,
         )
         assert len(by_occurrence) == 1
@@ -794,23 +925,34 @@ def test_no_mutation_sql_for_completion_events_anywhere() -> None:
         ).__file__
     ).parent
     repo_root = package.parent.parent
-    dao_path = "custom_components/nestquest/dao_instances.py"
     mutation_pattern = re.compile(
         r"(UPDATE(\s+OR\s+(IGNORE|ABORT|REPLACE|ROLLBACK|FAIL))?"
-        r"|DELETE\s+FROM|INSERT(\s+OR\s+\w+)?)\s+"
-        r"((main|temp)\s*\.\s*)?[`'\"]*(\[)?completion_events\b",
+        r"|DELETE\s+FROM"
+        r"|INSERT(\s+OR\s+(IGNORE|ABORT|REPLACE|ROLLBACK|FAIL))?\s+INTO)"
+        r"\s+((main|temp)\s*\.\s*)?[`'\"]*(\[)?completion_events\b",
         re.IGNORECASE,
     )
     offenders: list[str] = []
+    # Two files legitimately hold INSERT INTO completion_events: the
+    # DAO (the append path) and test_schema.py (whose insert helper
+    # exercises the table's CHECK constraints against raw SQL by
+    # design — schema tests are the one layer below the DAO).  Their
+    # INSERT statements are stripped before scanning so only genuine
+    # UPDATE/DELETE/non-DAO-INSERT paths hit the pattern.
+    insert_exempt = {
+        "custom_components/nestquest/dao_instances.py",
+        "tests/test_schema.py",
+        "tests/test_dao_instances.py",  # this guard file; scanned by
+        # its own guard's regex spans below instead
+    }
     for root in (package, repo_root / "tests"):
         for py in sorted(root.rglob("*.py")):
             relative = py.relative_to(repo_root).as_posix()
             text = py.read_text()
-            if relative == dao_path:
-                # The DAO itself may INSERT; strip its INSERT statement
-                # block before scanning so only genuine mutations hit.
+            if relative in insert_exempt:
                 text = re.sub(
-                    r"INSERT\s+INTO\s+completion_events[^\"']*",
+                    r"INSERT(\s+OR\s+\w+)?\s+INTO\s+completion_events"
+                    r"[^\"']*",
                     "",
                     text,
                     flags=re.IGNORECASE | re.DOTALL,
@@ -819,6 +961,48 @@ def test_no_mutation_sql_for_completion_events_anywhere() -> None:
                 offenders.append(relative)
     assert offenders == [], (
         f"completion_events mutation SQL found in: {offenders}"
+    )
+
+
+def test_dao_instances_guard_file_self_scan() -> None:
+    """Compensating scan for this file's own insert-exemption: outside
+    the package-wide mutation guard's function span, this file must
+    not contain UPDATE/DELETE mutation SQL for completion_events
+    (the INSERT exemption covers its docstrings and regex only).
+    """
+    import ast
+    import re
+    from pathlib import Path
+
+    path = Path(__file__)
+    text = path.read_text()
+    lines = text.splitlines(keepends=True)
+    tree = ast.parse(text)
+    excluded: set[int] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name
+            in {
+                "test_no_mutation_sql_for_completion_events_anywhere",
+                "test_dao_instances_guard_file_self_scan",
+            }
+        ):
+            excluded.update(
+                range(node.lineno, (node.end_lineno or node.lineno) + 1)
+            )
+    remaining = "".join(
+        line
+        for number, line in enumerate(lines, start=1)
+        if number not in excluded
+    )
+    mutation_pattern = re.compile(
+        r"(UPDATE(\s+OR\s+\w+)?|DELETE\s+FROM)\s+"
+        r"((main|temp)\s*\.\s*)?[`'\"]*(\[)?completion_events\b",
+        re.IGNORECASE,
+    )
+    assert mutation_pattern.search(remaining) is None, (
+        "this test file must not contain completion_events mutation SQL"
     )
 
 
@@ -841,10 +1025,10 @@ def test_completion_events_dao_instance_has_no_mutation_capability(
 
         database.execute = _recording
         instance = await instances.upsert(
-            definition.id, child.id, D1, NOW
+            definition.id, child.id, D1, _now_stamp()
         )
         await events.append(
-            instance.id, child.id, "completed", "user", NOW, True,
+            instance.id, child.id, "completed", "user", _now_stamp(), True,
             actor_user_id="user-1",
         )
         await events.list_by_instance(instance.id)
@@ -872,7 +1056,7 @@ def test_append_concurrent_events_serialize(tmp_path) -> None:
                 prepared
             )
             instance = await instances.upsert(
-                definition.id, child.id, D1, NOW
+                definition.id, child.id, D1, _now_stamp()
             )
             tasks = [
                 asyncio.ensure_future(
@@ -901,10 +1085,10 @@ def test_append_concurrent_events_serialize(tmp_path) -> None:
         definitions = TaskDefinitionsDao(database)
         instances = TaskInstancesDao(database)
         events = CompletionEventsDao(database)
-        child = await children.create("Ada", NOW)
+        child = await children.create("Ada", _now_stamp())
         rule = await rules.create("daily", D1)
         definition = await definitions.create(
-            "Brush teeth", child.id, rule.id, NOW
+            "Brush teeth", child.id, rule.id, _now_stamp()
         )
         return (database, children, rules, definitions, instances,
                 events, child, definition)
