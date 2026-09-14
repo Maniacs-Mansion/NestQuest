@@ -41,6 +41,7 @@ _HA_MODULES = (
     "homeassistant.core",
     "homeassistant.config_entries",
     "homeassistant.data_entry_flow",
+    "homeassistant.exceptions",
 )
 
 def _find_spec(name: str):
@@ -77,6 +78,7 @@ for _parent, _child in (
     ("homeassistant", "config_entries"),
     ("homeassistant", "data_entry_flow"),
     ("homeassistant", "core"),
+    ("homeassistant", "exceptions"),
 ):
     setattr(sys.modules[_parent], _child, sys.modules[f"{_parent}.{_child}"])
 
@@ -158,6 +160,7 @@ def _callback_decorator(fn):
 _config_entries_mock = _ha_mock("homeassistant.config_entries")
 _core_mock = _ha_mock("homeassistant.core")
 _data_entry_flow_mock = _ha_mock("homeassistant.data_entry_flow")
+_exceptions_mock = _ha_mock("homeassistant.exceptions")
 
 _config_entries_mock.ConfigFlow = _ConfigFlowBase
 _config_entries_mock.OptionsFlowWithConfigEntry = _OptionsFlowWithConfigEntryBase
@@ -166,6 +169,17 @@ _data_entry_flow_mock.RESULT_TYPE_FORM = "form"
 _data_entry_flow_mock.RESULT_TYPE_CREATE_ENTRY = "create_entry"
 _data_entry_flow_mock.RESULT_TYPE_ABORT = "abort"
 _data_entry_flow_mock.FlowResult = dict
+
+
+class ConfigEntryNotReady(Exception):
+    """Stand-in mirroring homeassistant.exceptions.ConfigEntryNotReady.
+
+    HA retries setup when this is raised; the tests assert the corrupt
+    database path raises it instead of crashing with an unrelated error.
+    """
+
+
+_exceptions_mock.ConfigEntryNotReady = ConfigEntryNotReady
 
 
 # ---------------------------------------------------------------------------

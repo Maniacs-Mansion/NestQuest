@@ -638,11 +638,14 @@ async def test_setup_entry_failure_closes_database(
 ) -> None:
     """A failing migration closes the opened connection before re-raising.
 
-    Spies on the real wrapper instance: records whether close() ran and
-    whether the connection is left disconnected, rather than inferring
-    from hass.data (a failed setup never stores a runtime record).
+    A migration failure surfaces as ConfigEntryNotReady (HA retries
+    setup) with the original error preserved as __cause__.  Spies on
+    the real wrapper instance: records whether close() ran, rather
+    than inferring from hass.data (a failed setup never stores a
+    runtime record).
     """
     import pytest as pytest_module
+    from homeassistant.exceptions import ConfigEntryNotReady
 
     import custom_components.nestquest as nestquest_module
     from custom_components.nestquest.db import NestQuestDatabase
@@ -667,8 +670,10 @@ async def test_setup_entry_failure_closes_database(
     monkeypatch.setattr(NestQuestDatabase, "close", _spy_close)
 
     entry = make_entry()
-    with pytest_module.raises(RuntimeError, match="boom"):
+    with pytest_module.raises(ConfigEntryNotReady) as excinfo:
         await _setup_entry(hass, entry, hass.registry)
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert "boom" in str(excinfo.value.__cause__)
 
     assert close_calls == [True], (
         "failed setup must close the connection it opened"

@@ -493,6 +493,10 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
         "tests/test_dao_children.py",  # this file, scanned separately
         "tests/test_dao_rules.py",  # rules/definitions guard, own scope
         "tests/test_dao_presence.py",  # presence guard, own scope
+        "tests/test_dao_instances.py",  # instances guard, own scope
+        "tests/test_startup_db.py",  # row-count probe of the children
+        # table only (proving a fresh setup loads); guard below covers
+        # everything else
     }
     sql_pattern = re.compile(
         r"(FROM|INTO|UPDATE|DELETE\s+FROM|JOIN)\s+"
@@ -505,10 +509,63 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
             relative = py.relative_to(repo_root).as_posix()
             if relative in allowed:
                 continue
-            if sql_pattern.search(py.read_text()):
+            text = py.read_text()
+            if relative == "tests/test_startup_db.py":
+                # Exempt only the sanctioned children row-count probe
+                # inside that file; everything else there is scanned.
+                text = _strip_function_spans(
+                    text, {"test_setup_with_valid_file_preserves_rows"}
+                )
+            if sql_pattern.search(text):
                 offenders.append(relative)
     assert offenders == [], (
         f"SQL touching children/admin_users leaked into: {offenders}"
+    )
+
+
+def _strip_function_spans(text: str, names: set[str]) -> str:
+    """Return ``text`` minus the source spans of the named functions."""
+    import ast
+
+    lines = text.splitlines(keepends=True)
+    excluded: set[int] = set()
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in names
+        ):
+            excluded.update(
+                range(node.lineno, (node.end_lineno or node.lineno) + 1)
+            )
+    return "".join(
+        line
+        for number, line in enumerate(lines, start=1)
+        if number not in excluded
+    )
+
+
+def test_startup_db_test_file_uses_dao_elsewhere() -> None:
+    """Compensating self-scan for the startup-test exemption: outside
+    the single sanctioned COUNT(*) probe, test_startup_db.py must go
+    through the DAO for children/admin_users data access.
+    """
+    import re
+    from pathlib import Path
+
+    startup_test = Path(__file__).parent / "test_startup_db.py"
+    stripped = _strip_function_spans(
+        startup_test.read_text(),
+        {"test_setup_with_valid_file_preserves_rows"},
+    )
+    sql_pattern = re.compile(
+        r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM|"
+        r"FROM|JOIN)\s+[`'\"]*(\[)?(children|admin_users)\b",
+        re.IGNORECASE,
+    )
+    assert sql_pattern.search(stripped) is None, (
+        "test_startup_db.py must go through the DAO for these tables "
+        "outside its sanctioned row-count probe"
     )
 
 
