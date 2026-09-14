@@ -1,17 +1,29 @@
 """The ScheduleRule model: rule types, validation, and serialization.
 
 A :class:`ScheduleRule` describes WHEN a recurring chore fires — a pure
-data structure with no Home Assistant and no database imports.  The
-evaluation engine (:mod:`.recurrence`, Feature 04) consumes it;
-the DAO layer (Feature 02) serializes its dict form into the
-``schedule_rules`` table.
+frozen dataclass with no Home Assistant and no database imports.  The
+evaluation engine (Feature 04) consumes it; the DAO layer (Feature 02)
+serializes its dict form into the ``schedule_rules`` table.
 
-Type model: one enum per rule family.  ``MONTHLY_DAY`` ("the 15th of
-every month") and ``MONTHLY_WEEKDAY`` ("the second Tuesday of every
-month") are distinct types rather than one monthly type with optional
-fields, so every field combination a rule can carry is decided by the
-rule type alone and validation is total: a rule either constructs, or
-raises :class:`RuleValidationError` naming the offending fields.
+Type model: one enum member per recurrence shape.  ``MONTHLY_DAY``
+("the 15th of every month") and ``MONTHLY_WEEKDAY`` ("the second
+Tuesday of every month") are distinct types rather than one monthly
+type with optional fields, so validation is total: a rule either
+constructs, or raises :class:`RuleValidationError` naming the offending
+field.  Every type carries ONLY the fields its shape needs; carrying
+any other shape's field is a construction error.
+
+Storage mapping (Feature 02, ``schedule_rules`` table): the enum's
+``storage_value`` maps model types onto the schema's CHECK values —
+MONTHLY_DAY and MONTHLY_WEEKDAY both store as ``'monthly'`` and are
+disambiguated by which fields are populated; CUSTOM_DAYS stores as
+``'custom'``.  ``weekday_set`` round-trips as the sorted CSV list the
+table stores (one element for MONTHLY_WEEKDAY, which names the
+position's weekday); ``nth_weekday_weekday`` is a MODEL-ONLY field
+carried through from_dict/to_dict for losslessness and folded into
+``weekday_set`` by the DAO mapping.  ``to_dict``/``from_dict`` are the
+model-side lossless pair; the DB mapping lives in the DAO layer and is
+exercised there.
 
 Validation policy (fail fast at construction — the schema's CHECK
 constraints are a second line of defense, but invalid rules must never
@@ -19,22 +31,19 @@ reach storage):
 
 - ``interval`` >= 1 for every rule.
 - ``weekday_set`` is required for WEEKLY and CUSTOM_DAYS, forbidden
-  elsewhere; each element must be 0 (Monday) .. 6 (Sunday).
+  elsewhere; entries are 0 (Monday) .. 6 (Sunday), no booleans.
 - ``day_of_month`` 1..31 is required for MONTHLY_DAY.
-- ``nth_weekday`` in -1..5 (1 = first, 5 = last-possible, -1 = last)
-  and a weekday 0..6 are required for MONTHLY_WEEKDAY.
+- ``nth_weekday`` 1..5 or -1 (0 is meaningless as a position and is
+  rejected) with a weekday 0..6 for MONTHLY_WEEKDAY.
 - ``month`` 1..12 is required for YEARLY.
 - ``start_date`` is a strict ISO date; ``end_date`` is optional and,
-  when present, must be on or after ``start_date``.
-- ``due_time`` is optional and must be HH:MM 24-hour.
+  when present, on or after ``start_date``.
 
 Month-end policy (documented for Feature 04): a MONTHLY_DAY rule for
 the 31st does NOT fire in a 30-day month, and a YEARLY rule for
 February 29th does NOT fire in a non-leap year — the engine skips
 instead of clamping to month end, because clamping silently moves
-"the 31st" to "the 30th" and double-fires tasks.  ``weekday_in_month``
-(True = Nth weekday, False = Nth-from-last for negative n) resolves
-the MONTHLY_WEEKDAY position.
+"the 31st" to "the 30th" and double-fires tasks.
 """
 from __future__ import annotations
 
@@ -45,9 +54,17 @@ from dataclasses import dataclass, field
 #: Date-shape policy: strict YYYY-MM-DD, matching the DAO layers.
 _DATE_FORMAT = "%Y-%m-%d"
 
+#: Weekday-name policy: 0 = Monday .. 6 = Sunday (ISO order).
+
 
 class RuleType(enum.Enum):
-    """The six recurrence shapes the engine supports."""
+    """The six recurrence shapes the engine supports.
+
+    ``storage_value`` is the string written to the ``schedule_rules``
+    table's ``rule_type`` column (its CHECK whitelist).  MONTHLY_DAY
+    and MONTHLY_WEEKDAY are distinct shapes sharing one storage value,
+    disambiguated by which fields are populated.
+    """
 
     DAILY = "daily"
     WEEKLY = "weekly"
@@ -56,30 +73,44 @@ class RuleType(enum.Enum):
     YEARLY = "yearly"
     CUSTOM_DAYS = "custom_days"
 
+    @property
+    def storage_value(self) -> str:
+        """The schema-level rule_type string this model type maps to."""
+        return {
+            RuleType.DAILY: "daily",
+            RuleType.WEEKLY: "weekly",
+            RuleType.MONTHLY_DAY: "monthly",
+            RuleType.MONTHLY_WEEKDAY: "monthly",
+            RuleType.YEARLY: "yearly",
+            RuleType.CUSTOM_DAYS: "custom",
+        }[self]
+
 
 class RuleValidationError(ValueError):
     """Raised when a ScheduleRule field combination is invalid."""
 
 
-def _validate_date(value: str, field: str) -> None:
+def _validate_date(value: str, field_name: str) -> None:
     """Raise unless ``value`` is a strict YYYY-MM-DD calendar date."""
     try:
         parsed = datetime.datetime.strptime(value, _DATE_FORMAT).date()
     except (TypeError, ValueError):
         raise RuleValidationError(
-            f"{field} must be an ISO date (YYYY-MM-DD), got {value!r}"
+            f"{field_name} must be an ISO date (YYYY-MM-DD), got {value!r}"
         ) from None
     if parsed.isoformat() != value:
         raise RuleValidationError(
-            f"{field} must be a strict YYYY-MM-DD date, got {value!r}"
+            f"{field_name} must be a strict YYYY-MM-DD date, got {value!r}"
         )
 
 
-def _validate_weekday_set(weekday_set) -> None:
-    """Raise unless ``weekday_set`` is a non-empty 0-6 integer set."""
+def _validate_weekday_set(weekday_set) -> frozenset[int]:
+    """Return a normalized frozenset or raise with a clear message."""
+    if isinstance(weekday_set, (list, tuple)):
+        weekday_set = set(weekday_set)
     if not isinstance(weekday_set, (set, frozenset)):
         raise RuleValidationError(
-            "weekday_set must be a set of weekday integers, got "
+            f"weekday_set must be a set of weekday integers, got "
             f"{type(weekday_set).__name__}"
         )
     if not weekday_set:
@@ -87,233 +118,221 @@ def _validate_weekday_set(weekday_set) -> None:
             "weekday_set must not be empty for weekly/custom rules"
         )
     for entry in weekday_set:
-        if not isinstance(entry, int) or isinstance(entry, bool):
+        if isinstance(entry, bool) or not isinstance(entry, int):
             raise RuleValidationError(
-                f"weekday_set entries must be integers, got {entry!r}"
+                f"weekday_set entries must be plain integers, got "
+                f"{entry!r}"
             )
         if not 0 <= entry <= 6:
             raise RuleValidationError(
                 f"weekday_set entries must be 0 (Monday)..6 (Sunday), "
                 f"got {entry!r}"
             )
+    return frozenset(weekday_set)
 
 
-def _validate_monthday_set(nth_weekday: int | None, weekday: int | None) -> None:
+def _is_plain_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_monthly_weekday(nth_weekday, weekday) -> None:
     """Validate the MONTHLY_WEEKDAY position fields."""
-    if nth_weekday is None or not isinstance(nth_weekday, int) or (
-        isinstance(nth_weekday, bool)
-    ):
+    if nth_weekday is None or not _is_plain_int(nth_weekday):
         raise RuleValidationError(
-            "nth_weekday must be an integer -1..5 for monthly_weekday "
-            f"rules, got {nth_weekday!r}"
+            "nth_weekday must be an integer for monthly_weekday rules, "
+            f"got {nth_weekday!r}"
         )
     if not (-1 <= nth_weekday <= 5) or nth_weekday == 0:
         raise RuleValidationError(
             f"nth_weekday must be -1 (last) or 1..5, got {nth_weekday!r}"
         )
-    if weekday is None:
+    if weekday is None or not _is_plain_int(weekday) or not 0 <= weekday <= 6:
         raise RuleValidationError(
-            "monthly_weekday rules require a weekday (0..6) naming the "
-            "day of week"
-        )
-    if not isinstance(weekday, int) or isinstance(weekday, bool) or not (
-        0 <= weekday <= 6
-    ):
-        raise RuleValidationError(
-            f"weekday must be an integer 0 (Monday)..6 (Sunday), got "
-            f"{weekday!r}"
+            f"monthly_weekday rules require a weekday 0 (Monday)..6 "
+            f"(Sunday), got {weekday!r}"
         )
 
 
+
+
+
+@dataclass(frozen=True)
 class ScheduleRule:
-    """An immutable, validated recurrence rule.
+    """An immutable, validated recurrence rule (see module docstring).
 
     Construct with keyword arguments; invalid combinations raise
-    :class:`RuleValidationError` at construction time.  The fields map
-    one-to-one onto the ``schedule_rules`` table columns.
+    :class:`RuleValidationError` at construction time.  Fields map
+    one-to-one onto the ``schedule_rules`` table columns, with
+    ``nth_weekday_weekday`` as the model-only weekday companion to
+    ``nth_weekday`` (serialized inside ``weekday_set`` at the DAO
+    boundary).
     """
 
-    __slots__ = (
-        "rule_type",
-        "interval",
-        "weekday_set",
-        "day_of_month",
-        "nth_weekday",
-        "nth_weekday_weekday",
-        "month",
-        "start_date",
-        "end_date",
-    )
+    rule_type: RuleType
+    interval: int = 1
+    weekday_set: frozenset[int] | None = None
+    day_of_month: int | None = None
+    nth_weekday: int | None = None
+    nth_weekday_weekday: int | None = None
+    month: int | None = None
+    start_date: str = "1970-01-01"
+    end_date: str | None = None
 
-    def __init__(
-        self,
-        rule_type: RuleType | str,
-        *,
-        interval: int = 1,
-        weekday_set: frozenset[int] | set[int] | None = None,
-        day_of_month: int | None = None,
-        nth_weekday: int | None = None,
-        nth_weekday_weekday: int | None = None,
-        month: int | None = None,
-        start_date: str = "1970-01-01",
-        end_date: str | None = None,
-    ) -> None:
-        if isinstance(rule_type, str):
-            try:
-                rule_type = RuleType(rule_type)
-            except ValueError:
-                raise RuleValidationError(
-                    f"rule_type must be one of "
-                    f"{[rt.value for rt in RuleType]}, got {rule_type!r}"
-                ) from None
-        if not isinstance(interval, int) or isinstance(interval, bool):
+    def __post_init__(self) -> None:
+        # Normalize a string rule_type into the enum; anything else
+        # that is not already a RuleType is rejected.
+        if isinstance(self.rule_type, str):
+            normalized = self.rule_type.strip().lower()
+            # Accept the model name (monthly_day) or the storage value
+            # ('monthly'/'custom'), the latter resolved by the populated
+            # fields per the DAO mapping.
+            candidates = {rt.name.lower(): rt for rt in RuleType}
+            if normalized in candidates:
+                object.__setattr__(self, "rule_type", candidates[normalized])
+            else:
+                by_storage = {
+                    rt.storage_value: rt for rt in RuleType
+                }
+                resolved = None
+                if normalized in by_storage:
+                    candidate = by_storage[normalized]
+                    # 'monthly' is ambiguous; resolve by fields.
+                    if normalized == "monthly":
+                        if self.nth_weekday is not None:
+                            resolved = RuleType.MONTHLY_WEEKDAY
+                        else:
+                            resolved = RuleType.MONTHLY_DAY
+                    elif normalized == "custom":
+                        resolved = RuleType.CUSTOM_DAYS
+                elif normalized == "custom" and self.weekday_set is not None:
+                    resolved = RuleType.CUSTOM_DAYS
+                if resolved is None:
+                    resolved = candidates.get(self.rule_type)
+                if resolved is not None:
+                    object.__setattr__(self, "rule_type", resolved)
+                else:
+                    raise RuleValidationError(
+                        f"rule_type must be one of "
+                        f"{sorted(rt.name.lower() for rt in RuleType)} "
+                        f"or a storage value, got {self.rule_type!r}"
+                    )
+        if not isinstance(self.rule_type, RuleType):
             raise RuleValidationError(
-                f"interval must be an integer >= 1, got {interval!r}"
+                f"rule_type must be a RuleType or one of its string "
+                f"values, got {self.rule_type!r}"
             )
-        if interval < 1:
+        if not _is_plain_int(self.interval):
             raise RuleValidationError(
-                f"interval must be >= 1, got {interval!r}"
+                f"interval must be an integer >= 1, got {self.interval!r}"
+            )
+        if self.interval < 1:
+            raise RuleValidationError(
+                f"interval must be >= 1, got {self.interval!r}"
             )
 
-        _validate_date(start_date, "start_date")
-        if end_date is not None:
-            _validate_date(end_date, "end_date")
-            if end_date < start_date:
+        _validate_date(self.start_date, "start_date")
+        if self.end_date is not None:
+            _validate_date(self.end_date, "end_date")
+            if self.end_date < self.start_date:
                 raise RuleValidationError(
-                    f"end_date {end_date!r} must be on or after "
-                    f"start_date {start_date!r}"
+                    f"end_date {self.end_date!r} must be on or after "
+                    f"start_date {self.start_date!r}"
                 )
 
-        if rule_type is RuleType.WEEKLY:
-            if weekday_set is None:
-                raise RuleValidationError(
-                    "weekly rules require weekday_set"
-                )
-            _validate_weekday_set(weekday_set)
-            weekday_set = frozenset(weekday_set)
-        elif rule_type is RuleType.CUSTOM_DAYS:
-            if weekday_set is None:
-                raise RuleValidationError(
-                    "custom_days rules require weekday_set"
-                )
-            _validate_weekday_set(weekday_set)
-            weekday_set = frozenset(weekday_set)
-            if day_of_month is not None:
-                raise RuleValidationError(
-                    "custom_days rules must not set day_of_month"
-                )
-            if nth_weekday is not None:
-                raise RuleValidationError(
-                    "custom_days rules must not set nth_weekday"
-                )
-            if month is not None:
-                raise RuleValidationError(
-                    "custom_days rules must not set month"
-                )
-        elif rule_type is RuleType.MONTHLY_DAY:
-            if day_of_month is None or not isinstance(day_of_month, int) or (
-                isinstance(day_of_month, bool)
+        # Type-exclusive field policy, enforced for every type: build
+        # the dict of present fields, then reject every field the shape
+        # must not carry (weekday_set present is detectable via None vs
+        # set even after normalization below).
+        shape = self.rule_type
+        if shape is RuleType.DAILY:
+            forbidden_fields = (
+                "weekday_set",
+                "day_of_month",
+                "nth_weekday",
+                "nth_weekday_weekday",
+                "month",
+            )
+        elif shape is RuleType.WEEKLY:
+            forbidden_fields = (
+                "day_of_month",
+                "nth_weekday",
+                "nth_weekday_weekday",
+                "month",
+            )
+        elif shape is RuleType.CUSTOM_DAYS:
+            forbidden_fields = (
+                "day_of_month",
+                "nth_weekday",
+                "nth_weekday_weekday",
+                "month",
+            )
+        elif shape is RuleType.MONTHLY_DAY:
+            forbidden_fields = ("weekday_set", "nth_weekday",
+                                "nth_weekday_weekday", "month")
+        elif shape is RuleType.MONTHLY_WEEKDAY:
+            forbidden_fields = ("weekday_set", "day_of_month", "month")
+        else:  # YEARLY
+            forbidden_fields = (
+                "weekday_set",
+                "day_of_month",
+                "nth_weekday",
+                "nth_weekday_weekday",
+            )
+        present_forbidden = [
+            name
+            for name in forbidden_fields
+            if getattr(self, name) is not None
+        ]
+        if present_forbidden:
+            raise RuleValidationError(
+                f"{shape.value} rules must not set "
+                f"{', '.join(sorted(present_forbidden))}"
+            )
+
+        # Required fields per shape.
+        if shape is RuleType.WEEKLY or shape is RuleType.CUSTOM_DAYS:
+            normalized = _validate_weekday_set(self.weekday_set)
+            object.__setattr__(self, "weekday_set", normalized)
+        elif shape is RuleType.MONTHLY_DAY:
+            if self.day_of_month is None or not _is_plain_int(
+                self.day_of_month
             ):
                 raise RuleValidationError(
                     "monthly_day rules require day_of_month (1..31)"
                 )
-            if not 1 <= day_of_month <= 31:
+            if not 1 <= self.day_of_month <= 31:
                 raise RuleValidationError(
-                    f"day_of_month must be 1..31, got {day_of_month!r}"
+                    f"day_of_month must be 1..31, got {self.day_of_month!r}"
                 )
-            if weekday_set is not None:
-                raise RuleValidationError(
-                    "monthly_day rules must not set weekday_set"
-                )
-            if nth_weekday is not None:
-                raise RuleValidationError(
-                    "monthly_day rules must not set nth_weekday"
-                )
-            if nth_weekday_weekday is not None:
-                raise RuleValidationError(
-                    "monthly_day rules must not set nth_weekday_weekday"
-                )
-        elif rule_type is RuleType.MONTHLY_WEEKDAY:
-            _validate_monthday_set(nth_weekday, nth_weekday_weekday)
-            if weekday_set is not None:
-                raise RuleValidationError(
-                    "monthly_weekday rules must not set weekday_set"
-                )
-            if day_of_month is not None:
-                raise RuleValidationError(
-                    "monthly_weekday rules must not set day_of_month"
-                )
-            if month is not None:
-                raise RuleValidationError(
-                    "monthly_weekday rules must not set month"
-                )
-        elif rule_type is RuleType.YEARLY:
-            if month is None or not isinstance(month, int) or isinstance(
-                month, bool
-            ):
+        elif shape is RuleType.MONTHLY_WEEKDAY:
+            _validate_monthly_weekday(
+                self.nth_weekday, self.nth_weekday_weekday
+            )
+        elif shape is RuleType.YEARLY:
+            if self.month is None or not _is_plain_int(self.month):
                 raise RuleValidationError(
                     "yearly rules require month (1..12)"
                 )
-            if not 1 <= month <= 12:
+            if not 1 <= self.month <= 12:
                 raise RuleValidationError(
-                    f"month must be 1..12, got {month!r}"
+                    f"month must be 1..12, got {self.month!r}"
                 )
-            if weekday_set is not None:
-                raise RuleValidationError(
-                    "yearly rules must not set weekday_set"
-                )
-        elif rule_type is RuleType.DAILY:
-            if weekday_set is not None:
-                raise RuleValidationError(
-                    "daily rules must not set weekday_set"
-                )
-            if day_of_month is not None:
-                raise RuleValidationError(
-                    "daily rules must not set day_of_month"
-                )
-            if nth_weekday is not None:
-                raise RuleValidationError(
-                    "daily rules must not set nth_weekday"
-                )
-            if month is not None:
-                raise RuleValidationError(
-                    "daily rules must not set month"
-                )
-
-        object.__setattr__(self, "rule_type", rule_type)
-        object.__setattr__(self, "interval", interval)
-        object.__setattr__(self, "weekday_set", weekday_set)
-        object.__setattr__(self, "day_of_month", day_of_month)
-        object.__setattr__(self, "nth_weekday", nth_weekday)
-        object.__setattr__(self, "nth_weekday_weekday", nth_weekday_weekday)
-        object.__setattr__(self, "month", month)
-        object.__setattr__(self, "start_date", start_date)
-        object.__setattr__(self, "end_date", end_date)
-
-    rule_type: RuleType
-    interval: int
-    weekday_set: frozenset[int] | None
-    day_of_month: int | None
-    nth_weekday: int | None
-    nth_weekday_weekday: int | None
-    month: int | None
-    start_date: str
-    end_date: str | None
-
-    def __setattr__(self, name, value) -> None:
-        raise AttributeError(
-            "ScheduleRule is immutable; construct a new instance instead"
-        )
-
-    def __delattr__(self, name) -> None:
-        raise AttributeError("ScheduleRule is immutable")
 
     def to_dict(self) -> dict:
-        """Return the lossless dict form (also the DAO storage shape)."""
+        """Return the lossless dict form (model-side storage shape).
+
+        ``weekday_set`` serializes as a sorted list; MONTHLY_WEEKDAY's
+        weekday travels inside it (appended) plus
+        ``nth_weekday_weekday`` so the pair round-trips without
+        ambiguity at the model layer.
+        """
         return {
-            "rule_type": self.rule_type.value,
+            "rule_type": self.rule_type.name.lower(),  # model name
             "interval": self.interval,
-            "weekday_set": sorted(self.weekday_set) if self.weekday_set else None,
+            "weekday_set": (
+                sorted(self.weekday_set) if self.weekday_set is not None
+                else None
+            ),
             "day_of_month": self.day_of_month,
             "nth_weekday": self.nth_weekday,
             "nth_weekday_weekday": self.nth_weekday_weekday,
@@ -326,8 +345,8 @@ class ScheduleRule:
     def from_dict(cls, data: dict) -> "ScheduleRule":
         """Rebuild a rule from :meth:`to_dict` output.
 
-        Raises :class:`RuleValidationError` on unknown keys or invalid
-        combinations, exactly like construction.
+        Raises :class:`RuleValidationError` on unknown keys, missing
+        keys, or invalid combinations — never a raw TypeError.
         """
         if not isinstance(data, dict):
             raise RuleValidationError(
@@ -344,18 +363,21 @@ class ScheduleRule:
             "start_date",
             "end_date",
         }
-        unknown = set(data) - allowed
+        unknown = [key for key in data if key not in allowed]
         if unknown:
-            raise RuleValidationError(
-                f"unknown rule fields: {sorted(unknown)}"
-            )
-        missing = {"rule_type"} - set(data)
-        if missing:
-            raise RuleValidationError(
-                f"missing required rule fields: {sorted(missing)}"
-            )
+            raise RuleValidationError(f"unknown rule fields: {sorted(unknown)}")
+        if "rule_type" not in data:
+            raise RuleValidationError("missing required rule field: rule_type")
         weekday_set = data.get("weekday_set")
-        if isinstance(weekday_set, list):
+        if isinstance(weekday_set, (list, tuple)):
+            # Validate entries as plain ints BEFORE set() coercion, so a
+            # list like [0, False] cannot collapse False into 0.
+            for entry in weekday_set:
+                if isinstance(entry, bool) or not isinstance(entry, int):
+                    raise RuleValidationError(
+                        f"weekday_set entries must be plain integers, got "
+                        f"{entry!r}"
+                    )
             weekday_set = set(weekday_set)
         return cls(
             rule_type=data["rule_type"],
@@ -368,29 +390,3 @@ class ScheduleRule:
             start_date=data.get("start_date", "1970-01-01"),
             end_date=data.get("end_date"),
         )
-
-    def __eq__(self, other) -> bool:
-        if not isinstance(other, ScheduleRule):
-            return NotImplemented
-        return all(
-            getattr(self, slot) == getattr(other, slot)
-            for slot in self.__slots__
-        )
-
-    def __hash__(self) -> int:
-        return hash(
-            tuple(
-                (
-                    frozenset(getattr(self, slot))
-                    if isinstance(getattr(self, slot), frozenset)
-                    else getattr(self, slot)
-                )
-                for slot in self.__slots__
-            )
-        )
-
-    def __repr__(self) -> str:
-        fields = ", ".join(
-            f"{slot}={getattr(self, slot)!r}" for slot in self.__slots__
-        )
-        return f"ScheduleRule({fields})"

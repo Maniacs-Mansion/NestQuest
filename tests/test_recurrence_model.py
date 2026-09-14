@@ -33,29 +33,29 @@ def test_daily_rule_constructs_with_defaults() -> None:
 
 
 def test_string_rule_type_coerces() -> None:
-    rule = _rule(rule_type="weekly", weekday_set={0, 2}, start_date="2026-09-01")
+    rule = _rule(rule_type=RuleType.WEEKLY, weekday_set={0, 2}, start_date="2026-09-01")
     assert rule.rule_type is RuleType.WEEKLY
 
 
 def test_weekly_rule_requires_and_freezes_weekday_set() -> None:
-    rule = _rule(rule_type="weekly", weekday_set={0, 2, 4}, start_date="2026-09-01")
+    rule = _rule(rule_type=RuleType.WEEKLY, weekday_set={0, 2, 4}, start_date="2026-09-01")
     assert rule.weekday_set == frozenset({0, 2, 4})
     # A mutable set passed in is frozen on construction.
     source = {1, 3}
-    rule2 = _rule(rule_type="weekly", weekday_set=source, start_date="2026-09-01")
+    rule2 = _rule(rule_type=RuleType.WEEKLY, weekday_set=source, start_date="2026-09-01")
     source.add(5)
     assert rule2.weekday_set == frozenset({1, 3})
 
 
 def test_monthly_day_rule_fields() -> None:
-    rule = _rule(rule_type="monthly_day", day_of_month=15, start_date="2026-09-01")
+    rule = _rule(rule_type=RuleType.MONTHLY_DAY, day_of_month=15, start_date="2026-09-01")
     assert rule.day_of_month == 15
     assert rule.nth_weekday is None
 
 
 def test_monthly_weekday_rule_fields() -> None:
     rule = _rule(
-        rule_type="monthly_weekday",
+        rule_type=RuleType.MONTHLY_WEEKDAY,
         nth_weekday=2,
         nth_weekday_weekday=1,
         start_date="2026-09-01",
@@ -66,7 +66,7 @@ def test_monthly_weekday_rule_fields() -> None:
 
 def test_monthly_weekday_last_friday_allowed() -> None:
     rule = _rule(
-        rule_type="monthly_weekday",
+        rule_type=RuleType.MONTHLY_WEEKDAY,
         nth_weekday=-1,
         nth_weekday_weekday=4,
         start_date="2026-09-01",
@@ -75,13 +75,13 @@ def test_monthly_weekday_last_friday_allowed() -> None:
 
 
 def test_yearly_rule_fields() -> None:
-    rule = _rule(rule_type="yearly", month=6, start_date="2026-09-01")
+    rule = _rule(rule_type=RuleType.YEARLY, month=6, start_date="2026-09-01")
     assert rule.month == 6
 
 
 def test_custom_days_rule_fields() -> None:
     rule = _rule(
-        rule_type="custom_days",
+        rule_type=RuleType.CUSTOM_DAYS,
         weekday_set={1, 3, 5},
         interval=2,
         start_date="2026-09-01",
@@ -92,7 +92,7 @@ def test_custom_days_rule_fields() -> None:
 
 def test_end_date_round_trips(tmp_path) -> None:
     rule = _rule(
-        rule_type="daily",
+        rule_type=RuleType.DAILY,
         start_date="2026-09-01",
         end_date="2026-12-31",
     )
@@ -108,7 +108,7 @@ def test_end_date_round_trips(tmp_path) -> None:
     "kwargs",
     [
         # weekly without weekday_set
-        {"rule_type": "weekly", "start_date": "2026-09-01"},
+        {"rule_type": RuleType.WEEKLY.value, "start_date": "2026-09-01"},
         # daily carrying a weekday_set
         {"rule_type": "daily", "weekday_set": {0}, "start_date": "2026-09-01"},
         # monthly_day without day_of_month
@@ -135,9 +135,9 @@ def test_end_date_round_trips(tmp_path) -> None:
         {"rule_type": "daily", "start_date": "not-a-date"},
         {"rule_type": "daily", "start_date": "2026-9-1"},
         # weekly weekday out of range
-        {"rule_type": "weekly", "weekday_set": {7}, "start_date": "2026-09-01"},
+        {"rule_type": RuleType.WEEKLY.value, "weekday_set": {7}, "start_date": "2026-09-01"},
         # weekly empty set
-        {"rule_type": "weekly", "weekday_set": set(), "start_date": "2026-09-01"},
+        {"rule_type": RuleType.WEEKLY.value, "weekday_set": set(), "start_date": "2026-09-01"},
         # custom_days carrying month-specific fields
         {"rule_type": "custom_days", "weekday_set": {0}, "day_of_month": 5,
          "start_date": "2026-09-01"},
@@ -170,7 +170,7 @@ def test_invalid_combinations_raise(kwargs) -> None:
 
 
 def test_rule_is_immutable() -> None:
-    rule = _rule(rule_type="daily", start_date="2026-09-01")
+    rule = _rule(rule_type=RuleType.DAILY, start_date="2026-09-01")
     with pytest.raises(AttributeError):
         rule.interval = 2
     with pytest.raises(AttributeError):
@@ -185,26 +185,26 @@ def test_rule_is_immutable() -> None:
 @pytest.mark.parametrize(
     "rule",
     [
-        ScheduleRule(rule_type="daily", start_date="2026-09-01"),
-        ScheduleRule(rule_type="daily", interval=3, start_date="2026-09-01",
+        ScheduleRule(rule_type=RuleType.DAILY, start_date="2026-09-01"),
+        ScheduleRule(rule_type=RuleType.DAILY, interval=3, start_date="2026-09-01",
                      end_date="2026-12-31"),
-        ScheduleRule(rule_type="weekly", weekday_set={0, 2, 4},
+        ScheduleRule(rule_type=RuleType.WEEKLY, weekday_set={0, 2, 4},
                      start_date="2026-09-01"),
-        ScheduleRule(rule_type="weekly", weekday_set={6}, interval=2,
+        ScheduleRule(rule_type=RuleType.WEEKLY, weekday_set={6}, interval=2,
                      start_date="2026-09-01"),
-        ScheduleRule(rule_type="monthly_day", day_of_month=15,
+        ScheduleRule(rule_type=RuleType.MONTHLY_DAY, day_of_month=15,
                      start_date="2026-09-01"),
-        ScheduleRule(rule_type="monthly_day", day_of_month=31, interval=3,
+        ScheduleRule(rule_type=RuleType.MONTHLY_DAY, day_of_month=31, interval=3,
                      start_date="2026-09-01"),
-        ScheduleRule(rule_type="monthly_weekday", nth_weekday=2,
+        ScheduleRule(rule_type=RuleType.MONTHLY_WEEKDAY, nth_weekday=2,
                      nth_weekday_weekday=1, start_date="2026-09-01"),
-        ScheduleRule(rule_type="monthly_weekday", nth_weekday=-1,
+        ScheduleRule(rule_type=RuleType.MONTHLY_WEEKDAY, nth_weekday=-1,
                      nth_weekday_weekday=4, interval=2,
                      start_date="2026-09-01"),
-        ScheduleRule(rule_type="yearly", month=6, start_date="2026-09-01"),
-        ScheduleRule(rule_type="yearly", month=2, day_of_month=None,
+        ScheduleRule(rule_type=RuleType.YEARLY, month=6, start_date="2026-09-01"),
+        ScheduleRule(rule_type=RuleType.YEARLY, month=2, day_of_month=None,
                      interval=2, start_date="2026-09-01"),
-        ScheduleRule(rule_type="custom_days", weekday_set={1, 3, 5},
+        ScheduleRule(rule_type=RuleType.CUSTOM_DAYS, weekday_set={1, 3, 5},
                      interval=2, start_date="2026-09-01"),
     ],
 )
@@ -237,7 +237,7 @@ def test_from_dict_defaults_start_date_when_absent() -> None:
 
 def test_from_dict_accepts_list_weekday_set() -> None:
     rule = ScheduleRule.from_dict(
-        {"rule_type": "weekly", "weekday_set": [0, 2, 4]}
+        {"rule_type": RuleType.WEEKLY.value, "weekday_set": [0, 2, 4]}
     )
     assert rule.weekday_set == frozenset({0, 2, 4})
 
@@ -248,20 +248,20 @@ def test_from_dict_accepts_list_weekday_set() -> None:
 
 
 def test_equal_rules_compare_equal_and_hash_equal() -> None:
-    a = _rule(rule_type="weekly", weekday_set={0, 2}, start_date="2026-09-01")
-    b = _rule(rule_type="weekly", weekday_set={2, 0}, start_date="2026-09-01")
+    a = _rule(rule_type=RuleType.WEEKLY, weekday_set={0, 2}, start_date="2026-09-01")
+    b = _rule(rule_type=RuleType.WEEKLY, weekday_set={2, 0}, start_date="2026-09-01")
     assert a == b
     assert hash(a) == hash(b)
 
 
 def test_different_rules_compare_unequal() -> None:
-    a = _rule(rule_type="daily", start_date="2026-09-01")
-    b = _rule(rule_type="daily", interval=2, start_date="2026-09-01")
+    a = _rule(rule_type=RuleType.DAILY, start_date="2026-09-01")
+    b = _rule(rule_type=RuleType.DAILY, interval=2, start_date="2026-09-01")
     assert a != b
 
 
 def test_rule_not_equal_to_other_types() -> None:
-    rule = _rule(rule_type="daily", start_date="2026-09-01")
+    rule = _rule(rule_type=RuleType.DAILY, start_date="2026-09-01")
     assert rule != "daily"
     assert (rule == 42) is False
 
@@ -272,29 +272,140 @@ def test_rule_not_equal_to_other_types() -> None:
 
 
 def test_recurrence_module_imports_only_stdlib() -> None:
-    """The model must carry no Home Assistant and no DB imports."""
+    """The model must carry no Home Assistant and no DB imports — checked
+    against the RESOLVED module path so relative forms (from .db import
+    x) are caught too."""
     import ast
+    import importlib.util
     from pathlib import Path
 
-    source = (
-        Path(ScheduleRule.__module__.replace(".", "/")).parent
-        / "recurrence.py"
-    ) if False else (
-        Path(__import__("custom_components.nestquest.recurrence",
-                        fromlist=["__file__"]).__file__)
+    module_file = Path(
+        importlib.util.find_spec(
+            "custom_components.nestquest.recurrence"
+        ).origin
     )
-    tree = ast.parse(source.read_text())
-    forbidden = ("homeassistant", "sqlite3", ".db", "dao_")
+    tree = ast.parse(module_file.read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                for fragment in forbidden:
-                    assert not alias.name.startswith(fragment), (
-                        f"recurrence.py must not import {alias.name}"
-                    )
-        elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            for fragment in forbidden:
-                assert not module.startswith(fragment), (
-                    f"recurrence.py must not import from {module}"
+                assert "homeassistant" not in alias.name.lower(), (
+                    f"recurrence.py must not import {alias.name}"
                 )
+                assert "sqlite" not in alias.name.lower(), (
+                    f"recurrence.py must not import {alias.name}"
+                )
+        elif isinstance(node, ast.ImportFrom):
+            module = (node.module or "").lower()
+            level = node.level  # 1+ means relative import
+            # Relative imports into the integration package (db/dao
+            # clients) are forbidden; schema.py is also off-limits.
+            if level:
+                assert "db" not in module.split(".") and module not in {
+                    "db",
+                    "schema",
+                    "dao_children",
+                    "dao_rules",
+                    "dao_presence",
+                    "dao_instances",
+                    "migrations",
+                    "store",
+                }, f"recurrence.py must not import from .{module}"
+            assert "homeassistant" not in module, (
+                f"recurrence.py must not import from {module}"
+            )
+            assert "sqlite" not in module, (
+                f"recurrence.py must not import from {module}"
+            )
+
+
+def test_non_string_rule_type_rejected() -> None:
+    """Only RuleType members and their string values construct."""
+    for bad in (123, True, None, 3.5, b"daily"):
+        with pytest.raises(RuleValidationError):
+            ScheduleRule(rule_type=bad, start_date="2026-09-01")
+
+
+def test_weekly_rejects_month_and_nth_fields() -> None:
+    with pytest.raises(RuleValidationError, match="must not set"):
+        ScheduleRule(
+            rule_type="weekly",
+            weekday_set={0},
+            day_of_month=5,
+            start_date="2026-09-01",
+        )
+    with pytest.raises(RuleValidationError, match="must not set"):
+        ScheduleRule(
+            rule_type=RuleType.WEEKLY,
+            weekday_set={0},
+            month=3,
+            start_date="2026-09-01",
+        )
+
+
+def test_daily_rejects_dangling_nth_weekday_weekday() -> None:
+    with pytest.raises(RuleValidationError, match="must not set"):
+        ScheduleRule(
+            rule_type=RuleType.DAILY,
+            nth_weekday_weekday=0,
+            start_date="2026-09-01",
+        )
+
+
+def test_monthly_day_rejects_month() -> None:
+    with pytest.raises(RuleValidationError, match="must not set"):
+        ScheduleRule(
+            rule_type=RuleType.MONTHLY_DAY,
+            day_of_month=5,
+            month=3,
+            start_date="2026-09-01",
+        )
+
+
+def test_yearly_rejects_day_and_nth_fields() -> None:
+    with pytest.raises(RuleValidationError, match="must not set"):
+        ScheduleRule(
+            rule_type=RuleType.YEARLY,
+            month=6,
+            day_of_month=15,
+            start_date="2026-09-01",
+        )
+    with pytest.raises(RuleValidationError, match="must not set"):
+        ScheduleRule(
+            rule_type=RuleType.YEARLY,
+            month=6,
+            nth_weekday=1,
+            nth_weekday_weekday=0,
+            start_date="2026-09-01",
+        )
+
+
+def test_storage_value_mapping() -> None:
+    """The enum exposes the schema's CHECK values via storage_value."""
+    assert RuleType.DAILY.storage_value == "daily"
+    assert RuleType.WEEKLY.storage_value == "weekly"
+    assert RuleType.MONTHLY_DAY.storage_value == "monthly"
+    assert RuleType.MONTHLY_WEEKDAY.storage_value == "monthly"
+    assert RuleType.YEARLY.storage_value == "yearly"
+    assert RuleType.CUSTOM_DAYS.storage_value == "custom"
+
+
+def test_from_dict_bool_weekday_entry_rejected_before_set_coercion() -> None:
+    """[0, False] must NOT collapse False into 0 via set() coercion."""
+    with pytest.raises(RuleValidationError, match="plain integers"):
+        ScheduleRule.from_dict(
+            {"rule_type": "weekly", "weekday_set": [0, False]}
+        )
+
+
+def test_from_dict_unknown_key_types_never_leak_typeerror() -> None:
+    """Mixed unhashable unknown keys must surface as
+    RuleValidationError, not a raw TypeError from sorting."""
+    data = {"rule_type": "daily", 42: "value"}
+    with pytest.raises(RuleValidationError):
+        ScheduleRule.from_dict(data)
+
+
+def test_rule_type_is_a_dataclass() -> None:
+    import dataclasses
+
+    assert dataclasses.is_dataclass(ScheduleRule)
