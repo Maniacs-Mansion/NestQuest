@@ -198,16 +198,19 @@ def test_daily_exact_three_year_list() -> None:
     rule = ScheduleRule(rule_type=RuleType.DAILY,
                         start_date="2026-01-01")
     result = occurrences_between(rule, WINDOW_START, WINDOW_END)
+    # Independent oracle: plain datetime iteration over the whole window.
+    expected = []
+    cursor = _d("2026-01-01")
+    end = _d(WINDOW_END)
+    while cursor <= end:
+        expected.append(cursor.isoformat())
+        cursor += datetime.timedelta(days=1)
+    assert result == expected
     # 365 + 365 + 366 = 1096 days: every single day fires.
     assert len(result) == 1096
     assert result[0] == "2026-01-01"
     assert result[-1] == "2028-12-31"
-    # Spot-check the two Jan 1 boundaries and the leap day.
-    assert "2026-01-01" in result
-    assert "2027-01-01" in result
-    assert "2028-01-01" in result
     assert "2028-02-29" in result
-    # No duplicates.
     assert len(result) == len(set(result))
 
 
@@ -283,14 +286,19 @@ def test_monthly_31st_exact_three_year_list() -> None:
         start_date="2026-01-31",
     )
     result = occurrences_between(rule, WINDOW_START, WINDOW_END)
-    # 36 months, one clamped firing each.
+    # Independent oracle: for each month, min(31, month_end).
+    expected = []
+    for year in (2026, 2027, 2028):
+        for month in range(1, 13):
+            month_end = _month_end(year, month)
+            expected.append(
+                f"{year:04d}-{month:02d}-{min(31, month_end):02d}"
+            )
+    assert result == expected
     assert len(result) == 36
-    assert result[0] == "2026-01-31"
-    # February clamps: 2026-02-28, 2027-02-28, 2028-02-29 (leap).
     assert "2026-02-28" in result
     assert "2027-02-28" in result
     assert "2028-02-29" in result
-    # April always clamps to 30.
     assert "2026-04-30" in result
     assert "2028-04-30" in result
 
@@ -407,6 +415,10 @@ def test_recurrence_engine_imports_nothing_forbidden() -> None:
             module = (node.module or "").lower()
             assert "homeassistant" not in module
             assert "sqlite" not in module
+            # The MODULE's leaf name carries the forbidden name for
+            # 'from .store import Store' style imports.
+            module_leaf = module.split(".")[-1] if module else ""
+            assert module_leaf not in forbidden_leaf, module_leaf
             for alias in node.names:
                 leaf = alias.name.split(".")[-1].lower()
                 assert leaf not in forbidden_leaf
