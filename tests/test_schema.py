@@ -10,11 +10,13 @@ from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.schema import (
     SCHEMA_V1_ADMIN_USERS_DDL,
     SCHEMA_V1_CHILDREN_DDL,
+    SCHEMA_V1_COMPLETION_EVENTS_DDL,
     SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
     SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
     SCHEMA_V1_SCHEDULE_RULES_DDL,
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V1_TASK_DEFINITIONS_DDL,
+    SCHEMA_V1_TASK_INSTANCES_DDL,
     async_apply_ddl,
 )
 
@@ -162,6 +164,8 @@ def test_schema_v1_statements_compose_the_six_tables() -> None:
         *SCHEMA_V1_TASK_DEFINITIONS_DDL,
         *SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
         *SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
+        *SCHEMA_V1_TASK_INSTANCES_DDL,
+        *SCHEMA_V1_COMPLETION_EVENTS_DDL,
     ]
 
 
@@ -1397,5 +1401,637 @@ def test_applying_presence_ddl_twice_keeps_rows(tmp_path) -> None:
             row = _run(database.fetch_one(f"SELECT COUNT(*) FROM {table}"))
             counts.append(row[0])
         assert counts == [1, 1]
+    finally:
+        _run(database.close())
+
+
+# ---------------------------------------------------------------------------
+# task_instances and completion_events: helpers
+# ---------------------------------------------------------------------------
+
+
+def _insert_instance(database, definition_id=1, **overrides):
+    """Insert one valid task_instance, returning the instance id.
+
+    Pass ``_OMIT`` as a value to leave that column out of the INSERT so
+    its DDL DEFAULT applies.
+    """
+    values: dict[str, object] = {
+        "definition_id": definition_id,
+        "child_id": 1,
+        "due_date": "2026-09-14",
+        "generated_at": "2026-09-14T00:00:00+00:00",
+    }
+    values.update(overrides)
+    values = {k: v for k, v in values.items() if v is not _OMIT}
+    columns = ", ".join(values)
+    placeholders = ", ".join("?" for _ in values)
+    result = _run(
+        database.execute(
+            f"INSERT INTO task_instances ({columns}) VALUES ({placeholders})",
+            tuple(values.values()),
+        )
+    )
+    assert result.lastrowid is not None
+    return result.lastrowid
+
+
+def _insert_event(database, instance_id=1, **overrides):
+    """Insert one valid completion_event, returning the event id.
+
+    Pass ``_OMIT`` as a value to leave that column out of the INSERT so
+    its DDL DEFAULT applies.
+    """
+    values: dict[str, object] = {
+        "instance_id": instance_id,
+        "child_id": 1,
+        "event_type": "completed",
+        "actor_source": "user",
+        "actor_user_id": "user-1",
+        "occurred_at": "2026-09-14T08:30:00+00:00",
+        "was_on_time": 1,
+    }
+    values.update(overrides)
+    values = {k: v for k, v in values.items() if v is not _OMIT}
+    columns = ", ".join(values)
+    placeholders = ", ".join("?" for _ in values)
+    result = _run(
+        database.execute(
+            f"INSERT INTO completion_events ({columns}) VALUES ({placeholders})",
+            tuple(values.values()),
+        )
+    )
+    assert result.lastrowid is not None
+    return result.lastrowid
+
+
+def _setup_definition(database) -> None:
+    """Create one child, one schedule rule and one task definition."""
+    _child(database)
+    _insert_rule(database)
+    _insert_definition(database, child_id=1, rule_id=1)
+
+
+# ---------------------------------------------------------------------------
+# task_instances and completion_events: DDL shape
+# ---------------------------------------------------------------------------
+
+
+def test_task_instances_table_exists_after_applying_ddl(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances.db")
+    try:
+        _apply(database)
+        row = _run(
+            database.fetch_one(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'task_instances'"
+            )
+        )
+        assert row is not None and row[0] == "task_instances"
+    finally:
+        _run(database.close())
+
+
+def test_completion_events_table_exists_after_applying_ddl(tmp_path) -> None:
+    database = _open_db(tmp_path / "completion-events.db")
+    try:
+        _apply(database)
+        row = _run(
+            database.fetch_one(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'completion_events'"
+            )
+        )
+        assert row is not None and row[0] == "completion_events"
+    finally:
+        _run(database.close())
+
+
+def test_task_instances_columns_types_and_constraints(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances-columns.db")
+    try:
+        _apply(database)
+        columns = _run(database.fetch_all("PRAGMA table_info(task_instances)"))
+        # cid, name, type, notnull, dflt_value, pk
+        assert [(row[1], row[2], row[3], row[4], row[5]) for row in columns] == [
+            ("id", "INTEGER", 0, None, 1),
+            ("definition_id", "INTEGER", 1, None, 0),
+            ("child_id", "INTEGER", 1, None, 0),
+            ("due_date", "TEXT", 1, None, 0),
+            ("due_time", "TEXT", 0, None, 0),
+            ("generated_at", "TEXT", 1, None, 0),
+        ]
+    finally:
+        _run(database.close())
+
+
+def test_completion_events_columns_types_and_constraints(tmp_path) -> None:
+    database = _open_db(tmp_path / "completion-events-columns.db")
+    try:
+        _apply(database)
+        columns = _run(database.fetch_all("PRAGMA table_info(completion_events)"))
+        assert [(row[1], row[2], row[3], row[4], row[5]) for row in columns] == [
+            ("id", "INTEGER", 0, None, 1),
+            ("instance_id", "INTEGER", 1, None, 0),
+            ("child_id", "INTEGER", 1, None, 0),
+            ("event_type", "TEXT", 1, None, 0),
+            ("actor_source", "TEXT", 1, None, 0),
+            ("actor_user_id", "TEXT", 0, None, 0),
+            ("occurred_at", "TEXT", 1, None, 0),
+            ("was_on_time", "INTEGER", 0, None, 0),
+        ]
+    finally:
+        _run(database.close())
+
+
+def test_task_instances_foreign_keys_declared(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances-fks.db")
+    try:
+        _apply(database)
+        fks = _run(database.fetch_all("PRAGMA foreign_key_list(task_instances)"))
+        declared = {(row[2], row[3], row[4]) for row in fks}
+        assert declared == {
+            ("task_definitions", "definition_id", "id"),
+            ("children", "child_id", "id"),
+        }
+    finally:
+        _run(database.close())
+
+
+def test_completion_events_foreign_keys_declared(tmp_path) -> None:
+    database = _open_db(tmp_path / "completion-events-fks.db")
+    try:
+        _apply(database)
+        fks = _run(database.fetch_all("PRAGMA foreign_key_list(completion_events)"))
+        declared = {(row[2], row[3], row[4]) for row in fks}
+        assert declared == {
+            ("task_instances", "instance_id", "id"),
+            ("children", "child_id", "id"),
+        }
+    finally:
+        _run(database.close())
+
+
+def test_task_instances_unique_index_on_definition_and_date(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances-unique.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        rows = _run(
+            database.fetch_all(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'index' "
+                "AND tbl_name = 'task_instances'"
+            )
+        )
+        implicit = [(name, sql) for name, sql in rows if sql is None]
+        assert len(implicit) == 1, (
+            "the (definition_id, due_date) UNIQUE constraint must be backed "
+            "by exactly one implicit unique index"
+        )
+        columns = _run(
+            database.fetch_all(
+                f"PRAGMA index_info('{implicit[0][0]}')"
+            )
+        )
+        assert [row[2] for row in columns] == ["definition_id", "due_date"]
+        # The implicit index is genuinely unique: UNIQUE(...) is the only
+        # constraint SQLite backs with a sql-less autoindex on this table.
+        row = _run(
+            database.fetch_one(
+                "SELECT COUNT(DISTINCT name) FROM pragma_index_list"
+                "('task_instances') WHERE \"unique\" = 1"
+            )
+        )
+        assert row == (1,)
+    finally:
+        _run(database.close())
+
+
+# ---------------------------------------------------------------------------
+# task_instances: constraint enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_task_instances_valid_insert_round_trips(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances-valid.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1, child_id=1)
+        row = _run(
+            database.fetch_one(
+                "SELECT definition_id, child_id, due_date, due_time, generated_at "
+                "FROM task_instances WHERE id = ?",
+                (instance_id,),
+            )
+        )
+        assert row == (1, 1, "2026-09-14", None, "2026-09-14T00:00:00+00:00")
+    finally:
+        _run(database.close())
+
+
+def test_task_instances_due_time_round_trips(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances-due-time.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(
+            database, definition_id=1, due_time="17:30"
+        )
+        row = _run(
+            database.fetch_one(
+                "SELECT due_time FROM task_instances WHERE id = ?",
+                (instance_id,),
+            )
+        )
+        assert row == ("17:30",)
+    finally:
+        _run(database.close())
+
+
+def test_task_instances_duplicate_definition_date_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances-duplicate.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        _insert_instance(database, definition_id=1, due_date="2026-09-14")
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+            _insert_instance(database, definition_id=1, due_date="2026-09-14")
+    finally:
+        _run(database.close())
+
+
+def test_task_instances_same_date_different_definitions_allowed(
+    tmp_path,
+) -> None:
+    database = _open_db(tmp_path / "task-instances-multi-def.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        _run(
+            database.execute(
+                "INSERT INTO children (display_name, created_at) VALUES (?, ?)",
+                ("Bo", "2026-09-13T00:00:00+00:00"),
+            )
+        )
+        rule_id = _insert_rule(database)
+        _insert_definition(database, child_id=2, rule_id=rule_id)
+        _insert_instance(database, definition_id=1, due_date="2026-09-14")
+        _insert_instance(database, definition_id=2, due_date="2026-09-14")
+        row = _run(database.fetch_one("SELECT COUNT(*) FROM task_instances"))
+        assert row == (2,)
+    finally:
+        _run(database.close())
+
+
+def test_task_instances_same_definition_different_dates_allowed(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances-multi-date.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        _insert_instance(database, definition_id=1, due_date="2026-09-14")
+        _insert_instance(database, definition_id=1, due_date="2026-09-15")
+        row = _run(database.fetch_one("SELECT COUNT(*) FROM task_instances"))
+        assert row == (2,)
+    finally:
+        _run(database.close())
+
+
+def test_task_instances_unknown_definition_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances-bad-def.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            _insert_instance(database, definition_id=999)
+    finally:
+        _run(database.close())
+
+
+def test_task_instances_unknown_child_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances-bad-child.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            _insert_instance(database, definition_id=1, child_id=999)
+    finally:
+        _run(database.close())
+
+
+def test_task_instances_due_date_not_null_enforced(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances-due-null.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+            _insert_instance(database, definition_id=1, due_date=None)
+    finally:
+        _run(database.close())
+
+
+def test_task_instances_generated_at_not_null_enforced(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances-generated-null.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+            _insert_instance(database, definition_id=1, generated_at=None)
+    finally:
+        _run(database.close())
+
+
+# ---------------------------------------------------------------------------
+# completion_events: constraint enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_completion_events_valid_user_completion_round_trips(tmp_path) -> None:
+    database = _open_db(tmp_path / "completion-events-valid.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        event_id = _insert_event(
+            database, instance_id=instance_id, child_id=1
+        )
+        row = _run(
+            database.fetch_one(
+                "SELECT instance_id, child_id, event_type, actor_source, "
+                "actor_user_id, occurred_at, was_on_time "
+                "FROM completion_events WHERE id = ?",
+                (event_id,),
+            )
+        )
+        assert row == (
+            instance_id,
+            1,
+            "completed",
+            "user",
+            "user-1",
+            "2026-09-14T08:30:00+00:00",
+            1,
+        )
+    finally:
+        _run(database.close())
+
+
+def test_completion_events_valid_panel_completion_round_trips(tmp_path) -> None:
+    database = _open_db(tmp_path / "completion-events-panel.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        event_id = _insert_event(
+            database,
+            instance_id=instance_id,
+            actor_source="panel",
+            actor_user_id=None,
+            was_on_time=0,
+        )
+        row = _run(
+            database.fetch_one(
+                "SELECT actor_source, actor_user_id, was_on_time "
+                "FROM completion_events WHERE id = ?",
+                (event_id,),
+            )
+        )
+        assert row == ("panel", None, 0)
+    finally:
+        _run(database.close())
+
+
+def test_completion_events_valid_uncompleted_round_trips(tmp_path) -> None:
+    database = _open_db(tmp_path / "completion-events-uncompleted.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        event_id = _insert_event(
+            database,
+            instance_id=instance_id,
+            event_type="uncompleted",
+            actor_source="user",
+            was_on_time=_OMIT,
+        )
+        row = _run(
+            database.fetch_one(
+                "SELECT event_type, actor_source, was_on_time "
+                "FROM completion_events WHERE id = ?",
+                (event_id,),
+            )
+        )
+        assert row == ("uncompleted", "user", None)
+    finally:
+        _run(database.close())
+
+
+def test_completion_events_uncompleted_with_on_time_flag_allowed(
+    tmp_path,
+) -> None:
+    database = _open_db(tmp_path / "completion-events-uncompleted-ontime.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        event_id = _insert_event(
+            database,
+            instance_id=instance_id,
+            event_type="uncompleted",
+            was_on_time=1,
+        )
+        row = _run(
+            database.fetch_one(
+                "SELECT was_on_time FROM completion_events WHERE id = ?",
+                (event_id,),
+            )
+        )
+        assert row == (1,)
+    finally:
+        _run(database.close())
+
+
+def test_completion_events_unknown_instance_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "completion-events-bad-instance.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            _insert_event(database, instance_id=999)
+    finally:
+        _run(database.close())
+
+
+def test_completion_events_unknown_child_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "completion-events-bad-child.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            _insert_event(database, instance_id=instance_id, child_id=999)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize("bad_event_type", ["missed", "COMPLETE", ""])
+def test_completion_events_event_type_check_enforced(
+    tmp_path, bad_event_type
+) -> None:
+    database = _open_db(tmp_path / f"completion-events-type-{hash(bad_event_type)}.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_event(
+                database, instance_id=instance_id, event_type=bad_event_type
+            )
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize("bad_source", ["kiosk", "system", "USER", ""])
+def test_completion_events_actor_source_check_enforced(
+    tmp_path, bad_source
+) -> None:
+    database = _open_db(tmp_path / f"completion-events-source-{hash(bad_source)}.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_event(
+                database, instance_id=instance_id, actor_source=bad_source
+            )
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize(
+    ("actor_source", "actor_user_id"),
+    [
+        ("user", None),  # user without id
+        ("panel", "user-1"),  # panel with id
+    ],
+)
+def test_completion_events_actor_pair_coherence_enforced(
+    tmp_path, actor_source, actor_user_id
+) -> None:
+    database = _open_db(tmp_path / f"completion-events-actor-{actor_source}.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_event(
+                database,
+                instance_id=instance_id,
+                actor_source=actor_source,
+                actor_user_id=actor_user_id,
+            )
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize("bad_was_on_time", ["abc", 1.5, 2])
+def test_completion_events_was_on_time_non_integer_or_out_of_range_fails(
+    tmp_path, bad_was_on_time
+) -> None:
+    database = _open_db(tmp_path / f"completion-events-ontime-{type(bad_was_on_time).__name__}.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_event(
+                database, instance_id=instance_id, was_on_time=bad_was_on_time
+            )
+    finally:
+        _run(database.close())
+
+
+def test_completion_events_completed_requires_was_on_time(tmp_path) -> None:
+    database = _open_db(tmp_path / "completion-events-completed-ontime-null.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_event(
+                database,
+                instance_id=instance_id,
+                event_type="completed",
+                was_on_time=_OMIT,
+            )
+    finally:
+        _run(database.close())
+
+
+def test_completion_events_occurred_at_not_null_enforced(tmp_path) -> None:
+    database = _open_db(tmp_path / "completion-events-occurred-null.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+            _insert_event(
+                database, instance_id=instance_id, occurred_at=None
+            )
+    finally:
+        _run(database.close())
+
+
+def test_completion_events_multiple_events_per_instance_allowed(
+    tmp_path,
+) -> None:
+    database = _open_db(tmp_path / "completion-events-multi.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        _insert_event(
+            database, instance_id=instance_id, event_type="completed",
+            occurred_at="2026-09-14T08:30:00+00:00",
+        )
+        _insert_event(
+            database, instance_id=instance_id, event_type="uncompleted",
+            actor_source="user", was_on_time=1,
+            occurred_at="2026-09-14T09:00:00+00:00",
+        )
+        _insert_event(
+            database, instance_id=instance_id, event_type="completed",
+            occurred_at="2026-09-14T09:15:00+00:00",
+        )
+        row = _run(database.fetch_one("SELECT COUNT(*) FROM completion_events"))
+        assert row == (3,)
+    finally:
+        _run(database.close())
+
+
+# ---------------------------------------------------------------------------
+# Idempotence across the full eight-table v1 list
+# ---------------------------------------------------------------------------
+
+
+def test_applying_full_ddl_twice_keeps_rows(tmp_path) -> None:
+    database = _open_db(tmp_path / "idempotent-full.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        _insert_event(database, instance_id=instance_id)
+        _apply(database)
+        counts = []
+        for table in (
+            "children",
+            "schedule_rules",
+            "task_definitions",
+            "task_instances",
+            "completion_events",
+        ):
+            row = _run(database.fetch_one(f"SELECT COUNT(*) FROM {table}"))
+            counts.append(row[0])
+        assert counts == [1, 1, 1, 1, 1]
     finally:
         _run(database.close())
