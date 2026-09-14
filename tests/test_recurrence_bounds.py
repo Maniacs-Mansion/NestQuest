@@ -258,10 +258,12 @@ def test_end_date_equal_to_start_date_allows_one_day_window() -> None:
     assert occurs_on(daily, _d("2026-03-16")) is False
 
     weekly = ScheduleRule(
-        rule_type=RuleType.WEEKLY, weekday_set={1},  # 2026-03-15 is a Sun
-        start_date="2026-03-09", end_date="2026-03-15",
+        rule_type=RuleType.WEEKLY, weekday_set={1},  # 2026-03-10 is a Tue
+        start_date="2026-03-10", end_date="2026-03-10",
     )
-    # The window is one week; Tue Mar 10 fires inside it.
+    # The window is a SINGLE day (end == start, a Tuesday in-set):
+    # it fires, and the following Tuesday is out of window.
+    assert _d("2026-03-10").weekday() == 1
     assert occurs_on(weekly, _d("2026-03-10")) is True
     assert occurs_on(weekly, _d("2026-03-17")) is False
 
