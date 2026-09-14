@@ -789,15 +789,15 @@ def test_rules_and_definitions_sql_lives_only_in_dao_module() -> None:
 
     allowed = {
         "custom_components/nestquest/dao_rules.py",  # this DAO
+        "custom_components/nestquest/dao_instances.py",  # validates the
+        # definition exists + fetches its assignee before generating an
+        # instance (the instance must snapshot the definition's child)
         "custom_components/nestquest/schema.py",  # declares the DDL
         "custom_components/nestquest/migrations.py",  # applies the DDL
         "tests/test_schema.py",  # tests the DDL
         "tests/test_migrations.py",  # tests migration application
         "tests/test_dao_rules.py",  # this file, scanned separately
-        # dao_children.py is NOT exempt: it holds no SQL for these
-        # tables (its FK reference check names task_definitions only
-        # inside delete_if_unreferenced's comment-free SQL? No — that
-        # lives HERE in dao_rules).  Any future leak there must fail.
+        "tests/test_dao_instances.py",  # instances guard, own scope
     }
     sql_pattern = re.compile(
         r"(FROM|INTO|UPDATE|DELETE\s+FROM|JOIN)\s+[`'\"]*(\[)?"
