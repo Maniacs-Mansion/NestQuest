@@ -57,25 +57,41 @@ def _is_corruption_error(error: BaseException) -> bool:
     return any(marker in message for marker in _CORRUPTION_MARKERS)
 
 
-def _preflight_existing_file(db_path: Path) -> None:
+async def _preflight_existing_file(
+    hass: HomeAssistant, db_path: Path
+) -> None:
     """Detect corruption in an EXISTING file before it is opened read-write.
 
-    Opening read-write persists WAL mode and can create -wal/-shm
-    sidecars, which would modify a corrupt file before detection —
-    breaking the leave-untouched guarantee.  This preflight reads the
-    file's header with a READ-ONLY connection (mode=ro URI): a corrupt
-    header raises there, before anything is written.  Missing files
-    skip the preflight (they are created fresh by the real open).
+    Opening read-write persists WAL mode — for a rollback-journal file
+    that rewrites the header byte 18/19 and can create -wal/-shm
+    sidecars — which would modify a corrupt file before detection and
+    break the leave-untouched guarantee.  This preflight therefore
+    validates the WHOLE file with a READ-ONLY connection (mode=ro URI,
+    PRAGMA integrity_check, run on the executor like every other DB
+    call): corruption anywhere fails there, before anything is
+    written.  Missing/empty files skip the preflight (they are created
+    fresh by the real open).
     """
     if not db_path.exists() or db_path.stat().st_size == 0:
         return
     uri = f"file:{db_path}?mode=ro"
-    try:
+
+    def _probe() -> None:
         conn = sqlite3.connect(uri, uri=True)
         try:
-            conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            row = conn.execute("PRAGMA integrity_check").fetchone()
         finally:
             conn.close()
+        verdict = row[0] if row else "missing"
+        if verdict != "ok":
+            raise sqlite3.DatabaseError(
+                f"integrity_check on read-only probe failed: {verdict}"
+            )
+
+    try:
+        # Every DB-touching call goes through the executor (the mock
+        # harness's async_add_executor_job is awaitable too).
+        await hass.async_add_executor_job(_probe)
     except sqlite3.DatabaseError as err:
         if _is_corruption_error(err):
             raise
@@ -111,7 +127,7 @@ async def _async_open_database(
     same way.
     """
     try:
-        _preflight_existing_file(db_path)
+        await _preflight_existing_file(hass, db_path)
         database = await NestQuestDatabase(hass).open(db_path)
     except asyncio.CancelledError:
         raise

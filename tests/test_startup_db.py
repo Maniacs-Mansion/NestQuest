@@ -185,14 +185,34 @@ def test_migration_stage_corruption_leaves_db_and_sidecars_untouched(
     The leave-untouched guarantee must still hold byte-for-byte for
     the main file AND no WAL/SHM sidecars may be left behind for the
     owner to clean up.
+
+    The fixture is deliberately a ROLLBACK-JOURNAL file (created with
+    plain sqlite3, default journal_mode=delete, NOT via the wrapper):
+    that is the case where the WAL transition actually rewrites the
+    header — a WAL-mode fixture would mask the write under test.
     """
     db_path = tmp_path / "nestquest.db"
-    _valid_database(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.execute(
+            "CREATE TABLE filler (id INTEGER PRIMARY KEY, "
+            "payload TEXT NOT NULL)"
+        )
+        conn.executemany(
+            "INSERT INTO filler (payload) VALUES (?)",
+            [(f"row-{index}" * 8,) for index in range(200)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
     data = bytearray(db_path.read_bytes())
+    assert conn.execute is not None
+    assert len(data) > 4200, "fixture must span more than one page"
     # Corrupt a page well past the 100-byte header (offset 4096, the
     # second page region): the header itself stays valid, so the
-    # read-write open succeeds and only migrations discover damage.
-    assert len(data) > 4200
+    # read-write open succeeds and only the integrity probe/migrations
+    # discover damage.
     for offset in range(4096, 4128):
         data[offset] = 0xFF
     db_path.write_bytes(bytes(data))
