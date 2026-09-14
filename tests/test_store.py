@@ -100,11 +100,22 @@ def test_executor_helper_creates_directory(tmp_path) -> None:
     assert nested.is_dir()
 
 
-def test_no_sqlite3_import_in_package() -> None:
+def test_no_sqlite3_import_outside_db_module() -> None:
+    """sqlite3 is banned package-wide except two justified modules.
+
+    db.py is the connection wrapper (all statement execution lives
+    there).  __init__.py imports sqlite3 ONLY for its exception types
+    to classify corruption on startup (done-condition: corrupt file ->
+    ConfigEntryNotReady); it never opens a connection or executes
+    SQL — that is asserted separately below.
+    """
     pkg_dir = Path(store.__file__).parent
     py_files = list(pkg_dir.glob("*.py"))
     assert py_files
+    allowed = {"db.py", "__init__.py"}
     for py_file in py_files:
+        if py_file.name in allowed:
+            continue
         tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -116,6 +127,36 @@ def test_no_sqlite3_import_in_package() -> None:
                 raise AssertionError(
                     f"Found sqlite3 import in {py_file.name}:{node.lineno}"
                 )
+
+
+def test_init_module_never_opens_or_executes_sqlite() -> None:
+    """The __init__.py sqlite3 usage is limited to (a) exception typing
+    for corruption classification and (b) the ONE read-only preflight
+    connection (mode=ro URI, SELECT-only) that detects corruption in an
+    existing file before the real read-write open.  No read-write
+    connect, no cursor writes, no non-SELECT statements may appear.
+    """
+    import re
+    from pathlib import Path
+
+    init_path = (
+        Path(store.__file__).parent / "__init__.py"
+    ).read_text(encoding="utf-8")
+    # The preflight connect must be the URI read-only form, and only
+    # SELECT statements and the integrity_check PRAGMA may run there.
+    assert "sqlite3.connect(uri, uri=True)" in init_path
+    assert "?mode=ro" in init_path
+    assert 'PRAGMA integrity_check' in init_path
+    forbidden = re.compile(
+        r"sqlite3\s*\.\s*connect(?!\(\s*uri\s*,)"
+        r"|\bconn(ection)?\s*\.\s*execute\s*\(\s*[\"'](?!SELECT\s|PRAGMA\s+integrity_check)"
+        r"|\bexecutemany\b|\bexecutescript\b",
+        re.IGNORECASE,
+    )
+    assert forbidden.search(init_path) is None, (
+        "__init__.py may use sqlite3 only for exception typing and the "
+        "read-only corruption preflight (SELECT + integrity_check)"
+    )
 
 
 def test_no_file_creation_calls_in_store() -> None:

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from conftest import make_config_entry, make_hass, wire_entry_to_registry
 
 from custom_components.nestquest import DOMAIN, async_setup_entry, async_unload_entry
@@ -197,3 +199,60 @@ async def test_setup_awaitable_listener_removal_supported() -> None:
     assert removed == [True]
     assert hass.data == {}
     assert entry.runtime_data is None
+
+
+async def test_setup_closes_database_when_listener_registration_fails() -> None:
+    """A listener-registration failure must not leak the opened database."""
+    from custom_components.nestquest.db import NestQuestDatabase
+
+    class _Boom(Exception):
+        pass
+
+    entry = make_config_entry(entry_id="listener-boom")
+    entry.add_update_listener = lambda listener: (_ for _ in ()).throw(_Boom())
+    hass, _registry = make_hass()
+    with pytest.raises(_Boom):
+        await async_setup_entry(hass, entry)
+    assert hass.data.get(DOMAIN, {}) == {}
+    assert not hasattr(entry, "runtime_data")
+
+
+async def test_unload_closes_database_even_when_listener_removal_raises() -> None:
+    """Unload removes the listener, closes the DB in a finally, then raises."""
+    from custom_components.nestquest.db import NestQuestDatabase
+
+    class _RemoveBoom(Exception):
+        pass
+
+    def _remover():
+        raise _RemoveBoom()
+
+    entry = make_config_entry(entry_id="remove-boom")
+    entry.add_update_listener = lambda listener: _remover
+    hass, _registry = make_hass()
+    await async_setup_entry(hass, entry)
+    database = entry.runtime_data.database
+    with pytest.raises(_RemoveBoom):
+        await async_unload_entry(hass, entry)
+    assert database.connected is False, "database leaked despite remover error"
+    assert entry.runtime_data is None
+    assert DOMAIN not in hass.data
+
+
+async def test_setup_applies_all_v1_tables(hass, make_entry) -> None:
+    """Setup applies the full v1 DDL: all four v1 tables exist afterwards."""
+    entry = _wire(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    database = entry.runtime_data.database
+    rows = await database.fetch_all(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name IN ('children', 'admin_users', 'schedule_rules', "
+        "'task_definitions') ORDER BY name"
+    )
+    assert [row[0] for row in rows] == [
+        "admin_users",
+        "children",
+        "schedule_rules",
+        "task_definitions",
+    ]
+    await async_unload_entry(hass, entry)

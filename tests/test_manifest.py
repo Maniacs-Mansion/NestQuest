@@ -56,6 +56,24 @@ def test_manifest_requirements(manifest: dict) -> None:
     assert manifest.get("requirements") == []
 
 
+def test_manifest_documentation_url_is_public_github_mirror(manifest: dict) -> None:
+    """Verify documentation URL points at the public GitHub mirror."""
+    assert manifest.get("documentation") == "https://github.com/talon2king/NestQuest"
+
+
+def test_manifest_issue_tracker_url_is_public_github_mirror(manifest: dict) -> None:
+    """Verify issue_tracker URL points at the public GitHub mirror."""
+    assert manifest.get("issue_tracker") == "https://github.com/talon2king/NestQuest/issues"
+
+
+@pytest.mark.parametrize("key", ["documentation", "issue_tracker"])
+def test_manifest_urls_use_github_com(manifest: dict, key: str) -> None:
+    """Verify manifest URLs use github.com rather than the private Gitea host."""
+    url = manifest.get(key, "")
+    assert url.startswith("https://github.com/talon2king/NestQuest")
+    assert "cubecraftlabs" not in url
+
+
 @pytest.mark.parametrize(
     "key",
     ["name", "version", "documentation", "issue_tracker", "codeowners"],
