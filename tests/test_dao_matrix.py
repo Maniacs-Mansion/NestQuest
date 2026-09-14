@@ -276,18 +276,20 @@ def test_matrix_task_instances_crud_and_constraints(tmp_path) -> None:
         # insert (seeded) + read
         fetched = await w.instances.get(w.definition.id, D1)
         assert fetched == w.instance
-        # update path: conflict refresh on the OPEN instance
+        # update path: conflict refresh on the OPEN instance — same row
+        # id, snapshot columns (due_time) actually rewritten.
         refreshed = await w.instances.upsert(
             w.definition.id, w.child.id, D1, _stamp(), due_time="17:00"
         )
-        assert refreshed_same_id(fetched, refreshed := refreshed_same_id)
+        assert refreshed.id == fetched.id, (
+            "the conflict path must refresh the existing row in place"
+        )
+        assert refreshed.due_time == "17:00"
+        assert fetched.due_time is None
+        assert await w.instances.get_by_id(fetched.id) is not None
         return True
 
     assert _with_world(tmp_path / "m-instances.db")(_body) is True
-
-
-def refreshed_same_id(original, replacement):
-    return replacement
 
 
 def test_matrix_task_instances_constraints(tmp_path) -> None:

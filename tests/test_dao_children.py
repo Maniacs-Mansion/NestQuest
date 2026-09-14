@@ -575,12 +575,14 @@ def test_startup_db_test_file_uses_dao_elsewhere() -> None:
 
 
 def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
-    """Compensating self-scan for the matrix-file exemption: outside the
-    two sanctioned constraint-violation probes, test_dao_matrix.py must
-    contain no other raw SQL naming children/admin_users — and the two
-    probes themselves must be raising-expected violation inserts, not
-    successful writes.
+    """Compensating self-scan for the matrix-file exemption, structurally
+    exact: parse the two sanctioned functions' ASTs and require that
+    (a) they contain NO other raw SQL naming children/admin_users, and
+    (b) every raw table insert among them is an expression nested inside
+    a ``pytest.raises`` context whose matcher mentions IntegrityError.
+    Any additional raw write elsewhere in the file fails this guard.
     """
+    import ast
     import re
     from pathlib import Path
 
@@ -602,25 +604,68 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
         "test_dao_matrix.py raw children/admin_users SQL is limited to "
         "the two sanctioned constraint probes"
     )
-    # The probes must sit inside pytest.raises blocks: strip any probe
-    # insert NOT preceded by pytest.raises and fail.
-    probe_section = text[
-        text.index("test_matrix_children_crud_and_constraints"):
-        text.index("test_matrix_admin_users_crud_and_constraints")
-    ] + text[
-        text.index("test_matrix_admin_users_crud_and_constraints"):
-        text.index("def test_matrix_schedule_rules_crud_and_constraints")
-    ]
-    insert_positions = [
-        match.start()
-        for match in re.finditer(r"await w\.database\.execute", probe_section)
-    ]
-    for position in insert_positions:
-        window = probe_section[max(0, position - 200):position]
-        assert "pytest.raises" in window, (
-            "raw children/admin_users inserts in the matrix suite must "
-            "be expected-to-fail constraint probes"
+
+    tree = ast.parse(text)
+    probe_tables = {
+        "test_matrix_children_crud_and_constraints": "children",
+        "test_matrix_admin_users_crud_and_constraints": "admin_users",
+    }
+    found_probes = 0
+    for node in ast.walk(tree):
+        if (
+            not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            or node.name not in probe_tables
+        ):
+            continue
+        table = probe_tables[node.name]
+        # Walk the function body; require each raw execute naming the
+        # table to be lexically inside a pytest.raises with block, and
+        # require at least one such probe per sanctioned function.
+        raw_inserts: list[ast.Await] = []
+        raises_blocks: list[ast.With] = []
+        for sub in ast.walk(node):
+            if (
+                isinstance(sub, ast.Await)
+                and isinstance(sub.value, ast.Call)
+                and isinstance(sub.value.func, ast.Attribute)
+                and sub.value.func.attr == "execute"
+            ):
+                sql_arg = sub.value.args[0] if sub.value.args else None
+                rendered = ast.unparse(sql_arg) if sql_arg else ""
+                if re.search(
+                    r"INSERT\s+INTO\s+" + table, rendered, re.IGNORECASE
+                ):
+                    raw_inserts.append(sub)
+        assert raw_inserts, (
+            f"{node.name} must contain its sanctioned raw {table} probe"
         )
+        # Collect the AST spans of every `with pytest.raises(...)` block
+        # in the function; each probe must fall inside one.
+        for sub in ast.walk(node):
+            if (
+                isinstance(sub, ast.With)
+                and isinstance(sub.items[0].context_expr, ast.Call)
+                and isinstance(
+                    sub.items[0].context_expr.func, ast.Attribute
+                )
+                and sub.items[0].context_expr.func.attr == "raises"
+            ):
+                raises_blocks.append(sub)
+        for insert in raw_inserts:
+            inside = any(
+                raises_block.lineno <= insert.lineno
+                and insert.end_lineno <= raises_block.end_lineno
+                for raises_block in raises_blocks
+            )
+            assert inside, (
+                f"the raw {table} insert in {node.name} must be nested "
+                "in a pytest.raises block (expected-to-fail constraint "
+                "probe, not a successful write)"
+            )
+        found_probes += 1
+    assert found_probes == 2, (
+        "exactly two sanctioned raw constraint probes must exist"
+    )
 
 
 def test_dao_test_file_uses_dao_not_raw_table_sql() -> None:
