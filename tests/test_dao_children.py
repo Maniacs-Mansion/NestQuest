@@ -504,18 +504,23 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
         re.IGNORECASE,
     )
     offenders: list[str] = []
+    # test_dao_matrix.py is exempted for exactly its two sanctioned
+    # raw constraint-violation probes (NOT NULL on children, PRIMARY
+    # KEY on admin_users) — the Feature-02 closing suite must prove
+    # the schema surfaces violations to the DAO layer; its guard below
+    # covers everything else in that file.
+    probe_names = {
+        "test_matrix_children_crud_and_constraints",
+        "test_matrix_admin_users_crud_and_constraints",
+    }
     for root in scan_roots:
         for py in sorted(root.rglob("*.py")):
             relative = py.relative_to(repo_root).as_posix()
             if relative in allowed:
                 continue
             text = py.read_text()
-            if relative == "tests/test_startup_db.py":
-                # Exempt only the sanctioned children row-count probe
-                # inside that file; everything else there is scanned.
-                text = _strip_function_spans(
-                    text, {"test_setup_with_valid_file_preserves_rows"}
-                )
+            if relative == "tests/test_dao_matrix.py":
+                text = _strip_function_spans(text, probe_names)
             if sql_pattern.search(text):
                 offenders.append(relative)
     assert offenders == [], (
@@ -567,6 +572,55 @@ def test_startup_db_test_file_uses_dao_elsewhere() -> None:
         "test_startup_db.py must go through the DAO for these tables "
         "outside its sanctioned row-count probe"
     )
+
+
+def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
+    """Compensating self-scan for the matrix-file exemption: outside the
+    two sanctioned constraint-violation probes, test_dao_matrix.py must
+    contain no other raw SQL naming children/admin_users — and the two
+    probes themselves must be raising-expected violation inserts, not
+    successful writes.
+    """
+    import re
+    from pathlib import Path
+
+    matrix = Path(__file__).parent / "test_dao_matrix.py"
+    text = matrix.read_text()
+    stripped = _strip_function_spans(
+        text,
+        {
+            "test_matrix_children_crud_and_constraints",
+            "test_matrix_admin_users_crud_and_constraints",
+        },
+    )
+    sql_pattern = re.compile(
+        r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM|"
+        r"FROM|JOIN)\s+[`'\"]*(\[)?(children|admin_users)\b",
+        re.IGNORECASE,
+    )
+    assert sql_pattern.search(stripped) is None, (
+        "test_dao_matrix.py raw children/admin_users SQL is limited to "
+        "the two sanctioned constraint probes"
+    )
+    # The probes must sit inside pytest.raises blocks: strip any probe
+    # insert NOT preceded by pytest.raises and fail.
+    probe_section = text[
+        text.index("test_matrix_children_crud_and_constraints"):
+        text.index("test_matrix_admin_users_crud_and_constraints")
+    ] + text[
+        text.index("test_matrix_admin_users_crud_and_constraints"):
+        text.index("def test_matrix_schedule_rules_crud_and_constraints")
+    ]
+    insert_positions = [
+        match.start()
+        for match in re.finditer(r"await w\.database\.execute", probe_section)
+    ]
+    for position in insert_positions:
+        window = probe_section[max(0, position - 200):position]
+        assert "pytest.raises" in window, (
+            "raw children/admin_users inserts in the matrix suite must "
+            "be expected-to-fail constraint probes"
+        )
 
 
 def test_dao_test_file_uses_dao_not_raw_table_sql() -> None:
