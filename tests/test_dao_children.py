@@ -300,24 +300,28 @@ def test_reorder_rejects_duplicate_ids(tmp_path) -> None:
 
 
 def test_reorder_concurrent_calls_serialize(tmp_path) -> None:
-    """Two concurrent reorders queue on the transaction, both succeed.
+    """Concurrent reorders from DIFFERENT DAO instances queue safely.
 
-    The second call sees the first call's final positions as its
-    starting state; both end with a consistent 0..n-1 assignment.
+    Two ChildrenDao objects over one connection race two reorders: the
+    connection-scoped lock makes the second wait, then run against the
+    first call's final state.  Without the lock the wrapper's
+    transaction() would reject the second concurrent transaction with
+    RuntimeError.
     """
     async def _main() -> None:
         database = NestQuestDatabase(_make_hass_mock())
         await database.open(tmp_path / "reorder-concurrent.db")
         try:
             await apply_migrations(database)
-            dao, _ = _daos(database)
-            a = await dao.create("Ada", NOW)
-            b = await dao.create("Bo", NOW)
-            task_1 = asyncio.ensure_future(dao.reorder([b.id, a.id]))
+            dao_a, _ = _daos(database)
+            a = await dao_a.create("Ada", NOW)
+            b = await dao_a.create("Bo", NOW)
+            dao_b, _ = _daos(database)  # second instance, same connection
+            task_1 = asyncio.ensure_future(dao_a.reorder([b.id, a.id]))
             await asyncio.sleep(0)
-            task_2 = asyncio.ensure_future(dao.reorder([a.id, b.id]))
+            task_2 = asyncio.ensure_future(dao_b.reorder([a.id, b.id]))
             await asyncio.gather(task_1, task_2)
-            children = await dao.list_all()
+            children = await dao_a.list_all()
             orders = {c.display_name: c.sort_order for c in children}
             assert sorted(orders.values()) == [0, 1]
         finally:
@@ -451,9 +455,9 @@ def test_admin_records_are_typed_not_raw_rows(tmp_path) -> None:
 def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
     """Guardrail: children/admin_users SQL may appear only in the DAO
     (and the schema DDL declarations).  Scans the integration package
-    AND the repo's test files, matching FROM/INTO/UPDATE/DELETE FROM/
-    JOIN against either table — including DELETE FROM children, the
-    hard-delete path the guardrail forbids.
+    AND the repo's test files RECURSIVELY, matching FROM/INTO/UPDATE/
+    DELETE FROM/JOIN against either table — including DELETE FROM
+    children, the hard-delete path the guardrail forbids.
 
     Exclusions are narrowly justified: schema.py declares the tables'
     DDL; migrations.py applies that DDL; test_schema.py and
@@ -486,11 +490,11 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
     )
     offenders: list[str] = []
     for root in scan_roots:
-        for py in sorted(root.glob("*.py")):
+        for py in sorted(root.rglob("*.py")):
             if py.name in allowed:
                 continue
             if sql_pattern.search(py.read_text()):
-                offenders.append(py.name)
+                offenders.append(str(py.relative_to(repo_root)))
     assert offenders == [], (
         f"SQL touching children/admin_users leaked into: {offenders}"
     )
@@ -498,23 +502,46 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
 
 def test_dao_test_file_uses_dao_not_raw_table_sql() -> None:
     """This test module must exercise the DAO, not raw SQL, for these
-    tables — except inside this guard itself.  Any SQL statement naming
-    children or admin_users in a string literal elsewhere here is a
-    violation.
+    tables — except inside the two guard functions themselves, whose
+    source spans are excluded precisely (by line range), so any code
+    added elsewhere in this file, before or after the guards, is still
+    scanned.
     """
+    import ast
     import re
     from pathlib import Path
 
-    text = Path(__file__).read_text()
-    # Cut everything from the guard function to the end of file: the
-    # guard's own patterns mention the keywords in regex strings, not
-    # executable SQL.
-    head = text[: text.index("def test_children_and_admin_sql_lives")]
+    path = Path(__file__)
+    text = path.read_text()
+    lines = text.splitlines(keepends=True)
+    tree = ast.parse(text)
+    guard_names = {
+        "test_children_and_admin_sql_lives_only_in_dao_module",
+        "test_dao_test_file_uses_dao_not_raw_table_sql",
+    }
+    excluded: list[tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in guard_names
+        ):
+            excluded.append((node.lineno, node.end_lineno or node.lineno))
+
     sql_pattern = re.compile(
         r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+"
         r'["\`]*(children|admin_users)\b',
         re.IGNORECASE,
     )
-    assert sql_pattern.search(head) is None, (
-        "tests must go through the DAO, not raw SQL, for these tables"
+    offenders: list[str] = []
+    excluded_ranges = set()
+    for start, end in excluded:
+        excluded_ranges.update(range(start, end + 1))
+    for number, line in enumerate(lines, start=1):
+        if number in excluded_ranges:
+            continue
+        if sql_pattern.search(line):
+            offenders.append(f"{path.name}:{number}")
+    assert offenders == [], (
+        "tests must go through the DAO, not raw SQL, for these tables; "
+        f"found: {offenders}"
     )

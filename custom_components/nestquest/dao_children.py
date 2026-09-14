@@ -61,6 +61,26 @@ _CHILD_COLUMNS = (
 )
 
 
+#: One asyncio.Lock per (connection wrapper, running loop), shared by
+#: every ChildrenDao instance over the same database: the wrapper
+#: rejects a second concurrent transaction with RuntimeError, so ALL
+#: transactional DAO operations on one connection must queue here, not
+#: per-instance.  Keyed like the migration runner's lock; entries are
+#: never evicted (a config entry holds one wrapper per process).
+_CONNECTION_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
+
+
+def _connection_lock(database) -> asyncio.Lock:
+    """Return the shared transaction-serializing lock for ``database``."""
+    loop = asyncio.get_running_loop()
+    key = (id(database), id(loop))
+    lock = _CONNECTION_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _CONNECTION_LOCKS[key] = lock
+    return lock
+
+
 class ChildrenDao:
     """Typed async data access for the ``children`` table.
 
@@ -71,10 +91,6 @@ class ChildrenDao:
 
     def __init__(self, database) -> None:
         self._database = database
-        #: Serializes whole reorder() runs on this DAO instance: the
-        #: wrapper rejects concurrent transactions, so racing reorders
-        #: must queue here instead of colliding.
-        self._reorder_lock = asyncio.Lock()
 
     async def create(
         self,
@@ -184,11 +200,12 @@ class ChildrenDao:
         caller bug.
 
         Concurrent reorder() calls on one connection are serialized by
-        a per-instance asyncio lock: the wrapper's transaction()
-        rejects a second concurrent transaction with RuntimeError, so
-        racing callers would crash instead of queueing.  The lock makes
-        the second call wait, then run against the first call's final
-        state.
+        a connection-scoped asyncio lock (shared across every ChildrenDao
+        over the same wrapper, however many instances): the wrapper's
+        transaction() rejects a second concurrent transaction with
+        RuntimeError, so racing callers would crash instead of
+        queueing.  The lock makes the second call wait, then run
+        against the first call's final state.
         """
         if not ordered_ids:
             return
@@ -197,7 +214,7 @@ class ChildrenDao:
                 "reorder() received duplicate child ids; every id must "
                 "appear at most once"
             )
-        async with self._reorder_lock:
+        async with _connection_lock(self._database):
             async with self._database.transaction():
                 offset = len(ordered_ids)
                 await self._database.execute_many(
