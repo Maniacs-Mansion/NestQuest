@@ -1,0 +1,556 @@
+"""Tests for dao_presence.py: presence schedules and overrides DAO."""
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+
+import pytest
+
+from custom_components.nestquest.dao_children import ChildrenDao
+from custom_components.nestquest.dao_presence import (
+    PresenceOverrideRecord,
+    PresenceOverridesDao,
+    PresenceScheduleRecord,
+    PresenceSchedulesDao,
+)
+from custom_components.nestquest.db import NestQuestDatabase
+from custom_components.nestquest.migrations import apply_migrations
+
+
+def _run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def _make_hass_mock():
+    from unittest.mock import AsyncMock, MagicMock
+
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=(lambda fn, *a: fn(*a)))
+    return hass
+
+
+NOW = "2026-09-14T12:00:00+00:00"
+
+
+async def _prepare(path) -> tuple:
+    database = NestQuestDatabase(_make_hass_mock())
+    await database.open(path)
+    await apply_migrations(database)
+    schedules = PresenceSchedulesDao(database)
+    overrides = PresenceOverridesDao(database)
+    children = ChildrenDao(database)
+    child = await children.create("Ada", NOW)
+    return database, schedules, overrides, children, child
+
+
+def _with_db(tmp_path, name):
+    def _run_test(body):
+        async def _main():
+            database, schedules, overrides, children, child = await _prepare(
+                tmp_path / name
+            )
+            try:
+                return await body(
+                    database, schedules, overrides, children, child
+                )
+            finally:
+                await database.close()
+
+        return _run(_main())
+
+    return _run_test
+
+
+# ---------------------------------------------------------------------------
+# presence_schedules: upsert by child
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_creates_then_updates_same_row(tmp_path) -> None:
+    """Second upsert for the same child UPDATES, not raises."""
+    async def _body(database, schedules, overrides, children, child):
+        first = await schedules.upsert_by_child(
+            child.id, 2, "2026-09-07", "0,2,4|1,3"
+        )
+        assert isinstance(first, PresenceScheduleRecord)
+        assert first.child_id == child.id
+        second = await schedules.upsert_by_child(
+            child.id, 2, "2026-09-14", "1,3|0,2,4"
+        )
+        assert second.id == first.id, "upsert must reuse the existing row"
+        fetched = await schedules.get_by_child(child.id)
+        assert fetched.anchor_date == "2026-09-14"
+        assert fetched.pattern == "1,3|0,2,4"
+        rows = await database.fetch_one(
+            "SELECT COUNT(*) FROM presence_schedules"
+        )
+        assert rows == (1,)
+        return second
+
+    _with_db(tmp_path, "upsert.db")(_body)
+
+
+def test_upsert_typed_record_fields(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        record = await schedules.upsert_by_child(
+            child.id, 4, "2026-09-07", "0|1|2|3"
+        )
+        assert record.id == 1
+        assert record.child_id == child.id
+        assert record.cycle_length_weeks == 4
+        assert record.anchor_date == "2026-09-07"
+        assert record.pattern == "0|1|2|3"
+        return record
+
+    _with_db(tmp_path, "upsert-fields.db")(_body)
+
+
+def test_upsert_unknown_child_raises_value_error(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        with pytest.raises(ValueError, match="does not exist"):
+            await schedules.upsert_by_child(
+                999, 2, "2026-09-07", "0,2|1,3"
+            )
+        return None
+
+    _with_db(tmp_path, "upsert-bad-child.db")(_body)
+
+
+def test_upsert_malformed_anchor_date_raises(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        for bad in ("not-a-date", "2026-9-7", "2026-13-01", ""):
+            with pytest.raises(ValueError, match="YYYY-MM-DD"):
+                await schedules.upsert_by_child(child.id, 2, bad, "0|1")
+        return None
+
+    _with_db(tmp_path, "upsert-bad-date.db")(_body)
+
+
+def test_upsert_malformed_pattern_rejected_by_schema(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            await schedules.upsert_by_child(
+                child.id, 2, "2026-09-07", "0,2"
+            )
+        return None
+
+    _with_db(tmp_path, "upsert-bad-pattern.db")(_body)
+
+
+def test_upsert_two_children_have_distinct_rows(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        other = await children.create("Bo", NOW)
+        await schedules.upsert_by_child(child.id, 2, "2026-09-07", "0,2|1,3")
+        await schedules.upsert_by_child(other.id, 2, "2026-09-07", "1,3|0,2")
+        mine = await schedules.get_by_child(child.id)
+        theirs = await schedules.get_by_child(other.id)
+        assert mine.id != theirs.id
+        assert mine.pattern == "0,2|1,3"
+        assert theirs.pattern == "1,3|0,2"
+        return mine
+
+    _with_db(tmp_path, "upsert-two-children.db")(_body)
+
+
+def test_upsert_concurrent_same_child_serializes(tmp_path) -> None:
+    """Racing upserts for one child both succeed; exactly one row.
+
+    Without serialization the UNIQUE(child_id) would make the second
+    plain INSERT raise; the serialized ON CONFLICT upserts both land.
+    """
+    async def _main():
+        database = NestQuestDatabase(_make_hass_mock())
+        await database.open(tmp_path / "upsert-race.db")
+        try:
+            await apply_migrations(database)
+            children = ChildrenDao(database)
+            schedules = PresenceSchedulesDao(database)
+            child = await children.create("Ada", NOW)
+            task_a = asyncio.ensure_future(
+                schedules.upsert_by_child(
+                    child.id, 2, "2026-09-07", "0,2|1,3"
+                )
+            )
+            await asyncio.sleep(0)
+            task_b = asyncio.ensure_future(
+                schedules.upsert_by_child(
+                    child.id, 2, "2026-09-14", "1,3|0,2"
+                )
+            )
+            record_a, record_b = await asyncio.gather(task_a, task_b)
+            assert record_a.id == record_b.id
+            fetched = await schedules.get_by_child(child.id)
+            assert fetched is not None
+            rows = await database.fetch_one(
+                "SELECT COUNT(*) FROM presence_schedules"
+            )
+            assert rows == (1,)
+            return fetched
+        finally:
+            await database.close()
+
+    fetched = _run(_main())
+    assert fetched.pattern in {"0,2|1,3", "1,3|0,2"}
+
+
+# ---------------------------------------------------------------------------
+# presence_schedules: get / delete
+# ---------------------------------------------------------------------------
+
+
+def test_get_by_child_missing_schedule_returns_none(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        return await schedules.get_by_child(child.id)
+
+    assert _with_db(tmp_path, "get-none.db")(_body) is None
+
+
+def test_get_by_child_unknown_child_returns_none(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        return await schedules.get_by_child(999)
+
+    assert _with_db(tmp_path, "get-unknown.db")(_body) is None
+
+
+def test_delete_removes_and_returns_true_then_false(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        await schedules.upsert_by_child(child.id, 2, "2026-09-07", "0,2|1,3")
+        assert await schedules.delete(child.id) is True
+        assert await schedules.get_by_child(child.id) is None
+        assert await schedules.delete(child.id) is False
+        return None
+
+    _with_db(tmp_path, "delete.db")(_body)
+
+
+def test_delete_child_without_schedule_returns_false(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        return await schedules.delete(child.id)
+
+    assert _with_db(tmp_path, "delete-none.db")(_body) is False
+
+
+def test_delete_then_upsert_creates_fresh_row(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        first = await schedules.upsert_by_child(
+            child.id, 2, "2026-09-07", "0,2|1,3"
+        )
+        await schedules.delete(child.id)
+        second = await schedules.upsert_by_child(
+            child.id, 2, "2026-09-07", "0,2|1,3"
+        )
+        assert second.id != first.id
+        return second
+
+    _with_db(tmp_path, "delete-recreate.db")(_body)
+
+
+# ---------------------------------------------------------------------------
+# presence_overrides: create / list / delete
+# ---------------------------------------------------------------------------
+
+
+def test_override_create_returns_typed_record(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        record = await overrides.create(
+            child.id, "2026-12-21", "2027-01-04", False,
+            note="Holiday abroad",
+        )
+        assert isinstance(record, PresenceOverrideRecord)
+        assert record.child_id == child.id
+        assert record.start_date == "2026-12-21"
+        assert record.end_date == "2027-01-04"
+        assert record.is_present is False
+        assert record.note == "Holiday abroad"
+        return record
+
+    _with_db(tmp_path, "override-create.db")(_body)
+
+
+def test_override_create_single_day_same_start_and_end(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        record = await overrides.create(
+            child.id, "2026-09-14", "2026-09-14", True
+        )
+        assert record.start_date == record.end_date
+        assert record.is_present is True
+        assert record.note is None
+        return record
+
+    _with_db(tmp_path, "override-single-day.db")(_body)
+
+
+def test_override_create_unknown_child_raises(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        with pytest.raises(ValueError, match="does not exist"):
+            await overrides.create(
+                999, "2026-09-14", "2026-09-14", True
+            )
+        return None
+
+    _with_db(tmp_path, "override-bad-child.db")(_body)
+
+
+def test_override_create_malformed_dates_raise(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        for bad in ("not-a-date", "2026-9-14", ""):
+            with pytest.raises(ValueError, match="YYYY-MM-DD"):
+                await overrides.create(child.id, bad, "2026-09-14", True)
+            with pytest.raises(ValueError, match="YYYY-MM-DD"):
+                await overrides.create(child.id, "2026-09-14", bad, True)
+        return None
+
+    _with_db(tmp_path, "override-bad-dates.db")(_body)
+
+
+def test_override_end_before_start_rejected_by_schema(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            await overrides.create(
+                child.id, "2026-09-14", "2026-09-13", True
+            )
+        return None
+
+    _with_db(tmp_path, "override-end-before-start.db")(_body)
+
+
+def test_override_list_by_child_and_range_filters_correctly(
+    tmp_path,
+) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        await overrides.create(
+            child.id, "2026-09-01", "2026-09-05", False, note="before"
+        )
+        inside = await overrides.create(
+            child.id, "2026-09-10", "2026-09-12", False, note="inside"
+        )
+        overlapping = await overrides.create(
+            child.id, "2026-09-20", "2026-09-25", True, note="overlap"
+        )
+        after = await overrides.create(
+            child.id, "2026-10-01", "2026-10-02", False, note="after"
+        )
+        found = await overrides.list_by_child_and_range(
+            child.id, "2026-09-09", "2026-09-22"
+        )
+        assert [r.id for r in found] == [inside.id, overlapping.id]
+        # Inclusive boundaries: a range touching the override's edges
+        # still matches.
+        edge = await overrides.list_by_child_and_range(
+            child.id, "2026-09-20", "2026-09-20"
+        )
+        assert [r.id for r in edge] == [overlapping.id]
+        return found
+
+    _with_db(tmp_path, "override-list-range.db")(_body)
+
+
+def test_override_list_orders_by_start_date(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        late = await overrides.create(
+            child.id, "2026-09-20", "2026-09-21", True
+        )
+        early = await overrides.create(
+            child.id, "2026-09-10", "2026-09-11", False
+        )
+        found = await overrides.list_by_child_and_range(
+            child.id, "2026-09-01", "2026-09-30"
+        )
+        assert [r.id for r in found] == [early.id, late.id]
+        return found
+
+    _with_db(tmp_path, "override-list-order.db")(_body)
+
+
+def test_override_list_per_child_isolation(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        other = await children.create("Bo", NOW)
+        await overrides.create(child.id, "2026-09-10", "2026-09-11", True)
+        await overrides.create(other.id, "2026-09-10", "2026-09-11", False)
+        mine = await overrides.list_by_child_and_range(
+            child.id, "2026-09-01", "2026-09-30"
+        )
+        assert len(mine) == 1
+        assert mine[0].is_present is True
+        return mine
+
+    _with_db(tmp_path, "override-isolation.db")(_body)
+
+
+def test_override_list_malformed_range_raises(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        with pytest.raises(ValueError, match="YYYY-MM-DD"):
+            await overrides.list_by_child_and_range(
+                child.id, "oops", "2026-09-30"
+            )
+        with pytest.raises(ValueError, match="on or after"):
+            await overrides.list_by_child_and_range(
+                child.id, "2026-09-30", "2026-09-01"
+            )
+        return None
+
+    _with_db(tmp_path, "override-list-bad-range.db")(_body)
+
+
+def test_override_list_unknown_child_returns_empty(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        return await overrides.list_by_child_and_range(
+            999, "2026-09-01", "2026-09-30"
+        )
+
+    assert _with_db(tmp_path, "override-list-unknown.db")(_body) == []
+
+
+def test_override_delete_round_trip(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        record = await overrides.create(
+            child.id, "2026-09-10", "2026-09-11", True
+        )
+        assert await overrides.delete(record.id) is True
+        found = await overrides.list_by_child_and_range(
+            child.id, "2026-09-01", "2026-09-30"
+        )
+        assert found == []
+        assert await overrides.delete(record.id) is False
+        return None
+
+    _with_db(tmp_path, "override-delete.db")(_body)
+
+
+def test_override_delete_missing_returns_false(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        return await overrides.delete(999)
+
+    assert _with_db(tmp_path, "override-delete-missing.db")(_body) is False
+
+
+def test_override_delete_leaves_other_overrides(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        first = await overrides.create(
+            child.id, "2026-09-10", "2026-09-11", True
+        )
+        second = await overrides.create(
+            child.id, "2026-09-20", "2026-09-21", False
+        )
+        assert await overrides.delete(first.id) is True
+        found = await overrides.list_by_child_and_range(
+            child.id, "2026-09-01", "2026-09-30"
+        )
+        assert [r.id for r in found] == [second.id]
+        return found
+
+    _with_db(tmp_path, "override-delete-others.db")(_body)
+
+
+def test_schedule_and_override_independent_for_same_child(tmp_path) -> None:
+    """Deleting the schedule does not touch overrides and vice versa."""
+    async def _body(database, schedules, overrides, children, child):
+        await schedules.upsert_by_child(child.id, 2, "2026-09-07", "0,2|1,3")
+        override = await overrides.create(
+            child.id, "2026-09-10", "2026-09-11", True
+        )
+        assert await schedules.delete(child.id) is True
+        found = await overrides.list_by_child_and_range(
+            child.id, "2026-09-01", "2026-09-30"
+        )
+        assert [r.id for r in found] == [override.id]
+        return found
+
+    _with_db(tmp_path, "independent.db")(_body)
+
+
+# ---------------------------------------------------------------------------
+# No SQL for these tables outside the DAO module
+# ---------------------------------------------------------------------------
+
+
+def test_presence_sql_lives_only_in_dao_module() -> None:
+    """Guardrail: presence_schedules/presence_overrides SQL may appear
+    only in the DAO module (and the schema DDL declarations).
+    RECURSIVE scan of package and tests, FROM/INTO/UPDATE/DELETE FROM/
+    JOIN pattern, with exact repo-relative exclusions justified by
+    role: schema.py declares the DDL, migrations.py applies it, and
+    the test files for exactly those layers verify DDL, not data
+    paths.
+    """
+    import re
+    from pathlib import Path
+
+    package = Path(
+        __import__(
+            "custom_components.nestquest", fromlist=["__file__"]
+        ).__file__
+    ).parent
+    repo_root = package.parent.parent
+    scan_roots = [package, repo_root / "tests"]
+
+    allowed = {
+        "custom_components/nestquest/dao_presence.py",  # this DAO
+        "custom_components/nestquest/schema.py",  # declares the DDL
+        "custom_components/nestquest/migrations.py",  # applies the DDL
+        "tests/test_schema.py",  # tests the DDL
+        "tests/test_migrations.py",  # tests migration application
+        "tests/test_dao_presence.py",  # this file, scanned separately
+    }
+    sql_pattern = re.compile(
+        r"(FROM|INTO|UPDATE|DELETE\s+FROM|JOIN)\s+[`'\"]*(\[)?"
+        r"(presence_schedules|presence_overrides)\b",
+        re.IGNORECASE,
+    )
+    offenders: list[str] = []
+    for root in scan_roots:
+        for py in sorted(root.rglob("*.py")):
+            relative = py.relative_to(repo_root).as_posix()
+            if relative in allowed:
+                continue
+            if sql_pattern.search(py.read_text()):
+                offenders.append(relative)
+    assert offenders == [], (
+        f"SQL touching presence_schedules/presence_overrides leaked "
+        f"into: {offenders}"
+    )
+
+
+def test_dao_presence_test_file_uses_dao_not_raw_table_sql() -> None:
+    """This test module must exercise the DAO, not raw SQL, for these
+    tables — except the upsert row-count probe (COUNT(*) of the whole
+    table, needed to prove exactly-one-row) and the guard functions'
+    own spans.  Scanned as ONE blob so multiline SQL cannot evade it.
+    """
+    import ast
+    import re
+    from pathlib import Path
+
+    path = Path(__file__)
+    text = path.read_text()
+    lines = text.splitlines(keepends=True)
+    tree = ast.parse(text)
+    guard_names = {
+        "test_presence_sql_lives_only_in_dao_module",
+        "test_dao_presence_test_file_uses_dao_not_raw_table_sql",
+    }
+    probe_names = {"test_upsert_creates_then_updates_same_row",
+                   "test_upsert_concurrent_same_child_serializes"}
+    excluded: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name in guard_names or node.name in probe_names:
+            excluded.update(
+                range(node.lineno, (node.end_lineno or node.lineno) + 1)
+            )
+
+    remaining = "".join(
+        line
+        for number, line in enumerate(lines, start=1)
+        if number not in excluded
+    )
+    sql_pattern = re.compile(
+        r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM|"
+        r"FROM|JOIN)\s+[`'\"]*(\[)?(presence_schedules|presence_overrides)"
+        r"\b",
+        re.IGNORECASE,
+    )
+    assert sql_pattern.search(remaining) is None, (
+        "tests must go through the DAO, not raw SQL, for these tables"
+    )
