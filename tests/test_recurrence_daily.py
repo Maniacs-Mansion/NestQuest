@@ -213,15 +213,32 @@ def test_occurrences_between_year_boundary() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_occurs_on_rejects_unimplemented_shapes_loudly() -> None:
-    """Monthly/yearly land with their own engine tasks; a loud
-    NotImplementedError beats a silent wrong answer."""
-    rule = ScheduleRule(
-        rule_type=RuleType.YEARLY, month=6,
-        start_date="2026-09-01",
+def test_occurs_on_rejects_unknown_shapes_loudly() -> None:
+    """All six model shapes are implemented; a shape added to the model
+    without an engine arm must raise a loud NotImplementedError rather
+    than a silent wrong answer.  Forged via a private enum extension
+    because ScheduleRule validation rejects unknown names."""
+    import enum as enum_module
+    from custom_components.nestquest import recurrence as mod
+
+    ForgedType = enum_module.Enum(
+        "ForgedType", {"UNKNOWN_SHAPE": "unknown_shape"}
     )
-    with pytest.raises(NotImplementedError):
-        occurs_on(rule, _d("2026-09-15"))
+    forged_rule = ScheduleRule.__new__(ScheduleRule)
+    object.__setattr__(forged_rule, "rule_type", ForgedType.UNKNOWN_SHAPE)
+    object.__setattr__(forged_rule, "interval", 1)
+    object.__setattr__(forged_rule, "weekday_set", None)
+    object.__setattr__(forged_rule, "day_of_month", None)
+    object.__setattr__(forged_rule, "nth_weekday", None)
+    object.__setattr__(forged_rule, "nth_weekday_weekday", None)
+    object.__setattr__(forged_rule, "month", None)
+    object.__setattr__(forged_rule, "start_date", "2026-09-01")
+    object.__setattr__(forged_rule, "end_date", None)
+    for day in ("2026-08-31", "2026-09-15", "2026-12-31"):
+        with pytest.raises(NotImplementedError):
+            occurs_on(forged_rule, _d(day))
+        with pytest.raises(NotImplementedError):
+            occurrences_between(forged_rule, "2026-08-01", "2026-12-31")
 
 def test_interval_7_preserves_weekday_alignment_across_months() -> None:
     """Weekly-by-interval semantics: every firing lands on the SAME
@@ -269,27 +286,4 @@ def test_occurrences_between_year_boundary_interval_2() -> None:
     assert result == ["2026-12-30", "2027-01-01", "2027-01-03"]
 
 
-def test_occurs_on_unimplemented_shape_raises_even_outside_window() -> None:
-    """An unimplemented shape must raise whether the date is inside or
-    outside the window — silent False would hide a missing engine."""
-    rule = ScheduleRule(
-        rule_type=RuleType.YEARLY, month=6,
-        start_date="2026-09-01", end_date="2026-09-10",
-    )
-    # Before start, inside window, after end: all must raise.
-    for day in ("2026-08-31", "2026-09-07", "2026-09-20"):
-        with pytest.raises(NotImplementedError):
-            occurs_on(rule, _d(day))
 
-
-def test_occurrences_between_unimplemented_shape_raises_even_disjoint(
-    tmp_path,
-) -> None:
-    rule = ScheduleRule(
-        rule_type=RuleType.YEARLY, month=6,
-        start_date="2026-09-01"
-    )
-    # A range entirely before the rule's start still raises: the shape
-    # is unimplemented, and silence would hide it.
-    with pytest.raises(NotImplementedError):
-        occurrences_between(rule, "2026-08-01", "2026-08-10")

@@ -270,10 +270,9 @@ class ScheduleRule:
                                 "nth_weekday_weekday", "month")
         elif shape is RuleType.MONTHLY_WEEKDAY:
             forbidden_fields = ("weekday_set", "day_of_month", "month")
-        else:  # YEARLY
+        elif shape is RuleType.YEARLY:
             forbidden_fields = (
                 "weekday_set",
-                "day_of_month",
                 "nth_weekday",
                 "nth_weekday_weekday",
             )
@@ -315,6 +314,14 @@ class ScheduleRule:
             if not 1 <= self.month <= 12:
                 raise RuleValidationError(
                     f"month must be 1..12, got {self.month!r}"
+                )
+            if self.day_of_month is not None and not (
+                _is_plain_int(self.day_of_month)
+                and 1 <= self.day_of_month <= 31
+            ):
+                raise RuleValidationError(
+                    f"day_of_month must be 1..31 for yearly rules, got "
+                    f"{self.day_of_month!r}"
                 )
 
     def to_dict(self) -> dict:
@@ -504,6 +511,31 @@ def _occurs_monthly_weekday(
     return nth_day is not None and target.day == nth_day
 
 
+def _occurs_yearly(rule: ScheduleRule, target: datetime.date) -> bool:
+    """YEARLY evaluation with the documented leap-day clamp policy.
+
+    Policy: in each interval-eligible year, the rule fires on
+    ``day_of_month`` of ``month`` when that day exists.  A YEARLY rule
+    for February 29th fires on FEBRUARY 28TH in a non-leap year (the
+    same clamp-as-month-end policy as MONTHLY_DAY: the annual chore
+    still happens every year, pinned to February's end when its
+    nominal date is absent) rather than silently vanishing.  A YEARLY
+    rule with NO day_of_month fires on the first day of ``month``.
+    The interval anchors on years elapsed from start_date's year.
+    """
+    anchor = _parse_date(rule.start_date)
+    years_elapsed = target.year - anchor.year
+    if years_elapsed % rule.interval != 0:
+        return False
+    if target.month != rule.month:
+        return False
+    if rule.day_of_month is None:
+        # Day-less yearly rules fire on the first of the month.
+        return target.day == 1
+    month_end = _month_end(target.year, target.month)
+    return target.day == min(rule.day_of_month, month_end)
+
+
 def occurs_on(rule: ScheduleRule, target: datetime.date) -> bool:
     """Return True when ``rule`` fires on ``target``.
 
@@ -516,7 +548,7 @@ def occurs_on(rule: ScheduleRule, target: datetime.date) -> bool:
     shape = rule.rule_type
     if shape not in (
         RuleType.DAILY, RuleType.WEEKLY, RuleType.CUSTOM_DAYS,
-        RuleType.MONTHLY_DAY, RuleType.MONTHLY_WEEKDAY,
+        RuleType.MONTHLY_DAY, RuleType.MONTHLY_WEEKDAY, RuleType.YEARLY,
     ):
         raise NotImplementedError(
             f"occurs_on for {shape} lands with its own engine task "
@@ -531,6 +563,8 @@ def occurs_on(rule: ScheduleRule, target: datetime.date) -> bool:
         return _occurs_monthly_day(rule, target)
     if shape is RuleType.MONTHLY_WEEKDAY:
         return _occurs_monthly_weekday(rule, target)
+    if shape is RuleType.YEARLY:
+        return _occurs_yearly(rule, target)
     # WEEKLY / CUSTOM_DAYS: whole-week anchoring from start_date, never
     # ISO week numbers (Feature 04/05 guardrail: 53-week years flip ISO
     # parity on January 1st; anchor arithmetic does not).
@@ -556,7 +590,7 @@ def occurrences_between(
     """
     if rule.rule_type not in (
         RuleType.DAILY, RuleType.WEEKLY, RuleType.CUSTOM_DAYS,
-        RuleType.MONTHLY_DAY, RuleType.MONTHLY_WEEKDAY,
+        RuleType.MONTHLY_DAY, RuleType.MONTHLY_WEEKDAY, RuleType.YEARLY,
     ):
         raise NotImplementedError(
             f"occurrences_between for {rule.rule_type} lands with its own "
