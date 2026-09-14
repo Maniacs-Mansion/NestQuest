@@ -85,6 +85,68 @@ unlike ``schedule_rules.end_date`` — an override is always a concrete
 date range; a single-day override stores the same date in both columns.
 ``is_present`` 0/1 marks the child absent/present for the whole range;
 ``note`` is optional free text.
+
+Task instances: ``task_instances`` deliberately carries NO completion
+status column.  An instance's current state derives from the latest row
+in ``completion_events`` (Feature 08), so materialization (Feature 07)
+can insert instances without knowing anything about completion and the
+append-only log stays the single source of truth.  ``definition_id``,
+``due_date`` and ``child_id`` snapshot the materialization-time facts
+("why this instance exists"): reassignment and rule edits change future
+instances only and never rewrite these rows.  ``due_time`` snapshots
+the definition's optional due time at generation for the same reason —
+the instance keeps its generation-time value even if the definition is
+edited later.  ``generated_at`` is a caller-set UTC ISO-8601 timestamp
+per the module timestamp policy (no DB default, so a generation batch
+stamps one coherent time).
+
+Uniqueness: the (definition_id, due_date) pair is declared as a
+table-level ``UNIQUE`` constraint rather than a separate ``CREATE
+UNIQUE INDEX`` statement.  SQLite materializes it as an implicit unique
+index (``sqlite_autoindex_task_instances_1``) — the required "unique
+index prevents duplicate instances" — and the constraint form cannot be
+silently dropped the way a standalone index can, so the duplicate door
+stays shut.  Idempotent materialization keys on exactly this pair.  No
+secondary indexes beyond it are declared yet: history and board queries
+(Features 08/10/13) should justify their indexes as a later migration
+once their query shapes exist.
+
+No ``ON DELETE`` clauses are declared on any foreign key in this
+module: children and definitions are deactivated, never deleted, so a
+deletion that would orphan instances or events is a bug and must fail
+loudly rather than cascade.
+
+Completion events: ``completion_events`` is strictly append-only.  That
+property is enforced at the DAO layer — the completion-events DAO
+exposes no UPDATE or DELETE path (task a9ea75fc) — and deliberately NOT
+by database triggers, matching the module's no-trigger policy: a RAISE
+trigger would be the one exception to "pure CHECK, no triggers",
+complicate the later migration runner, and still prove nothing (any
+writer can run raw SQL).  ``event_type`` is constrained to
+``completed``/``uncompleted``; a ``missed`` row is intentionally not
+representable — missed is a derived state announced on the HA event bus
+(Feature 10), never an appended event.
+
+``child_id`` is deliberately denormalized (it is also derivable via
+``task_instances``): history reporting (Feature 13) filters and rates
+per child directly against the log, and the log should stay
+self-describing without joins.
+
+Actor policy: ``actor_source`` distinguishes an authenticated HA user
+(``'user'``, with ``actor_user_id`` holding the HA user id) from a
+panel tap with no user context (``'panel'``, with ``actor_user_id``
+NULL — the tapped child profile is already ``child_id``).  A coherence
+CHECK makes the pair shape non-negotiable: ``'user'`` requires
+``actor_user_id``, ``'panel'`` forbids it.  Other actor sources are
+rejected; if an unattended system actor is ever needed, that is a
+schema migration, not a silent widening.
+
+On-time policy: ``was_on_time`` is required (integer 0 or 1) for
+``completed`` events — at completion time the due date is known and the
+flag is decidable.  For ``uncompleted`` events the flag is optional:
+Feature 08 decides whether a reversal carries the reversed completion's
+on-time flag or NULL, and the DDL deliberately accepts both rather than
+guessing.
 """
 from __future__ import annotations
 
@@ -209,6 +271,46 @@ SCHEMA_V1_PRESENCE_OVERRIDES_DDL: list[str] = [
     """,
 ]
 
+SCHEMA_V1_TASK_INSTANCES_DDL: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS task_instances (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        definition_id INTEGER NOT NULL REFERENCES task_definitions(id),
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        due_date TEXT NOT NULL,
+        due_time TEXT,
+        generated_at TEXT NOT NULL,
+        UNIQUE (definition_id, due_date)
+    )
+    """,
+]
+
+SCHEMA_V1_COMPLETION_EVENTS_DDL: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS completion_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        instance_id INTEGER NOT NULL REFERENCES task_instances(id),
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        event_type TEXT NOT NULL CHECK (event_type IN ('completed', 'uncompleted')),
+        actor_source TEXT NOT NULL CHECK (actor_source IN ('user', 'panel')),
+        actor_user_id TEXT,
+        occurred_at TEXT NOT NULL,
+        was_on_time INTEGER CHECK (
+            was_on_time IS NULL
+            OR (typeof(was_on_time) = 'integer' AND was_on_time IN (0, 1))
+        ),
+        CHECK (
+            (actor_source = 'user' AND actor_user_id IS NOT NULL)
+            OR (actor_source = 'panel' AND actor_user_id IS NULL)
+        ),
+        CHECK (
+            (event_type = 'completed' AND was_on_time IS NOT NULL)
+            OR (event_type = 'uncompleted')
+        )
+    )
+    """,
+]
+
 SCHEMA_V1_STATEMENTS: list[str] = [
     *SCHEMA_V1_CHILDREN_DDL,
     *SCHEMA_V1_ADMIN_USERS_DDL,
@@ -216,6 +318,8 @@ SCHEMA_V1_STATEMENTS: list[str] = [
     *SCHEMA_V1_TASK_DEFINITIONS_DDL,
     *SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
     *SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
+    *SCHEMA_V1_TASK_INSTANCES_DDL,
+    *SCHEMA_V1_COMPLETION_EVENTS_DDL,
 ]
 
 
