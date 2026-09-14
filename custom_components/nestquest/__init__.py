@@ -66,19 +66,27 @@ async def _preflight_existing_file(
     that rewrites the header byte 18/19 and can create -wal/-shm
     sidecars — which would modify a corrupt file before detection and
     break the leave-untouched guarantee.  This preflight therefore
-    validates the WHOLE file with a READ-ONLY connection (mode=ro URI,
-    PRAGMA integrity_check, run on the executor like every other DB
-    call): corruption anywhere fails there, before anything is
-    written.  Missing/empty files skip the preflight (they are created
-    fresh by the real open).
+    validates the WHOLE file with a READ-ONLY connection (mode=ro +
+    immutable=1 URI, PRAGMA integrity_check, run on the executor like
+    every other DB call): corruption anywhere fails there, before
+    anything is written.  ``immutable=1`` is SQLite's documented
+    guarantee that the connection performs NO writes and creates NO
+    sidecars — even a WAL-header file gets its -wal/-shm reads served
+    without creating the shared-memory file.  Missing/empty files skip
+    the preflight (they are created fresh by the real open).  All
+    filesystem stat/URI work runs inside the executor job with the
+    probe so the event loop never touches disk.
     """
-    if not db_path.exists() or db_path.stat().st_size == 0:
-        return
-    # Properly escape the path: '#'/'?'/'%' in a directory or file name
-    # would otherwise be parsed as URI fragments/parameters/escapes.
-    uri = db_path.resolve().as_uri() + "?mode=ro"
-
     def _probe() -> None:
+        # The file-state check and URI construction live inside the
+        # executor job: exists/stat/resolve are disk I/O.
+        if not db_path.exists() or db_path.stat().st_size == 0:
+            return
+        # Properly escape the path: '#'/'?'/'%' in a directory or file
+        # name would otherwise be parsed as URI fragments/parameters/
+        # escapes.  immutable=1: SQLite guarantees no writes and no
+        # sidecar creation from this connection.
+        uri = db_path.resolve().as_uri() + "?mode=ro&immutable=1"
         conn = sqlite3.connect(uri, uri=True)
         try:
             row = conn.execute("PRAGMA integrity_check").fetchone()

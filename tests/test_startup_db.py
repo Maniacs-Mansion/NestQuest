@@ -250,6 +250,38 @@ def test_migration_stage_corruption_leaves_db_and_sidecars_untouched(
     assert not (tmp_path / "nestquest.db-shm").exists()
 
 
+def test_wal_mode_corruption_leaves_file_and_sidecars_untouched(
+    tmp_path, monkeypatch
+) -> None:
+    """A corrupt WAL-HEADER file must be rejected without creating
+    -shm sidecars from the read-only preflight itself.
+
+    The immutable=1 probe URI is what guarantees a read-only
+    connection creates no sidecars even for a WAL-header database; the
+    sidecar assertions after the call prove it.
+    """
+    db_path = tmp_path / "nestquest.db"
+    # WAL fixture: created via the wrapper (journal_mode=WAL persists).
+    _valid_database(db_path)
+    data = bytearray(db_path.read_bytes())
+    # Corrupt the WAL header flag region: bytes 18/19 hold the
+    # read/write version numbers (2 = WAL).  Flip them to garbage so
+    # the file claims a broken journal mode.
+    assert len(data) > 64
+    data[18] = 0x99
+    data[19] = 0x99
+    db_path.write_bytes(bytes(data))
+    corrupt_bytes = db_path.read_bytes()
+    digest = hashlib.sha256(corrupt_bytes).hexdigest()
+
+    with pytest.raises(ConfigEntryNotReady):
+        _run(_async_open_database(_make_hass_mock(), db_path))
+
+    # Main file byte-identical; no -shm appeared from the probe.
+    assert hashlib.sha256(db_path.read_bytes()).hexdigest() == digest
+    assert not (tmp_path / "nestquest.db-shm").exists()
+
+
 def test_open_failure_closes_connection_when_opened(
     tmp_path, monkeypatch
 ) -> None:
