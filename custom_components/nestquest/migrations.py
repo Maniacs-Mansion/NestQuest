@@ -41,6 +41,7 @@ handed an open, working connection.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Sequence
 
@@ -119,6 +120,24 @@ async def read_schema_version(database: NestQuestDatabase) -> int:
     return version
 
 
+#: One asyncio.Lock per connection wrapper, created lazily and bound to
+#: the running loop, serializing whole apply_migrations runs so two
+#: concurrent callers on one connection queue instead of colliding on
+#: the wrapper's single-transaction rule.
+_MIGRATION_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _migration_lock(database: NestQuestDatabase) -> asyncio.Lock:
+    """Return the migration lock bound to ``database``'s running loop."""
+    loop = asyncio.get_running_loop()
+    key = (id(database), id(loop))
+    lock = _MIGRATION_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _MIGRATION_LOCKS[key] = lock
+    return lock
+
+
 async def apply_migrations(
     database: NestQuestDatabase,
     migrations: Sequence[Sequence[str]] = MIGRATIONS,
@@ -138,68 +157,80 @@ async def apply_migrations(
     a non-idempotent migration.  Under the transaction's lock the
     second runner sees the first runner's stamp and skips.
 
+    Runners on one connection are serialized by an asyncio lock held
+    for the whole decide-and-apply span: NestQuestDatabase rejects a
+    second transaction while one is active (RuntimeError), so
+    concurrent callers must queue, and the lock makes that queueing
+    explicit.  The loser of the race re-reads the version once it
+    acquires the lock, sees the winner's stamp, and applies nothing.
+
     Raises whatever the failing migration raised, with the database
     rolled back to its prior version and prior rows untouched.
     """
-    await _create_version_table(database)
-    current = await read_schema_version(database)
-    latest = len(migrations)
+    async with _migration_lock(database):
+        await _create_version_table(database)
+        current = await read_schema_version(database)
+        latest = len(migrations)
 
-    if current > latest:
-        raise RuntimeError(
-            f"Database schema version {current} is newer than this "
-            f"integration understands (latest known: {latest}); "
-            "downgrades are not supported"
-        )
-
-    if current == latest:
-        LOGGER.debug(
-            "NestQuest schema already at version %d; no migrations to apply",
-            current,
-        )
-        return current
-
-    for target in range(current + 1, latest + 1):
-        applied = False
-        async with database.transaction():
-            # Re-read the version INSIDE the write transaction.  The
-            # version read before the loop is advisory (it sizes the
-            # loop and enables the byte-identical no-op fast path), but
-            # two runners on one connection interleave between their
-            # reads: the wrapper serializes individual statements, not
-            # the read-decide-apply decision.  Re-reading under the
-            # transaction's lock means the loser of the race sees the
-            # winner's stamp and skips instead of re-applying a
-            # non-idempotent migration with a stale version.
-            in_tx_version = await read_schema_version(database)
-            if in_tx_version > latest:
-                raise RuntimeError(
-                    f"Database schema version {in_tx_version} is newer "
-                    f"than this integration understands (latest known: "
-                    f"{latest}); downgrades are not supported"
-                )
-            if in_tx_version < target:
-                for sql in migrations[target - 1]:
-                    await database.execute(sql)
-                # INSERT keyed on the singleton row (id = 1): a fresh
-                # file has no row yet, and migration 1 is the only
-                # migration a version-0 database can run, so the row is
-                # seeded by the same statement batch when needed.
-                # UPDATE alone would silently match zero rows there.
-                await database.execute(
-                    f"INSERT INTO {VERSION_TABLE} (id, version) "
-                    "VALUES (1, ?) "
-                    "ON CONFLICT (id) DO UPDATE SET version = "
-                    "excluded.version",
-                    (target,),
-                )
-                applied = True
-        if applied:
-            LOGGER.info(
-                "NestQuest schema migrated to version %d (%d statement%s)",
-                target,
-                len(migrations[target - 1]),
-                "s" if len(migrations[target - 1]) != 1 else "",
+        if current > latest:
+            raise RuntimeError(
+                f"Database schema version {current} is newer than this "
+                f"integration understands (latest known: {latest}); "
+                "downgrades are not supported"
             )
 
-    return latest
+        if current == latest:
+            LOGGER.debug(
+                "NestQuest schema already at version %d; "
+                "no migrations to apply",
+                current,
+            )
+            return current
+
+        for target in range(current + 1, latest + 1):
+            applied = False
+            async with database.transaction():
+                # Re-read the version INSIDE the write transaction: the
+                # outer read was advisory, and the wrapper serializes
+                # individual statements, not the read-decide-apply
+                # decision.  Under the transaction's lock the version
+                # cannot change between the read and the stamp, and the
+                # loser of an interleaved race (a queued second caller
+                # re-running apply_migrations after the winner already
+                # migrated) re-reads here, sees the winner's stamp, and
+                # skips instead of re-applying a non-idempotent
+                # migration with a stale version.
+                in_tx_version = await read_schema_version(database)
+                if in_tx_version > latest:
+                    raise RuntimeError(
+                        f"Database schema version {in_tx_version} is newer "
+                        f"than this integration understands (latest known: "
+                        f"{latest}); downgrades are not supported"
+                    )
+                if in_tx_version < target:
+                    for sql in migrations[target - 1]:
+                        await database.execute(sql)
+                    # INSERT keyed on the singleton row (id = 1): a
+                    # fresh file has no row yet, and migration 1 is the
+                    # only migration a version-0 database can run, so
+                    # the row is seeded by the same statement batch
+                    # when needed.  UPDATE alone would silently match
+                    # zero rows there.
+                    await database.execute(
+                        f"INSERT INTO {VERSION_TABLE} (id, version) "
+                        "VALUES (1, ?) "
+                        "ON CONFLICT (id) DO UPDATE SET version = "
+                        "excluded.version",
+                        (target,),
+                    )
+                    applied = True
+            if applied:
+                LOGGER.info(
+                    "NestQuest schema migrated to version %d "
+                    "(%d statement%s)",
+                    target,
+                    len(migrations[target - 1]),
+                    "s" if len(migrations[target - 1]) != 1 else "",
+                )
+
+        return latest
