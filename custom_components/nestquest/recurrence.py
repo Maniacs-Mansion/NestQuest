@@ -428,15 +428,28 @@ def occurs_on(rule: ScheduleRule, target: datetime.date) -> bool:
     # Dispatch FIRST: an unimplemented shape must raise loudly even for
     # dates outside the window, never silently evaluate to False.
     shape = rule.rule_type
-    if shape is not RuleType.DAILY:
+    if shape not in (RuleType.DAILY, RuleType.WEEKLY, RuleType.CUSTOM_DAYS):
         raise NotImplementedError(
             f"occurs_on for {shape} lands with its own engine task "
             "(Features 04 task sequence)"
         )
     if not _within_window(rule, target):
         return False
-    offset = (target - _parse_date(rule.start_date)).days
-    return offset % rule.interval == 0
+    if shape is RuleType.DAILY:
+        offset = (target - _parse_date(rule.start_date)).days
+        return offset % rule.interval == 0
+    # WEEKLY / CUSTOM_DAYS: whole-week anchoring from start_date, never
+    # ISO week numbers (Feature 04/05 guardrail: 53-week years flip ISO
+    # parity on January 1st; anchor arithmetic does not).
+    anchor = _parse_date(rule.start_date)
+    if shape is RuleType.CUSTOM_DAYS:
+        interval = 1
+    else:
+        interval = rule.interval
+    week_offset = (target - anchor).days // 7
+    if week_offset % interval != 0:
+        return False
+    return target.weekday() in rule.weekday_set
 
 
 def occurrences_between(
@@ -448,7 +461,9 @@ def occurrences_between(
     inverted bounds; a window entirely outside [rule.start_date,
     rule.end_date] yields an empty list.
     """
-    if rule.rule_type is not RuleType.DAILY:
+    if rule.rule_type not in (
+        RuleType.DAILY, RuleType.WEEKLY, RuleType.CUSTOM_DAYS
+    ):
         raise NotImplementedError(
             f"occurrences_between for {rule.rule_type} lands with its own "
             "engine task (Features 04 task sequence)"
