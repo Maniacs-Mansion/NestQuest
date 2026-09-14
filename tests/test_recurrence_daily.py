@@ -217,7 +217,7 @@ def test_occurs_on_rejects_unimplemented_shapes_loudly() -> None:
     """Monthly/yearly land with their own engine tasks; a loud
     NotImplementedError beats a silent wrong answer."""
     rule = ScheduleRule(
-        rule_type=RuleType.MONTHLY_DAY, day_of_month=15,
+        rule_type=RuleType.YEARLY, month=6,
         start_date="2026-09-01",
     )
     with pytest.raises(NotImplementedError):
@@ -273,7 +273,7 @@ def test_occurs_on_unimplemented_shape_raises_even_outside_window() -> None:
     """An unimplemented shape must raise whether the date is inside or
     outside the window — silent False would hide a missing engine."""
     rule = ScheduleRule(
-        rule_type=RuleType.MONTHLY_DAY, day_of_month=15,
+        rule_type=RuleType.YEARLY, month=6,
         start_date="2026-09-01", end_date="2026-09-10",
     )
     # Before start, inside window, after end: all must raise.
@@ -286,7 +286,7 @@ def test_occurrences_between_unimplemented_shape_raises_even_disjoint(
     tmp_path,
 ) -> None:
     rule = ScheduleRule(
-        rule_type=RuleType.MONTHLY_DAY, day_of_month=15,
+        rule_type=RuleType.YEARLY, month=6,
         start_date="2026-09-01"
     )
     # A range entirely before the rule's start still raises: the shape

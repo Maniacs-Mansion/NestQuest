@@ -39,11 +39,16 @@ reach storage):
 - ``start_date`` is a strict ISO date; ``end_date`` is optional and,
   when present, on or after ``start_date``.
 
-Month-end policy (documented for Feature 04): a MONTHLY_DAY rule for
-the 31st does NOT fire in a 30-day month, and a YEARLY rule for
-February 29th does NOT fire in a non-leap year — the engine skips
-instead of clamping to month end, because clamping silently moves
-"the 31st" to "the 30th" and double-fires tasks.
+Month-end policy (implemented in :func:`_occurs_monthly_day` and
+documented for Feature 04): in each interval-eligible month, a
+MONTHLY_DAY rule for a day that does not exist in that month — the
+31st in April, the 30th or 29th in February, February 29th in a
+non-leap year — fires on the LAST day of the month instead of being
+skipped.  A monthly chore still happens in every eligible month,
+pinned to the month's end when its nominal date is absent; exactly one
+day per eligible month matches the rule (nominal day when it exists,
+month end when it does not).  The interval anchors on nominal months
+elapsed from start_date's month, so clamping never shifts the cadence.
 """
 from __future__ import annotations
 
@@ -418,6 +423,40 @@ def _within_window(rule: ScheduleRule, target: datetime.date) -> bool:
     return True
 
 
+def _month_end(year: int, month: int) -> int:
+    """The last calendar day of the given month (leap-aware)."""
+    if month == 12:
+        return 31
+    return (datetime.date(year, month + 1, 1)
+            - datetime.timedelta(days=1)).day
+
+
+def _occurs_monthly_day(rule: ScheduleRule, target: datetime.date) -> bool:
+    """MONTHLY_DAY evaluation with the documented month-end policy.
+
+    Policy: in each interval-eligible month, a rule for a day-of-month
+    that does not exist in that month (the 31st in April, the 30th in
+    February, the 29th of February in a non-leap year) fires on the
+    LAST day of that month instead of being skipped — the chore still
+    happens that month, pinned to the month's end when its nominal date
+    is absent.
+
+    The interval anchors on months ELAPSED from start_date's month: the
+    rule fires when the months between the anchor month and the target's
+    month form a multiple of the interval, keeping "every 2 months on
+    the 15th" aligned to the anchor month even when the firing lands on
+    a clamped month-end day.
+    """
+    anchor = _parse_date(rule.start_date)
+    months_elapsed = (
+        (target.year - anchor.year) * 12 + (target.month - anchor.month)
+    )
+    if months_elapsed % rule.interval != 0:
+        return False
+    month_end = _month_end(target.year, target.month)
+    return target.day == min(rule.day_of_month, month_end)
+
+
 def occurs_on(rule: ScheduleRule, target: datetime.date) -> bool:
     """Return True when ``rule`` fires on ``target``.
 
@@ -428,7 +467,10 @@ def occurs_on(rule: ScheduleRule, target: datetime.date) -> bool:
     # Dispatch FIRST: an unimplemented shape must raise loudly even for
     # dates outside the window, never silently evaluate to False.
     shape = rule.rule_type
-    if shape not in (RuleType.DAILY, RuleType.WEEKLY, RuleType.CUSTOM_DAYS):
+    if shape not in (
+        RuleType.DAILY, RuleType.WEEKLY, RuleType.CUSTOM_DAYS,
+        RuleType.MONTHLY_DAY,
+    ):
         raise NotImplementedError(
             f"occurs_on for {shape} lands with its own engine task "
             "(Features 04 task sequence)"
@@ -438,6 +480,8 @@ def occurs_on(rule: ScheduleRule, target: datetime.date) -> bool:
     if shape is RuleType.DAILY:
         offset = (target - _parse_date(rule.start_date)).days
         return offset % rule.interval == 0
+    if shape is RuleType.MONTHLY_DAY:
+        return _occurs_monthly_day(rule, target)
     # WEEKLY / CUSTOM_DAYS: whole-week anchoring from start_date, never
     # ISO week numbers (Feature 04/05 guardrail: 53-week years flip ISO
     # parity on January 1st; anchor arithmetic does not).
@@ -462,7 +506,8 @@ def occurrences_between(
     rule.end_date] yields an empty list.
     """
     if rule.rule_type not in (
-        RuleType.DAILY, RuleType.WEEKLY, RuleType.CUSTOM_DAYS
+        RuleType.DAILY, RuleType.WEEKLY, RuleType.CUSTOM_DAYS,
+        RuleType.MONTHLY_DAY,
     ):
         raise NotImplementedError(
             f"occurrences_between for {rule.rule_type} lands with its own "
