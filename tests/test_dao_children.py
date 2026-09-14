@@ -619,7 +619,10 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
     allowed_stmt = re.compile(
         r"^(INSERT|SELECT)", re.IGNORECASE
     )
-    found_probes = 0
+    #: The sanctioned probe per function: exactly one raw statement
+    #: INSERTing that table, inside a pytest.raises whose matcher is
+    #: IntegrityError (checked as an AST Name/Attribute chain).
+    probes_per_function: dict[str, int] = {name: 0 for name in probe_tables}
     for node in ast.walk(tree):
         if (
             not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -627,6 +630,17 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
         ):
             continue
         table, expected_verb = probe_tables[node.name]
+
+        def _unquote(rendered: str) -> str:
+            rendered = rendered.strip()
+            if len(rendered) >= 2 and rendered[0] == rendered[-1] and (
+                rendered[0] in "'\""
+            ):
+                return rendered[1:-1]
+            return rendered
+
+        # Collect every execute(...) statement and every raises-block
+        # with its full AST shape.
         raw_statements: list[tuple[ast.Await, str]] = []
         for sub in ast.walk(node):
             if (
@@ -637,57 +651,83 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
             ):
                 sql_arg = sub.value.args[0] if sub.value.args else None
                 rendered = ast.unparse(sql_arg) if sql_arg else ""
-                raw_statements.append((sub, rendered))
-        # Every statement in the sanctioned functions whose SQL names
-        # children/admin_users must be either (a) the sanctioned probe
-        # INSERT for that function's table, nested inside a
-        # pytest.raises whose matcher names IntegrityError, or (b) an
-        # INSERT/SELECT against a DIFFERENT table.  No UPDATE/DELETE.
-        def _unquote(rendered: str) -> str:
-            rendered = rendered.strip()
-            if len(rendered) >= 2 and rendered[0] == rendered[-1] and (
-                rendered[0] in "'\""
-            ):
-                return rendered[1:-1]
-            return rendered
+                raw_statements.append((sub, _unquote(rendered)))
+
+        def _raises_blocks():
+            """Yield (block, matcher_name, func_ok) for pytest.raises."""
+            for sub in ast.walk(node):
+                if not (
+                    isinstance(sub, ast.With)
+                    and sub.items
+                    and isinstance(sub.items[0].context_expr, ast.Call)
+                    and isinstance(
+                        sub.items[0].context_expr.func, ast.Attribute
+                    )
+                    and sub.items[0].context_expr.func.attr == "raises"
+                ):
+                    continue
+                call = sub.items[0].context_expr
+                # func must be pytest.raises: Attribute pytest.raises or
+                # bare `raises` imported from pytest with module prefix
+                # check via source (this file imports pytest).
+                func_src = ast.unparse(call.func)
+                matcher = ""
+                if call.args:
+                    matcher = ast.unparse(call.args[0])
+                yield sub, matcher, func_src.endswith("raises")
+
+        def _is_integrity_raises(matcher: str) -> bool:
+            """Exact AST match: the exception argument names IntegrityError."""
+            # unparse of sqlite3.IntegrityError / IntegrityError /
+            # sqlite3.errors.IntegrityError all END with IntegrityError
+            # as a complete dotted name; NotIntegrityError would end
+            # with it too, so require the char before to be non-word.
+            return re.search(
+                r"(?:^|[^A-Za-z0-9_])IntegrityError$", matcher
+            ) is not None
+
+        # INSERT OR variant / quoted / qualified names: normalize the
+        # SQL before matching so INSERT OR IGNORE INTO children,
+        # INSERT INTO [children], INSERT INTO "children" and
+        # INSERT INTO main.children all count as table inserts.
+        def _is_insert_into_table(rendered: str, table: str) -> bool:
+            normalized = re.sub(
+                r"INSERT(\s+OR\s+\w+)?\s+INTO\s+"
+                r"((main|temp)\s*\.\s*)?[`'\"]*(\[)?"
+                + table
+                + r"\b",
+                "TABLE_MATCH",
+                rendered,
+                flags=re.IGNORECASE,
+            )
+            return "TABLE_MATCH" in normalized
 
         for insert, rendered in raw_statements:
-            rendered = _unquote(rendered)
             if not any_table.search(rendered):
                 continue
-            verb_match = re.match(r"(\w+)", rendered.strip())
-            verb = verb_match.group(1).upper() if verb_match else ""
             assert allowed_stmt.match(rendered.strip()) is not None, (
                 f"{node.name}: raw {table} table SQL "
                 f"must be INSERT or SELECT, got: {rendered[:80]!r}"
             )
-            if re.search(rf"INSERT\s+INTO\s+{table}\b", rendered, re.I):
+            if _is_insert_into_table(rendered, table):
                 # This is the sanctioned probe: require pytest.raises
-                # with an IntegrityError matcher around it.
-                blocks = [
-                    (block, ast.unparse(block.items[0].context_expr.args))
-                    for block in node_body_raises(node)
-                    if block.items[0].context_expr.args
-                ]
+                # with an exact IntegrityError matcher around it.
                 inside = any(
                     block.lineno <= insert.lineno
                     and insert.end_lineno <= block.end_lineno
-                    and re.search(r"IntegrityError", matcher or "", re.I)
-                    and "pytest" in ast.unparse(
-                        block.items[0].context_expr.func
-                    )
-                    for block, matcher in blocks
+                    and _is_integrity_raises(matcher)
+                    and func_ok
+                    for block, matcher, func_ok in _raises_blocks()
                 )
                 assert inside, (
                     f"the raw {table} insert in {node.name} must be nested "
                     "in a pytest.raises(...IntegrityError...) block "
                     "(expected-to-fail constraint probe, not a write)"
                 )
-                found_probes += 1
+                probes_per_function[node.name] += 1
         # UPDATE/DELETE naming the tables anywhere in a sanctioned
         # function is forbidden outright.
         for _, rendered in raw_statements:
-            rendered = _unquote(rendered)
             if any_table.search(rendered) and re.match(
                 r"(UPDATE|DELETE)", rendered.strip(), re.IGNORECASE
             ):
@@ -695,24 +735,13 @@ def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
                     f"{node.name} must not hold UPDATE/DELETE SQL for "
                     f"children/admin_users: {rendered[:80]!r}"
                 )
-    assert found_probes == 2, (
-        "exactly two sanctioned raw constraint probes must exist"
+    assert all(
+        count == 1 for count in probes_per_function.values()
+    ) and len(probes_per_function) == 2, (
+        "each sanctioned function must hold exactly one raw constraint "
+        f"probe; found {probes_per_function}"
     )
 
-
-def node_body_raises(node):
-    """Yield every ``with pytest.raises(...)`` block in ``node``."""
-    import ast
-
-    for sub in ast.walk(node):
-        if (
-            isinstance(sub, ast.With)
-            and sub.items
-            and isinstance(sub.items[0].context_expr, ast.Call)
-            and isinstance(sub.items[0].context_expr.func, ast.Attribute)
-            and sub.items[0].context_expr.func.attr == "raises"
-        ):
-            yield sub
 
 
 def test_dao_test_file_uses_dao_not_raw_table_sql() -> None:
@@ -737,6 +766,7 @@ def test_dao_test_file_uses_dao_not_raw_table_sql() -> None:
     guard_names = {
         "test_children_and_admin_sql_lives_only_in_dao_module",
         "test_dao_test_file_uses_dao_not_raw_table_sql",
+        "test_dao_matrix_test_file_raw_probes_are_only_constraint_probes",
     }
     excluded: set[int] = set()
     for node in ast.walk(tree):
