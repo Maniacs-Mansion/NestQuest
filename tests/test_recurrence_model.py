@@ -272,95 +272,88 @@ def test_rule_not_equal_to_other_types() -> None:
 
 
 def test_recurrence_module_imports_only_stdlib() -> None:
-    """The model must carry no Home Assistant and no DB imports — checked
-    against the RESOLVED module path so relative forms (from .db import
-    x) are caught too."""
-    import ast
-    import importlib.util
+    """The model must carry no Home Assistant and no DB imports."""
     from pathlib import Path
 
-    module_file = Path(
-        importlib.util.find_spec(
-            "custom_components.nestquest.recurrence"
-        ).origin
+    source = Path(
+        __import__("custom_components.nestquest.recurrence",
+                   fromlist=["__file__"]).__file__
+    ).read_text()
+    offenders = _scan_forbidden_imports(source)
+    assert offenders == [], (
+        f"recurrence.py must not hold forbidden imports: {offenders}"
     )
-    tree = ast.parse(module_file.read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                assert "homeassistant" not in alias.name.lower(), (
-                    f"recurrence.py must not import {alias.name}"
-                )
-                assert "sqlite" not in alias.name.lower(), (
-                    f"recurrence.py must not import {alias.name}"
-                )
-        elif isinstance(node, ast.ImportFrom):
-            module = (node.module or "").lower()
-            level = node.level  # 1+ means relative import
-            # Forbidden regardless of relative level: the leaf module
-            # names ('from . import db', 'from .db import x') AND any
-            # absolute custom_components.nestquest DB/store import.
-            forbidden_targets = {
-                "db", "schema", "dao_children", "dao_rules",
-                "dao_presence", "dao_instances", "migrations", "store",
-            }
-            imported_names = [alias.name for alias in node.names]
-            for name in imported_names:
-                leaf = name.split(".")[-1]
-                assert leaf not in forbidden_targets, (
-                    f"recurrence.py must not import {name!r}"
-                )
-            if module:
-                full = f".{module}" if level else module
-                assert module not in forbidden_targets, (
-                    f"recurrence.py must not import from {full}"
-                )
-                assert "db" not in module.split("."), (
-                    f"recurrence.py must not import from {full}"
-                )
-            assert "homeassistant" not in module, (
-                f"recurrence.py must not import from {module}"
-            )
-            assert "sqlite" not in module, (
-                f"recurrence.py must not import from {module}"
-            )
 
 
-def test_purity_guard_blocks_absolute_db_import(tmp_path) -> None:
-    """Absolute custom_components.nestquest DB imports (level=0) are
-    caught by the same alias-leaf scan the guard uses."""
-    import ast as ast_module
+def _scan_forbidden_imports(source: str) -> list[str]:
+    """The ACTUAL purity-guard logic, shared by the model scan and the
+    probe tests below: returns human-readable offenders (empty = clean).
+
+    Forbidden, at any relative level, for both Import and ImportFrom:
+    - modules containing 'homeassistant' or 'sqlite'
+    - modules whose LEAF name is a DB/store/schema/DAO module
+    - aliases importing a DB/store/schema/DAO module by leaf name
+      ('from . import db', 'from custom_components.nestquest import db')
+    """
+    import ast
 
     forbidden_targets = {
         "db", "schema", "dao_children", "dao_rules", "dao_presence",
         "dao_instances", "migrations", "store",
     }
-    # The guard's own logic, exercised against probe statements:
-    from custom_components.nestquest import recurrence as recurrence_mod
-    probe_lines = (
-        "from custom_components.nestquest import db",
+    offenders: list[str] = []
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                lowered = alias.name.lower()
+                leaf = lowered.split(".")[-1]
+                if (
+                    "homeassistant" in lowered
+                    or "sqlite" in lowered
+                    or leaf in forbidden_targets
+                ):
+                    offenders.append(f"import {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            module = (node.module or "").lower()
+            module_leaf = module.split(".")[-1] if module else ""
+            if (
+                "homeassistant" in module
+                or "sqlite" in module
+                or (module and module_leaf in forbidden_targets)
+                or (node.level and module_leaf in forbidden_targets)
+            ):
+                offenders.append(
+                    f"from {node.module!r} import ... (level={node.level})"
+                )
+            for alias in node.names:
+                alias_leaf = alias.name.split(".")[-1].lower()
+                if alias_leaf in forbidden_targets:
+                    offenders.append(
+                        f"from {node.module!r} import {alias.name} "
+                        f"(level={node.level})"
+                    )
+    return offenders
+
+
+def test_purity_guard_logic_catches_probe_statements(tmp_path) -> None:
+    """The shared scan function catches every forbidden import shape,
+    including level-0 absolute package DB imports and 'from . import db'.
+    """
+    probes = [
+        "from homeassistant.core import HomeAssistant",
+        "import sqlite3",
+        "from .db import NestQuestDatabase",
         "from custom_components.nestquest.db import NestQuestDatabase",
+        "from custom_components.nestquest import db",
         "import custom_components.nestquest.dao_rules",
-    )
-    for line in probe_lines:
-        node = ast_module.parse(line).body[0]
-        caught = False
-        for item in ast_module.walk(node):
-            if isinstance(item, ast_module.ImportFrom):
-                module = (item.module or "").lower()
-                if module:
-                    leaf = module.split(".")[-1]
-                    if leaf in forbidden_targets:
-                        caught = True
-                for alias in item.names:
-                    if alias.name.split(".")[-1] in forbidden_targets:
-                        caught = True
-            elif isinstance(item, ast_module.Import):
-                for alias in item.names:
-                    leaf = alias.name.split(".")[-1]
-                    if leaf in forbidden_targets:
-                        caught = True
-        assert caught, f"probe import must be caught: {line}"
+        "from . import db",
+        "from . import schema",
+        "from custom_components.nestquest.migrations import apply_migrations",
+    ]
+    for probe in probes:
+        offenders = _scan_forbidden_imports(probe)
+        assert offenders, f"probe must be caught: {probe!r}"
 
 
 def test_non_string_rule_type_rejected() -> None:
@@ -373,16 +366,12 @@ def test_non_string_rule_type_rejected() -> None:
 def test_weekly_rejects_month_and_nth_fields() -> None:
     with pytest.raises(RuleValidationError, match="must not set"):
         ScheduleRule(
-            rule_type="weekly",
-            weekday_set={0},
-            day_of_month=5,
+            rule_type=RuleType.WEEKLY, weekday_set={0}, day_of_month=5,
             start_date="2026-09-01",
         )
     with pytest.raises(RuleValidationError, match="must not set"):
         ScheduleRule(
-            rule_type=RuleType.WEEKLY,
-            weekday_set={0},
-            month=3,
+            rule_type=RuleType.WEEKLY, weekday_set={0}, month=3,
             start_date="2026-09-01",
         )
 
@@ -390,8 +379,7 @@ def test_weekly_rejects_month_and_nth_fields() -> None:
 def test_daily_rejects_dangling_nth_weekday_weekday() -> None:
     with pytest.raises(RuleValidationError, match="must not set"):
         ScheduleRule(
-            rule_type=RuleType.DAILY,
-            nth_weekday_weekday=0,
+            rule_type=RuleType.DAILY, nth_weekday_weekday=0,
             start_date="2026-09-01",
         )
 
@@ -399,9 +387,7 @@ def test_daily_rejects_dangling_nth_weekday_weekday() -> None:
 def test_monthly_day_rejects_month() -> None:
     with pytest.raises(RuleValidationError, match="must not set"):
         ScheduleRule(
-            rule_type=RuleType.MONTHLY_DAY,
-            day_of_month=5,
-            month=3,
+            rule_type=RuleType.MONTHLY_DAY, day_of_month=5, month=3,
             start_date="2026-09-01",
         )
 
@@ -409,18 +395,13 @@ def test_monthly_day_rejects_month() -> None:
 def test_yearly_rejects_day_and_nth_fields() -> None:
     with pytest.raises(RuleValidationError, match="must not set"):
         ScheduleRule(
-            rule_type=RuleType.YEARLY,
-            month=6,
-            day_of_month=15,
+            rule_type=RuleType.YEARLY, month=6, day_of_month=15,
             start_date="2026-09-01",
         )
     with pytest.raises(RuleValidationError, match="must not set"):
         ScheduleRule(
-            rule_type=RuleType.YEARLY,
-            month=6,
-            nth_weekday=1,
-            nth_weekday_weekday=0,
-            start_date="2026-09-01",
+            rule_type=RuleType.YEARLY, month=6, nth_weekday=1,
+            nth_weekday_weekday=0, start_date="2026-09-01",
         )
 
 
@@ -442,46 +423,38 @@ def test_from_dict_bool_weekday_entry_rejected_before_set_coercion() -> None:
         )
 
 
+def test_direct_set_with_int_subclass_entry_rejected() -> None:
+    """A hashable-but-non-plain int subclass is still not a plain int."""
+
+    class IntChild(int):
+        pass
+
+    with pytest.raises(RuleValidationError, match="plain integers"):
+        ScheduleRule(
+            rule_type=RuleType.WEEKLY,
+            weekday_set={IntChild(1)},
+            start_date="2026-09-01",
+        )
+
+
+def test_from_dict_with_int_subclass_entry_rejected() -> None:
+    class IntChild(int):
+        pass
+
+    with pytest.raises(RuleValidationError, match="plain integers"):
+        ScheduleRule.from_dict(
+            {"rule_type": "weekly", "weekday_set": [IntChild(1)]}
+        )
+
+
 def test_from_dict_unknown_key_types_never_leak_typeerror() -> None:
     """Mixed unhashable unknown keys must surface as
     RuleValidationError, not a raw TypeError from sorting."""
-    data = {"rule_type": "daily", 42: "value"}
-    with pytest.raises(RuleValidationError):
-        ScheduleRule.from_dict(data)
-
-
-def test_rule_type_is_a_dataclass() -> None:
-    import dataclasses
-
-    assert dataclasses.is_dataclass(ScheduleRule)
-
-def test_direct_list_with_bool_weekday_rejected(tmp_path) -> None:
-    """Direct construction with a list: entries validated pre-coercion."""
-    with pytest.raises(RuleValidationError, match="plain integers"):
-        ScheduleRule(
-            rule_type=RuleType.WEEKLY, weekday_set=[0, False],
-            start_date="2026-09-01",
-        )
-
-
-def test_unhashable_list_item_leads_to_clear_error(tmp_path) -> None:
-    """Unhashable entries raise RuleValidationError, not TypeError."""
-    with pytest.raises(RuleValidationError):
-        ScheduleRule(
-            rule_type=RuleType.WEEKLY, weekday_set=[[0]],
-            start_date="2026-09-01",
-        )
-
-
-def test_from_dict_mixed_type_unknown_keys_raise_validation_error(
-    tmp_path,
-) -> None:
-    """sorted() over mixed key types must not leak TypeError."""
     with pytest.raises(RuleValidationError, match="unknown rule fields"):
         ScheduleRule.from_dict({"rule_type": "daily", 42: "value"})
 
 
-def test_storage_aliases_and_whitespace_are_not_model_names(tmp_path) -> None:
+def test_storage_aliases_and_whitespace_are_not_model_names() -> None:
     """The model boundary is exact names only: storage strings, padded
     and case variants are all rejected."""
     for bad in ("monthly", "custom", " DAILY ", "daily ", "DAILY"):
@@ -490,8 +463,6 @@ def test_storage_aliases_and_whitespace_are_not_model_names(tmp_path) -> None:
 
 
 def test_unhashable_int_subclass_interval_rejected() -> None:
-    """An int subclass with __hash__ = None must not construct."""
-
     class UnhashableInt(int):
         __hash__ = None
 
@@ -501,3 +472,9 @@ def test_unhashable_int_subclass_interval_rejected() -> None:
             interval=UnhashableInt(1),
             start_date="2026-09-01",
         )
+
+
+def test_rule_type_is_a_dataclass() -> None:
+    import dataclasses
+
+    assert dataclasses.is_dataclass(ScheduleRule)

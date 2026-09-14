@@ -131,7 +131,7 @@ def _validate_weekday_set(weekday_set) -> frozenset[int]:
             "weekday_set must not be empty for weekly/custom rules"
         )
     for entry in weekday_set:
-        if isinstance(entry, bool) or not isinstance(entry, int):
+        if not _is_plain_int(entry):
             raise RuleValidationError(
                 f"weekday_set entries must be plain integers, got "
                 f"{entry!r}"
@@ -367,9 +367,10 @@ class ScheduleRule:
         weekday_set = data.get("weekday_set")
         if isinstance(weekday_set, (list, tuple)):
             # Validate entries as plain ints BEFORE set() coercion, so a
-            # list like [0, False] cannot collapse False into 0.
+            # list like [0, False] cannot collapse False into 0 and an
+            # unhashable/int-subclass entry cannot leak a raw TypeError.
             for entry in weekday_set:
-                if isinstance(entry, bool) or not isinstance(entry, int):
+                if not _is_plain_int(entry):
                     raise RuleValidationError(
                         f"weekday_set entries must be plain integers, got "
                         f"{entry!r}"
