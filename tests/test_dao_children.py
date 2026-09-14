@@ -504,18 +504,23 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
         re.IGNORECASE,
     )
     offenders: list[str] = []
+    # test_dao_matrix.py is exempted for exactly its two sanctioned
+    # raw constraint-violation probes (NOT NULL on children, PRIMARY
+    # KEY on admin_users) — the Feature-02 closing suite must prove
+    # the schema surfaces violations to the DAO layer; its guard below
+    # covers everything else in that file.
+    probe_names = {
+        "test_matrix_children_crud_and_constraints",
+        "test_matrix_admin_users_crud_and_constraints",
+    }
     for root in scan_roots:
         for py in sorted(root.rglob("*.py")):
             relative = py.relative_to(repo_root).as_posix()
             if relative in allowed:
                 continue
             text = py.read_text()
-            if relative == "tests/test_startup_db.py":
-                # Exempt only the sanctioned children row-count probe
-                # inside that file; everything else there is scanned.
-                text = _strip_function_spans(
-                    text, {"test_setup_with_valid_file_preserves_rows"}
-                )
+            if relative == "tests/test_dao_matrix.py":
+                text = _strip_function_spans(text, probe_names)
             if sql_pattern.search(text):
                 offenders.append(relative)
     assert offenders == [], (
@@ -569,6 +574,259 @@ def test_startup_db_test_file_uses_dao_elsewhere() -> None:
     )
 
 
+def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
+    """Compensating self-scan for the matrix-file exemption, structurally
+    exact: parse the two sanctioned functions' ASTs and require that
+    (a) they contain NO other raw SQL naming children/admin_users, and
+    (b) every raw table insert among them is an expression nested inside
+    a ``pytest.raises`` context whose matcher mentions IntegrityError.
+    Any additional raw write elsewhere in the file fails this guard.
+    """
+    import ast
+    import re
+    from pathlib import Path
+
+    matrix = Path(__file__).parent / "test_dao_matrix.py"
+    text = matrix.read_text()
+    stripped = _strip_function_spans(
+        text,
+        {
+            "test_matrix_children_crud_and_constraints",
+            "test_matrix_admin_users_crud_and_constraints",
+        },
+    )
+    sql_pattern = re.compile(
+        r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM|"
+        r"FROM|JOIN)\s+[`'\"]*(\[)?(children|admin_users)\b",
+        re.IGNORECASE,
+    )
+    assert sql_pattern.search(stripped) is None, (
+        "test_dao_matrix.py raw children/admin_users SQL is limited to "
+        "the two sanctioned constraint probes"
+    )
+
+    tree = ast.parse(text)
+    probe_tables = {
+        "test_matrix_children_crud_and_constraints": ("children", "INSERT"),
+        "test_matrix_admin_users_crud_and_constraints": (
+            "admin_users",
+            "INSERT",
+        ),
+    }
+    any_table = re.compile(
+        r"\b(children|admin_users)\b", re.IGNORECASE
+    )
+    allowed_stmt = re.compile(
+        r"^(INSERT|SELECT)", re.IGNORECASE
+    )
+    #: The sanctioned probe per function: exactly one raw statement
+    #: INSERTing that table, inside a pytest.raises whose matcher is
+    #: IntegrityError (checked as an AST Name/Attribute chain).
+    probes_per_function: dict[str, int] = {name: 0 for name in probe_tables}
+    for node in ast.walk(tree):
+        if (
+            not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            or node.name not in probe_tables
+        ):
+            continue
+        table, expected_verb = probe_tables[node.name]
+
+        def _unquote(rendered: str) -> str:
+            rendered = rendered.strip()
+            if len(rendered) >= 2 and rendered[0] == rendered[-1] and (
+                rendered[0] in "'\""
+            ):
+                return rendered[1:-1]
+            return rendered
+
+        # Collect EVERY database SQL entry point (execute, fetch_one,
+        # fetch_all, execute_many) wherever it appears in the awaited
+        # expression tree: a bypass through fetch_one/execute_many OR a
+        # call wrapped in another awaitable (asyncio.gather, a helper
+        # coroutine, a Task) must be caught the same as a bare await.
+        raw_statements: list[tuple[ast.AST, str]] = []
+        for sub in ast.walk(node):
+            if (
+                isinstance(sub, ast.Call)
+                and isinstance(sub.value if False else sub.func, ast.Attribute)
+                and sub.func.attr
+                in {"execute", "fetch_one", "fetch_all", "execute_many"}
+            ):
+                sql_arg = sub.args[0] if sub.args else None
+                rendered = ast.unparse(sql_arg) if sql_arg else ""
+                raw_statements.append((sub, _unquote(rendered)))
+
+        def _raises_blocks():
+            """Yield (block, is_pytest_integrity) for pytest.raises blocks.
+
+            Structurally exact: the call func must resolve to
+            pytest.raises — Attribute(pytest, raises) or a bare Name
+            whose id is bound to pytest via the file's own import
+            section (validated below).  The matcher argument must be an
+            AST chain whose final segment is exactly IntegrityError (so
+            NotIntegrityError and fake.IntegrityError fail).
+            """
+            # Names bound to pytest's raises: parse the FILE's actual
+            # Import nodes in TWO passes so order cannot matter — pass
+            # one collects every binding pytest's raises gets (whatever
+            # alias), pass two rejects ANY competing binding of those
+            # names (or of 'pytest' itself) from a non-pytest import,
+            # wherever it appears.  A spoof imported BEFORE the genuine
+            # binding therefore still fails.
+            pytest_raises_aliases: set[str] = set()
+            for file_node in ast.walk(tree):
+                if (
+                    isinstance(file_node, ast.ImportFrom)
+                    and file_node.module == "pytest"
+                ):
+                    for alias in file_node.names:
+                        if alias.name == "raises":
+                            pytest_raises_aliases.add(
+                                alias.asname or alias.name
+                            )
+            raises_bindings: set[str] = set(pytest_raises_aliases)
+            for file_node in ast.walk(tree):
+                if isinstance(file_node, ast.ImportFrom):
+                    if file_node.module == "pytest":
+                        continue
+                    for alias in file_node.names:
+                        bound = alias.asname or alias.name
+                        if bound in raises_bindings | {"pytest"}:
+                            raise AssertionError(
+                                f"shadowed import of {bound!r} from "
+                                f"{file_node.module!r} defeats the "
+                                "pytest.raises probe validation"
+                            )
+                elif isinstance(file_node, ast.Import):
+                    # import fake_module as pytest (or as any raises
+                    # alias) fails closed.  A plain `import pytest`
+                    # (alias.name == 'pytest', no asname) is the genuine
+                    # module binding and is allowed.
+                    for alias in file_node.names:
+                        bound = alias.asname or alias.name
+                        genuine_pytest = (
+                            alias.name == "pytest" and alias.asname is None
+                        )
+                        if bound in raises_bindings | {"pytest"} and (
+                            not genuine_pytest
+                        ):
+                            raise AssertionError(
+                                f"import shadowing {bound!r} defeats the "
+                                "pytest.raises probe validation"
+                            )
+            for sub in ast.walk(node):
+                if not (
+                    isinstance(sub, ast.With)
+                    and sub.items
+                    and isinstance(sub.items[0].context_expr, ast.Call)
+                ):
+                    continue
+                call = sub.items[0].context_expr
+                func = call.func
+                if isinstance(func, ast.Attribute):
+                    if (
+                        func.attr != "raises"
+                        or not isinstance(func.value, ast.Name)
+                        or func.value.id != "pytest"
+                    ):
+                        continue
+                elif isinstance(func, ast.Name):
+                    if func.id not in raises_bindings:
+                        continue
+                else:
+                    continue
+                matcher_ok = False
+                if call.args:
+                    matcher = call.args[0]
+                    matcher_ok = _is_integrity_error_node(matcher)
+                yield sub, matcher_ok
+
+        def _is_integrity_error_node(matcher) -> bool:
+            """True for an AST chain of Name/Attribute ending exactly at
+            IntegrityError: every Attribute base must itself be a Name
+            or Attribute (a Call base like __import__('x') fails)."""
+            node = matcher
+            while isinstance(node, ast.Attribute):
+                node = node.value
+            if not isinstance(node, ast.Name):
+                return False
+            final = matcher
+            while isinstance(final, ast.Attribute):
+                final = final.attr
+            return (
+                isinstance(final, str)
+                and ast.unparse(matcher).split(".")[-1] == "IntegrityError"
+            )
+
+        # INSERT OR variant / quoted / qualified / schema-qualified
+        # names: normalize the SQL so ANY spelling of an insert into
+        # the table counts as a table insert and requires the raises
+        # block.  Strip quotes/brackets/backticks from identifiers and
+        # drop any schema qualifier, whatever it is.
+        def _is_insert_into_table(rendered: str, table: str) -> bool:
+            insert_match = re.search(
+                r"\bINSERT(\s+OR\s+\w+)?\s+INTO\s+(.+)",
+                rendered,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if not insert_match:
+                return False
+            target = insert_match.group(2)
+            # Tokenize the target's leading identifier: strip quotes
+            # and brackets, take the LAST dot-separated segment,
+            # casefolded so 'CHILDREN' cannot bypass the lowercase
+            # table name the scan looks for.
+            identifier = re.split(r"[\s(]", target, maxsplit=1)[0]
+            segments = re.split(r"\.", identifier)
+            last = segments[-1].strip("`'\"[]")
+            return last.casefold() == table.casefold()
+
+        # In a sanctioned function, EVERY raw statement naming either
+        # table must be exactly that function's one expected-table
+        # constraint insert — an admin_users insert inside the children
+        # function (or vice versa) is a bypass attempt and fails here,
+        # as does any second insert of the expected table.
+        for stmt_node, rendered in raw_statements:
+            if not any_table.search(rendered):
+                continue
+            assert _is_insert_into_table(rendered, table), (
+                f"{node.name}: raw statement naming the other table is "
+                f"forbidden; only the {table} probe is sanctioned: "
+                f"{rendered[:80]!r}"
+            )
+            # This is the sanctioned probe: require pytest.raises
+            # with an exact IntegrityError matcher around it.
+            inside = any(
+                block.lineno <= stmt_node.lineno
+                and stmt_node.end_lineno <= block.end_lineno
+                and matcher_ok
+                for block, matcher_ok in _raises_blocks()
+            )
+            assert inside, (
+                f"the raw {table} insert in {node.name} must be nested "
+                "in a pytest.raises(...IntegrityError...) block "
+                "(expected-to-fail constraint probe, not a write)"
+            )
+            probes_per_function[node.name] += 1
+        # UPDATE/DELETE naming the tables anywhere in a sanctioned
+        # function is forbidden outright.
+        for _, rendered in raw_statements:
+            if any_table.search(rendered) and re.match(
+                r"(UPDATE|DELETE)", rendered.strip(), re.IGNORECASE
+            ):
+                raise AssertionError(
+                    f"{node.name} must not hold UPDATE/DELETE SQL for "
+                    f"children/admin_users: {rendered[:80]!r}"
+                )
+    assert all(
+        count == 1 for count in probes_per_function.values()
+    ) and len(probes_per_function) == 2, (
+        "each sanctioned function must hold exactly one raw constraint "
+        f"probe; found {probes_per_function}"
+    )
+
+
+
 def test_dao_test_file_uses_dao_not_raw_table_sql() -> None:
     """This test module must exercise the DAO, not raw SQL, for these
     tables.  The two guard functions in this file necessarily mention
@@ -591,6 +849,7 @@ def test_dao_test_file_uses_dao_not_raw_table_sql() -> None:
     guard_names = {
         "test_children_and_admin_sql_lives_only_in_dao_module",
         "test_dao_test_file_uses_dao_not_raw_table_sql",
+        "test_dao_matrix_test_file_raw_probes_are_only_constraint_probes",
     }
     excluded: set[int] = set()
     for node in ast.walk(tree):
