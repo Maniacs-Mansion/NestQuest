@@ -303,6 +303,33 @@ def test_children_is_active_check_enforced(tmp_path) -> None:
         _run(database.close())
 
 
+@pytest.mark.parametrize(
+    ("column", "bad_value"),
+    [
+        ("sort_order", "abc"),
+        ("sort_order", 1.5),
+        ("is_active", "abc"),
+        ("is_active", 1.5),
+    ],
+)
+def test_children_integer_columns_reject_text_and_fraction(
+    tmp_path, column, bad_value
+) -> None:
+    database = _open_db(tmp_path / f"children-{column}-typeof.db")
+    try:
+        _apply(database)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _run(
+                database.execute(
+                    f"INSERT INTO children (display_name, {column}, created_at) "
+                    "VALUES (?, ?, ?)",
+                    ("Ada", bad_value, "2026-09-13T00:00:00+00:00"),
+                )
+            )
+    finally:
+        _run(database.close())
+
+
 def test_children_created_at_not_null_enforced(tmp_path) -> None:
     database = _open_db(tmp_path / "created-at.db")
     try:
@@ -484,6 +511,93 @@ def test_schedule_rules_interval_zero_fails(tmp_path) -> None:
         _apply(database)
         with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
             _insert_rule(database, interval=0)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize("bad_interval", ["abc", 1.5])
+def test_schedule_rules_interval_non_integer_fails(
+    tmp_path, bad_interval
+) -> None:
+    database = _open_db(tmp_path / f"interval-{type(bad_interval).__name__}.db")
+    try:
+        _apply(database)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_rule(database, interval=bad_interval)
+    finally:
+        _run(database.close())
+
+
+def test_schedule_rules_interval_integer_one_succeeds(tmp_path) -> None:
+    database = _open_db(tmp_path / "interval-one.db")
+    try:
+        _apply(database)
+        rule_id = _insert_rule(database, interval=1)
+        row = _run(
+            database.fetch_one(
+                "SELECT interval FROM schedule_rules WHERE id = ?", (rule_id,)
+            )
+        )
+        assert row == (1,)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize(
+    ("column", "bad_value"),
+    [
+        ("day_of_month", "abc"),
+        ("day_of_month", 1.5),
+        ("nth_weekday", "abc"),
+        ("nth_weekday", 1.5),
+        ("month", "abc"),
+        ("month", 1.5),
+    ],
+)
+def test_schedule_rules_integer_columns_reject_text_and_fraction(
+    tmp_path, column, bad_value
+) -> None:
+    database = _open_db(tmp_path / f"{column}-typeof.db")
+    try:
+        _apply(database)
+        overrides: dict[str, object] = {"rule_type": "monthly", "weekday_set": None}
+        overrides[column] = bad_value
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_rule(database, **overrides)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize(
+    "bad_weekday_set",
+    ["", "x", "7", "0,x", "0,8", "0,", "0,1,2,3,4,5,6,0"],
+)
+def test_schedule_rules_weekday_set_invalid_csv_fails(
+    tmp_path, bad_weekday_set
+) -> None:
+    database = _open_db(tmp_path / "weekday-set-invalid.db")
+    try:
+        _apply(database)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_rule(database, weekday_set=bad_weekday_set)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize("weekday_set", ["0", "6", "0,1,2,3,4,5,6"])
+def test_schedule_rules_weekday_set_valid_csv_succeeds(
+    tmp_path, weekday_set
+) -> None:
+    database = _open_db(tmp_path / "weekday-set-valid.db")
+    try:
+        _apply(database)
+        rule_id = _insert_rule(database, weekday_set=weekday_set)
+        row = _run(
+            database.fetch_one(
+                "SELECT weekday_set FROM schedule_rules WHERE id = ?", (rule_id,)
+            )
+        )
+        assert row == (weekday_set,)
     finally:
         _run(database.close())
 
@@ -701,6 +815,28 @@ def test_task_definitions_is_active_check_enforced(tmp_path) -> None:
         _insert_rule(database)
         with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
             _insert_definition(database, child_id=1, rule_id=1, is_active=2)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize("bad_is_active", ["abc", 1.5])
+def test_task_definitions_is_active_non_integer_fails(
+    tmp_path, bad_is_active
+) -> None:
+    database = _open_db(tmp_path / "definitions-is-active-typeof.db")
+    try:
+        _apply(database)
+        _run(
+            database.execute(
+                "INSERT INTO children (display_name, created_at) VALUES (?, ?)",
+                ("Ada", "2026-09-13T00:00:00+00:00"),
+            )
+        )
+        _insert_rule(database)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_definition(
+                database, child_id=1, rule_id=1, is_active=bad_is_active
+            )
     finally:
         _run(database.close())
 
