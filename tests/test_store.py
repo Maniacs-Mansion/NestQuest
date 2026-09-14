@@ -143,18 +143,19 @@ def test_init_module_never_opens_or_executes_sqlite() -> None:
         Path(store.__file__).parent / "__init__.py"
     ).read_text(encoding="utf-8")
     # The preflight connect must be the URI read-only form, and only
-    # SELECT statements may run through it.
+    # SELECT statements and the integrity_check PRAGMA may run there.
     assert "sqlite3.connect(uri, uri=True)" in init_path
     assert "?mode=ro" in init_path
+    assert 'PRAGMA integrity_check' in init_path
     forbidden = re.compile(
         r"sqlite3\s*\.\s*connect(?!\(\s*uri\s*,)"
-        r"|\bconn(ection)?\s*\.\s*execute\s*\(\s*[\"'](?!SELECT)"
+        r"|\bconn(ection)?\s*\.\s*execute\s*\(\s*[\"'](?!SELECT\s|PRAGMA\s+integrity_check)"
         r"|\bexecutemany\b|\bexecutescript\b",
         re.IGNORECASE,
     )
     assert forbidden.search(init_path) is None, (
         "__init__.py may use sqlite3 only for exception typing and the "
-        "read-only corruption preflight"
+        "read-only corruption preflight (SELECT + integrity_check)"
     )
 
 

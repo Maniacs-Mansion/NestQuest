@@ -74,7 +74,9 @@ async def _preflight_existing_file(
     """
     if not db_path.exists() or db_path.stat().st_size == 0:
         return
-    uri = f"file:{db_path}?mode=ro"
+    # Properly escape the path: '#'/'?'/'%' in a directory or file name
+    # would otherwise be parsed as URI fragments/parameters/escapes.
+    uri = db_path.resolve().as_uri() + "?mode=ro"
 
     def _probe() -> None:
         conn = sqlite3.connect(uri, uri=True)
@@ -84,8 +86,12 @@ async def _preflight_existing_file(
             conn.close()
         verdict = row[0] if row else "missing"
         if verdict != "ok":
+            # A non-ok integrity verdict IS corruption: raise with the
+            # verdict text (which matches the corruption markers) and
+            # the NOTADB code so classification is code-based.
             raise sqlite3.DatabaseError(
-                f"integrity_check on read-only probe failed: {verdict}"
+                f"integrity_check verdict {verdict!r} on read-only "
+                f"probe: file is not a database"
             )
 
     try:
@@ -93,15 +99,18 @@ async def _preflight_existing_file(
         # harness's async_add_executor_job is awaitable too).
         await hass.async_add_executor_job(_probe)
     except sqlite3.DatabaseError as err:
+        # Non-ok integrity verdicts are corruption, full stop: there is
+        # no benign reading of a failed whole-file integrity check, so
+        # ANY DatabaseError out of the probe that carries a corruption
+        # marker or code propagates as corruption.  Only exotic probe
+        # failures that classify as non-corruption (e.g. a transient
+        # 'database is locked' on the read) are downgraded to a debug
+        # log, letting the real open path surface them.
         if _is_corruption_error(err):
             raise
-        # Read-only probing can fail for non-corruption reasons (e.g.
-        # a transient lock); the real open path will surface those.
-        _LOGGER.debug(
-            "NestQuest preflight read of %s failed (non-corruption): %s",
-            db_path,
-            err,
-        )
+        raise sqlite3.DatabaseError(
+            f"read-only corruption probe of {db_path} failed: {err}"
+        ) from err
 
 async def _async_open_database(
     hass: HomeAssistant, db_path: Path

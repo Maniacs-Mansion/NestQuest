@@ -178,18 +178,17 @@ def test_corrupt_file_raises_not_ready_never_raw_error(tmp_path) -> None:
 
 
 def test_migration_stage_corruption_leaves_db_and_sidecars_untouched(
-    tmp_path,
+    tmp_path, monkeypatch
 ) -> None:
-    """A valid header with a corrupt LATER page is detected during
-    migrations, AFTER the read-write open has switched the file to WAL.
-    The leave-untouched guarantee must still hold byte-for-byte for
-    the main file AND no WAL/SHM sidecars may be left behind for the
-    owner to clean up.
+    """A valid header with a corrupt LATER page must be rejected by the
+    whole-file read-only preflight BEFORE the read-write open can
+    switch the journal mode to WAL.
 
     The fixture is deliberately a ROLLBACK-JOURNAL file (created with
     plain sqlite3, default journal_mode=delete, NOT via the wrapper):
     that is the case where the WAL transition actually rewrites the
-    header — a WAL-mode fixture would mask the write under test.
+    header — a WAL-mode fixture would mask the write under test.  The
+    open() spy proves the read-write open was never reached.
     """
     db_path = tmp_path / "nestquest.db"
     conn = sqlite3.connect(db_path)
@@ -219,9 +218,29 @@ def test_migration_stage_corruption_leaves_db_and_sidecars_untouched(
     corrupt_bytes = db_path.read_bytes()
     digest = hashlib.sha256(corrupt_bytes).hexdigest()
 
+    # Track whether the read-write open is reached at all: the whole
+    # preflight must reject this corruption BEFORE NestQuestDatabase
+    # .open() is ever called, which is the only way the file can stay
+    # byte-identical (the open persists WAL, rewriting the header).
+    open_calls: list[str] = []
+    original_open = NestQuestDatabase.open
+
+    async def _spy_open(self, path):
+        open_calls.append(str(path))
+        return await original_open(self, path)
+
+    monkeypatch.setattr(NestQuestDatabase, "open", _spy_open)
+
     with pytest.raises(ConfigEntryNotReady) as excinfo:
         _run(_async_open_database(_make_hass_mock(), db_path))
     assert isinstance(excinfo.value.__cause__, sqlite3.DatabaseError)
+
+    # The corruption was caught at the preflight: the read-write open
+    # (and with it the WAL header rewrite) was never attempted.
+    assert open_calls == [], (
+        "whole-file preflight must reject corruption before the "
+        "read-write open can transition the journal mode"
+    )
 
     # The main file is byte-identical to the corrupt state we handed in.
     assert hashlib.sha256(db_path.read_bytes()).hexdigest() == digest
