@@ -270,22 +270,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             db = await _async_open_database(
                 hass, await async_get_db_path(hass)
             )
-            stored_admin_ids = (
-                entry.options.get(CONF_ADMIN_USER_IDS)
-                or entry.data.get(CONF_ADMIN_USER_IDS)
-            )
-            context = getattr(entry, "context", None)
-            context_user_id = (
-                context.get("user_id")
-                if isinstance(context, dict)
-                else None
-            )
-            await seed_setup_admin(
-                db,
-                stored_admin_ids=stored_admin_ids,
-                context_user_id=context_user_id,
-                owner_ids=await _async_owner_user_ids(hass),
-            )
+            try:
+                stored_admin_ids = (
+                    entry.options.get(CONF_ADMIN_USER_IDS)
+                    or entry.data.get(CONF_ADMIN_USER_IDS)
+                )
+                context = getattr(entry, "context", None)
+                context_user_id = (
+                    context.get("user_id")
+                    if isinstance(context, dict)
+                    else None
+                )
+                await seed_setup_admin(
+                    db,
+                    stored_admin_ids=stored_admin_ids,
+                    context_user_id=context_user_id,
+                    owner_ids=await _async_owner_user_ids(hass),
+                )
+            except BaseException:
+                # A seeding failure must not leak the just-opened
+                # connection: close it before the error propagates, so
+                # HA's setup retry starts from a clean handle (the
+                # first-setup path closes symmetrically).
+                await db.close()
+                raise
             existing.database = db
         entry.runtime_data = existing
         return True

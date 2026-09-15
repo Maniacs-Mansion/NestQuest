@@ -375,3 +375,43 @@ def test_seed_owner_ids_argument(tmp_path) -> None:
         return seeded
 
     _with_db(tmp_path, "seed-owner-arg.db")(_body)
+
+
+async def test_reopened_setup_failure_closes_database(
+    hass, make_entry, monkeypatch
+) -> None:
+    """A seeding failure on the reopened-record path closes the just-
+    opened connection before re-raising (no leaked handles across HA's
+    setup retries)."""
+    import pytest as pytest_module
+    from unittest.mock import AsyncMock
+
+    import custom_components.nestquest as nestquest_module
+    from custom_components.nestquest.db import NestQuestDatabase
+
+    # First: a successful setup to create the runtime record and file.
+    entry = await _setup_entry(hass, make_entry(), hass.registry)
+    await async_unload_entry(hass, entry)
+
+    # Now a re-setup whose seeding fails after the reopen.
+    async def _failing_seed(database, **kwargs):
+        raise RuntimeError("seed boom")
+
+    monkeypatch.setattr(
+        nestquest_module, "seed_setup_admin", _failing_seed, raising=True
+    )
+
+    close_calls: list[bool] = []
+    original_close = NestQuestDatabase.close
+
+    async def _spy_close(self):
+        close_calls.append(True)
+        return await original_close(self)
+
+    monkeypatch.setattr(NestQuestDatabase, "close", _spy_close)
+
+    with pytest_module.raises(RuntimeError, match="seed boom"):
+        await _setup_entry(hass, entry, hass.registry)
+    # The reopen path opened AND closed a connection; the failure is
+    # the last thing observed.
+    assert close_calls[-1] is True
