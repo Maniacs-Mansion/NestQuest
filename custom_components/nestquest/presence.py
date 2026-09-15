@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
+from types import MappingProxyType
 
 #: The schema's documented cap for cycle_length_weeks (schema.py keeps
 #: the pattern human-readable and the anchor arithmetic small).
@@ -52,7 +53,18 @@ _DATE_FORMAT = "%Y-%m-%d"
 
 
 def _parse_date(value: object, field_name: str) -> datetime.date:
-    """Accept a datetime.date or a strict YYYY-MM-DD string."""
+    """Accept a datetime.date or a strict YYYY-MM-DD string.
+
+    ``datetime.datetime`` is rejected explicitly: it SUBCLASSES
+    datetime.date, so a bare isinstance check would store a value with
+    a time component and every later calendar-date comparison (e.g.
+    ``PresenceOverride.covers``) would raise TypeError.
+    """
+    if isinstance(value, datetime.datetime):
+        raise ValueError(
+            f"{field_name} must be a plain calendar date, not a "
+            f"datetime with a time component: {value!r}"
+        )
     if isinstance(value, datetime.date):
         return value
     if not isinstance(value, str):
@@ -149,7 +161,7 @@ class PresenceSchedule:
     child_id: int
     cycle_length_weeks: int
     anchor_date: datetime.date
-    pattern: dict[int, frozenset[int]]
+    pattern: MappingProxyType  # week index -> frozenset of weekdays
 
     def __init__(
         self,
@@ -181,7 +193,12 @@ class PresenceSchedule:
                 f"pattern must cover week indices 0..{cycle - 1}; "
                 f"missing {missing}"
             )
-        object.__setattr__(self, "pattern", normalised)
+        # Frozen must mean frozen: a bare dict would let callers inject
+        # unvalidated weekdays (or drop required weeks) AFTER
+        # construction, bypassing total validation.  The mapping
+        # proxy exposes the validated contents read-only; the
+        # per-week sets are already frozensets.
+        object.__setattr__(self, "pattern", MappingProxyType(normalised))
 
     def encode(self) -> str:
         """Serialize to the database's pipe-separated CSV shape.

@@ -227,3 +227,36 @@ def test_override_rejects_non_int_child_id(bad) -> None:
 def test_override_rejects_non_strict_dates(start, end) -> None:
     with pytest.raises(ValueError, match="date"):
         PresenceOverride(1, start, end, True)
+
+
+def test_schedule_rejects_datetime_anchor() -> None:
+    """datetime.datetime subclasses date: a bare isinstance check would
+    store a time component and every date comparison would TypeError."""
+    with pytest.raises(ValueError, match="plain calendar date"):
+        PresenceSchedule(1, 1, datetime.datetime(2026, 1, 5, 9, 30), {0: {0}})
+
+
+def test_override_rejects_datetime_bounds() -> None:
+    with pytest.raises(ValueError, match="plain calendar date"):
+        PresenceOverride(
+            1, datetime.datetime(2026, 7, 20), "2026-07-20", True
+        )
+
+
+def test_schedule_pattern_is_immutable_after_construction() -> None:
+    """The frozen schedule must not leak a mutable dict: injecting
+    unvalidated weekdays or dropping required weeks after construction
+    would bypass total validation."""
+    schedule = PresenceSchedule(1, 2, ANCHOR, {0: {0, 2}, 1: {1}})
+    with pytest.raises(TypeError):
+        schedule.pattern[0] = {9}
+    with pytest.raises(TypeError):
+        del schedule.pattern[1]
+    # mappingproxy exposes no mutators at all.
+    assert not any(
+        hasattr(schedule.pattern, name)
+        for name in ("clear", "pop", "popitem", "setdefault", "update")
+    )
+    # The validated contents are still readable and encode correctly.
+    assert schedule.pattern[0] == frozenset({0, 2})
+    assert schedule.encode() == "0,2|1"
