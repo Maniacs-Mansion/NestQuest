@@ -21,6 +21,12 @@ DEFAULT_DAY_ROLLOVER_TIME = "00:00"
 CONF_PANEL_IDLE_TIMEOUT = "panel_idle_timeout"
 DEFAULT_PANEL_IDLE_TIMEOUT = 300
 
+# Admin allowlist (Feature 03): HA user IDs permitted to call admin-only
+# services.  Stored as IDs, never usernames (feature guardrail).  The
+# database allowlist is authoritative; the config entry carries the same
+# list as a disaster-recovery copy so a lost database can be re-seeded.
+CONF_ADMIN_USER_IDS = "admin_user_ids"
+
 # Quest windows (D-008): a definition may declare several day windows;
 # each produces its own instance per day and groups the panel's Quest
 # Log into three columns.  The clock ranges are stored here so they stay

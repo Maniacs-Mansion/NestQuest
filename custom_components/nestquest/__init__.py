@@ -13,10 +13,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN, LOGGER
+from .const import CONF_ADMIN_USER_IDS, DOMAIN, LOGGER
 from .db import NestQuestDatabase
 from .migrations import apply_migrations
 from .store import async_get_db_path
+from .admin_allowlist import seed_setup_admin
 
 _LOGGER = LOGGER
 
@@ -245,6 +246,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             db = await _async_open_database(
                 hass, await async_get_db_path(hass)
             )
+            context = getattr(entry, "context", None)
+            context_user_id = (
+                context.get("user_id")
+                if isinstance(context, dict)
+                else None
+            )
+            await seed_setup_admin(
+                db,
+                stored_admin_ids=entry.data.get(CONF_ADMIN_USER_IDS),
+                context_user_id=context_user_id,
+            )
             existing.database = db
         entry.runtime_data = existing
         return True
@@ -257,6 +269,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     database = await _async_open_database(hass, await async_get_db_path(hass))
     try:
+        # Seed the admin allowlist on first setup so the owner is never
+        # locked out: an empty database takes the config entry's stored
+        # admin copy (disaster recovery), else the HA user who
+        # completed the config flow.  Non-empty allowlists are never
+        # touched (fail-closed narrowing is deliberate).
+        context = getattr(entry, "context", None)
+        context_user_id = (
+            context.get("user_id")
+            if isinstance(context, dict)
+            else None
+        )
+        await seed_setup_admin(
+            database,
+            stored_admin_ids=entry.data.get(CONF_ADMIN_USER_IDS),
+            context_user_id=context_user_id,
+        )
         remove_update_listener = entry.add_update_listener(_async_update_listener)
     except BaseException:
         await database.close()

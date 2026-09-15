@@ -218,12 +218,18 @@ def make_config_entry(
     entry_id: str = "test_entry",
     options: dict | None = None,
     data: dict | None = None,
+    context: dict | None = None,
 ):
-    """Create a stub config entry shaped like HA's ConfigEntry for tests."""
+    """Create a stub config entry shaped like HA's ConfigEntry for tests.
+
+    ``context`` mirrors HA's entry context (the flow that created the
+    entry carries the acting HA user under ``context["user_id"]``).
+    """
     entry = SimpleNamespace(
         entry_id=entry_id,
         options=dict(options or {}),
         data=dict(data or {}),
+        context=dict(context or {}),
     )
     entry.add_update_listener = None
     return entry
@@ -302,8 +308,15 @@ async def hass():
 def make_entry():
     """Provide the config-entry factory as a fixture."""
 
-    def _factory(entry_id: str = "test_entry", options: dict | None = None, data: dict | None = None):
-        return make_config_entry(entry_id=entry_id, options=options, data=data)
+    def _factory(
+        entry_id: str = "test_entry",
+        options: dict | None = None,
+        data: dict | None = None,
+        context: dict | None = None,
+    ):
+        return make_config_entry(
+            entry_id=entry_id, options=options, data=data, context=context
+        )
 
     return _factory
 
