@@ -415,3 +415,57 @@ async def test_reopened_setup_failure_closes_database(
     # The reopen path opened AND closed a connection; the failure is
     # the last thing observed.
     assert close_calls[-1] is True
+
+
+# ---------------------------------------------------------------------------
+# is_admin: the fail-closed resolver (Feature 09's verdict function)
+# ---------------------------------------------------------------------------
+
+
+def test_is_admin_verdict_matrix(tmp_path) -> None:
+    async def _body(database):
+        from custom_components.nestquest.admin_allowlist import is_admin
+
+        await set_admin_ids(database, ["user-owner"])
+        assert await is_admin(database, "user-owner") is True
+        assert await is_admin(database, "user-other") is False
+        # Unknown, malformed, and absent identities all fail closed.
+        assert await is_admin(database, "") is False
+        assert await is_admin(database, "  user-owner  ") is False, (
+            "ids are stored trimmed; an untrimmed lookup is a different "
+            "id and must not match"
+        )
+        assert await is_admin(database, None) is False
+        assert await is_admin(database, 42) is False
+        assert await is_admin(database, ["user-owner"]) is False
+        assert await is_admin(database, True) is False
+        return None
+
+    _with_db(tmp_path, "resolver-matrix.db")(_body)
+
+
+def test_is_admin_empty_allowlist_fails_closed(tmp_path) -> None:
+    """An empty allowlist returns False for EVERYONE, not True."""
+    async def _body(database):
+        from custom_components.nestquest.admin_allowlist import is_admin
+
+        for candidate in ("user-owner", "", None, 1):
+            assert await is_admin(database, candidate) is False
+        return None
+
+    _with_db(tmp_path, "resolver-empty.db")(_body)
+
+
+def test_is_admin_false_after_last_admin_removal_attempt(tmp_path) -> None:
+    """The refusal keeps the verdict sound: a refused removal leaves
+    the admin in place, so is_admin still resolves True."""
+    async def _body(database):
+        from custom_components.nestquest.admin_allowlist import is_admin
+
+        await set_admin_ids(database, ["user-owner"])
+        with pytest.raises(ValueError, match="at least one admin"):
+            await set_admin_ids(database, [])
+        assert await is_admin(database, "user-owner") is True
+        return None
+
+    _with_db(tmp_path, "resolver-refusal.db")(_body)
