@@ -71,6 +71,7 @@ ALL_TABLES = (
     "admin_users",
     "schedule_rules",
     "quest_definitions",
+    "quest_definition_assignees",
     "presence_schedules",
     "presence_overrides",
     "quest_instances",
@@ -99,7 +100,10 @@ class World:
         assert await self.admins.add("user-1", _stamp()) is True
         self.rule = await self.rules.create("daily", D1)
         self.definition = await self.definitions.create(
-            "Brush teeth", self.child.id, self.rule.id, _stamp()
+            "Brush teeth",
+            self.rule.id,
+            _stamp(),
+            assignee_child_ids=[self.child.id],
         )
         self.schedule = await self.schedules.upsert_by_child(
             self.child.id, 2, D1, "0,2,4|1,3"
@@ -206,6 +210,9 @@ def test_matrix_quest_definitions_crud_and_constraints(tmp_path) -> None:
         # insert (seeded) + read
         fetched = await w.definitions.get(w.definition.id)
         assert fetched.title == "Brush teeth"
+        assert [c.id for c in await w.definitions.list_assignees(
+            w.definition.id
+        )] == [w.child.id]
         # update
         await w.definitions.update(w.definition.id, title="Brush TEETH")
         assert (await w.definitions.get(w.definition.id)).title == (
@@ -213,11 +220,21 @@ def test_matrix_quest_definitions_crud_and_constraints(tmp_path) -> None:
         )
         # constraint: FK to a nonexistent child rejected with ValueError
         with pytest.raises(ValueError, match="does not exist"):
-            await w.definitions.create("X", 999, w.rule.id, _stamp())
-        # constraint: inactive child rejected
+            await w.definitions.create(
+                "X", w.rule.id, _stamp(), assignee_child_ids=[999]
+            )
+        # constraint: inactive child rejected on assignment
         await w.children.set_active(w.child2.id, False)
         with pytest.raises(ValueError, match="inactive"):
-            await w.definitions.set_assignee(w.definition.id, w.child2.id)
+            await w.definitions.add_assignee(w.definition.id, w.child2.id)
+        # assignee removal + re-adding the active child
+        assert await w.definitions.remove_assignee(
+            w.definition.id, w.child.id
+        ) is True
+        assert await w.definitions.remove_assignee(
+            w.definition.id, w.child.id
+        ) is False
+        await w.definitions.add_assignee(w.definition.id, w.child.id)
         # set_active: deactivate, never delete
         assert await w.definitions.set_active(w.definition.id, False) == 1
         assert (await w.definitions.get(w.definition.id)).is_active is False

@@ -86,6 +86,15 @@ date range; a single-day override stores the same date in both columns.
 ``is_present`` 0/1 marks the child absent/present for the whole range;
 ``note`` is optional free text.
 
+Multi-assignee definitions (D-008): ``quest_definitions`` carries no
+``child_id`` column.  Assignment lives in
+``quest_definition_assignees``, one row per (definition, child) with a
+composite primary key and foreign keys to the definition and the child,
+so "brush teeth" is one definition covering three children.  The
+migration runner rebuilds a pre-D-008 table into this shape and copies
+its single-assignee column across.  The composite primary key makes
+duplicate assignment impossible at the storage layer.
+
 Quest instances: ``quest_instances`` deliberately carries NO completion
 status column.  An instance's current state derives from the latest row
 in ``completion_events`` (Feature 08), so materialization (Feature 07)
@@ -219,18 +228,34 @@ SCHEMA_V1_SCHEDULE_RULES_DDL: list[str] = [
     """,
 ]
 
+#: Column body of ``quest_definitions``, shared between the v1 DDL
+#: below and the multi-assignee rebuild migration, which must recreate
+#: the table in exactly this shape (D-008: one definition, many
+#: assignees via ``quest_definition_assignees`` — no ``child_id``
+#: column on the definition itself).
+QUEST_DEFINITIONS_TABLE_SQL = """(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT,
+    icon TEXT,
+    schedule_rule_id INTEGER NOT NULL REFERENCES schedule_rules(id),
+    due_time TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1 CHECK (typeof(is_active) = 'integer' AND is_active IN (0, 1)),
+    created_at TEXT NOT NULL
+)"""
+
 SCHEMA_V1_QUEST_DEFINITIONS_DDL: list[str] = [
+    f"""
+    CREATE TABLE IF NOT EXISTS quest_definitions {QUEST_DEFINITIONS_TABLE_SQL}
+    """,
+]
+
+SCHEMA_V1_QUEST_DEFINITION_ASSIGNEES_DDL: list[str] = [
     """
-    CREATE TABLE IF NOT EXISTS quest_definitions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        description TEXT,
-        icon TEXT,
+    CREATE TABLE IF NOT EXISTS quest_definition_assignees (
+        definition_id INTEGER NOT NULL REFERENCES quest_definitions(id),
         child_id INTEGER NOT NULL REFERENCES children(id),
-        schedule_rule_id INTEGER NOT NULL REFERENCES schedule_rules(id),
-        due_time TEXT,
-        is_active INTEGER NOT NULL DEFAULT 1 CHECK (typeof(is_active) = 'integer' AND is_active IN (0, 1)),
-        created_at TEXT NOT NULL
+        PRIMARY KEY (definition_id, child_id)
     )
     """,
 ]
@@ -316,6 +341,7 @@ SCHEMA_V1_STATEMENTS: list[str] = [
     *SCHEMA_V1_ADMIN_USERS_DDL,
     *SCHEMA_V1_SCHEDULE_RULES_DDL,
     *SCHEMA_V1_QUEST_DEFINITIONS_DDL,
+    *SCHEMA_V1_QUEST_DEFINITION_ASSIGNEES_DDL,
     *SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
     *SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
     *SCHEMA_V1_QUEST_INSTANCES_DDL,
