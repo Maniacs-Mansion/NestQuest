@@ -384,10 +384,17 @@ class PresenceEngine:
                     )
         # Read-only snapshot: reassignment is refused and no mutator
         # exists, so a built engine answers consistently for its
-        # lifetime.
+        # lifetime.  The overrides lists are copied to immutable
+        # tuples — a shallow mapping copy alone would leave caller-
+        # owned lists reachable through _overrides, and mutating one
+        # later would change is_present results.
         object.__setattr__(self, "_schedules", MappingProxyType(dict(schedules)))
         object.__setattr__(
-            self, "_overrides", MappingProxyType(dict(overrides))
+            self,
+            "_overrides",
+            MappingProxyType(
+                {child_id: tuple(entries) for child_id, entries in overrides.items()}
+            ),
         )
 
     def is_present(self, child_id: object, date: object) -> bool:

@@ -574,3 +574,19 @@ def test_engine_overlapping_snapshot_uses_latest_start() -> None:
     assert engine.is_present(1, datetime.date(2026, 1, 9)) is True
     # Jan 11-12: only the later override covers -> present.
     assert engine.is_present(1, datetime.date(2026, 1, 11)) is True
+
+
+def test_engine_override_lists_are_frozen() -> None:
+    """The overrides snapshot must be truly read-only: mutating the
+    caller's list after construction must not change answers."""
+    entry = PresenceOverride(1, "2026-01-06", "2026-01-06", False)
+    entries = [entry]
+    engine = _engine_with_overrides(*entries)
+    assert engine.is_present(1, datetime.date(2026, 1, 6)) is False
+    entries.append(PresenceOverride(1, "2026-01-07", "2026-01-07", False))
+    # The late append must NOT change the engine's answers...
+    assert engine.is_present(1, datetime.date(2026, 1, 7)) is True
+    with pytest.raises(TypeError):
+        engine._overrides[1].append(entry)
+    with pytest.raises(AttributeError, match="immutable snapshot"):
+        engine._overrides = {}
