@@ -554,8 +554,9 @@ def test_options_flow_unknown_selection_refused(tmp_path) -> None:
 
 
 def test_options_flow_submit_without_admin_key_keeps_allowlist(tmp_path) -> None:
-    """Raw callers omitting the key (pre-picker payloads) leave the
-    allowlist untouched and produce the legacy three-key entry."""
+    """Raw callers omitting the key (pre-picker payloads) do not
+    touch the allowlist; the CURRENT allowlist is carried forward on
+    the options copy so no removed admin can be resurrected later."""
     database = _open_allowlist_db(tmp_path, "picker-legacy.db")
     try:
         from custom_components.nestquest.admin_allowlist import (
@@ -572,7 +573,7 @@ def test_options_flow_submit_without_admin_key_keeps_allowlist(tmp_path) -> None
         )
         result = _run(flow.async_step_init(dict(VALID_INPUT)))
         assert result["type"] == "create_entry"
-        assert CONF_ADMIN_USER_IDS not in result["data"]
+        assert result["data"][CONF_ADMIN_USER_IDS] == ["u1"]
         assert await_gather(list_admin_ids(database)) == ["u1"]
     finally:
         _run(database.close())
@@ -603,5 +604,34 @@ def test_options_flow_duplicate_selection_refused(tmp_path) -> None:
         assert result["type"] == "form"
         assert result["errors"] == {CONF_ADMIN_USER_IDS: "invalid_admin"}
         assert await_gather(list_admin_ids(database)) == ["u1"]
+    finally:
+        _run(database.close())
+
+
+def test_options_flow_omitted_picker_carries_allowlist_forward(
+    tmp_path,
+) -> None:
+    """An omitted picker field must not drop the allowlist copy from
+    the returned options: HA replaces entry.options wholesale, and a
+    later database loss must not resurrect removed admins from the
+    stale config-flow copy in entry.data."""
+    database = _open_allowlist_db(tmp_path, "picker-carry.db")
+    try:
+        from custom_components.nestquest.admin_allowlist import (
+            set_admin_ids,
+        )
+
+        _run(set_admin_ids(database, ["u2"]))
+        entry = _make_entry()
+        flow = _make_flow(
+            entry,
+            users=[_user("u1", "Joshua"), _user("u2", "Sam")],
+            database=database,
+        )
+        result = _run(flow.async_step_init(dict(VALID_INPUT)))
+        assert result["type"] == "create_entry"
+        # The current allowlist rides along on the legacy three-key path.
+        assert result["data"][CONF_ADMIN_USER_IDS] == ["u2"]
+        assert result["data"][CONF_HORIZON_DAYS] == VALID_INPUT[CONF_HORIZON_DAYS]
     finally:
         _run(database.close())

@@ -213,6 +213,13 @@ class NestQuestOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
         }
         if admin_ids_present:
             data[CONF_ADMIN_USER_IDS] = admin_ids
+        elif admin_default:
+            # HA replaces entry.options wholesale, so an omitted picker
+            # field must carry the CURRENT allowlist forward: dropping
+            # it would leave only the stale config-flow copy in entry
+            # data, and a later database loss would resurrect admins
+            # the owner has since removed.
+            data[CONF_ADMIN_USER_IDS] = list(admin_default)
         return self.async_create_entry(title="NestQuest", data=data)
 
     def _current_values(self) -> dict[str, Any]:
