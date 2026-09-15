@@ -27,7 +27,7 @@ from custom_components.nestquest.dao_children import (
 )
 from custom_components.nestquest.dao_instances import (
     CompletionEventsDao,
-    TaskInstancesDao,
+    QuestInstancesDao,
 )
 from custom_components.nestquest.dao_presence import (
     PresenceOverridesDao,
@@ -35,7 +35,7 @@ from custom_components.nestquest.dao_presence import (
 )
 from custom_components.nestquest.dao_rules import (
     ScheduleRulesDao,
-    TaskDefinitionsDao,
+    QuestDefinitionsDao,
 )
 from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.migrations import apply_migrations
@@ -70,10 +70,10 @@ ALL_TABLES = (
     "children",
     "admin_users",
     "schedule_rules",
-    "task_definitions",
+    "quest_definitions",
     "presence_schedules",
     "presence_overrides",
-    "task_instances",
+    "quest_instances",
     "completion_events",
 )
 
@@ -86,10 +86,10 @@ class World:
         self.children = ChildrenDao(database)
         self.admins = AdminUsersDao(database)
         self.rules = ScheduleRulesDao(database)
-        self.definitions = TaskDefinitionsDao(database)
+        self.definitions = QuestDefinitionsDao(database)
         self.schedules = PresenceSchedulesDao(database)
         self.overrides = PresenceOverridesDao(database)
-        self.instances = TaskInstancesDao(database)
+        self.instances = QuestInstancesDao(database)
         self.events = CompletionEventsDao(database)
 
     async def seed(self) -> None:
@@ -201,7 +201,7 @@ def test_matrix_schedule_rules_crud_and_constraints(tmp_path) -> None:
     assert _with_world(tmp_path / "m-rules.db")(_body) is True
 
 
-def test_matrix_task_definitions_crud_and_constraints(tmp_path) -> None:
+def test_matrix_quest_definitions_crud_and_constraints(tmp_path) -> None:
     async def _body(w: World):
         # insert (seeded) + read
         fetched = await w.definitions.get(w.definition.id)
@@ -271,7 +271,7 @@ def test_matrix_presence_overrides_crud_and_constraints(tmp_path) -> None:
     assert _with_world(tmp_path / "m-overrides.db")(_body) is True
 
 
-def test_matrix_task_instances_crud_and_constraints(tmp_path) -> None:
+def test_matrix_quest_instances_crud_and_constraints(tmp_path) -> None:
     async def _body(w: World):
         # insert (seeded) + read
         fetched = await w.instances.get(w.definition.id, D1)
@@ -292,20 +292,20 @@ def test_matrix_task_instances_crud_and_constraints(tmp_path) -> None:
     assert _with_world(tmp_path / "m-instances.db")(_body) is True
 
 
-def test_matrix_task_instances_constraints(tmp_path) -> None:
+def test_matrix_quest_instances_constraints(tmp_path) -> None:
     async def _body(w: World):
         # D20 has no instance yet: a raw insert succeeds, then an
         # identical second insert must fail on the UNIQUE constraint —
         # proving the schema backs the DAO's idempotency.
         await w.database.execute(
-            "INSERT INTO task_instances (definition_id, child_id, "
+            "INSERT INTO quest_instances (definition_id, child_id, "
             "due_date, due_time, generated_at) "
             "VALUES (?, ?, ?, NULL, ?)",
             (w.definition.id, w.child.id, D20, _stamp()),
         )
         with pytest.raises(sqlite3.IntegrityError):
             await w.database.execute(
-                "INSERT INTO task_instances (definition_id, child_id, "
+                "INSERT INTO quest_instances (definition_id, child_id, "
                 "due_date, due_time, generated_at) "
                 "VALUES (?, ?, ?, NULL, ?)",
                 (w.definition.id, w.child.id, D20, _stamp()),
@@ -320,7 +320,7 @@ def test_matrix_task_instances_constraints(tmp_path) -> None:
     assert _with_world(tmp_path / "m-instances-constraints.db")(_body) is True
 
 
-def test_matrix_task_instances_upsert_idempotency(tmp_path) -> None:
+def test_matrix_quest_instances_upsert_idempotency(tmp_path) -> None:
     async def _body(w: World):
         first = await w.instances.upsert(
             w.definition.id, w.child.id, D2, _stamp()
@@ -330,7 +330,7 @@ def test_matrix_task_instances_upsert_idempotency(tmp_path) -> None:
         )
         assert second.id == first.id
         count = await w.database.fetch_one(
-            "SELECT COUNT(*) FROM task_instances"
+            "SELECT COUNT(*) FROM quest_instances"
         )
         # Seed created one (D1) plus this one (D2) — no duplicate.
         assert count == (2,)

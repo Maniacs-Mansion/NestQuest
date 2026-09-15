@@ -14,6 +14,22 @@ Version 0 means "the file exists but carries no NestQuest schema yet"
 the runner against version 0 applies migration 1, which applies the
 full v1 DDL from :mod:`.schema` and stamps version 1.
 
+Migration 1 was rewritten pre-release (D-007): nothing was ever
+shipped, so the v1 DDL now creates the ``quest_*`` tables directly
+instead of the legacy ``task_*`` spellings, and no compatibility shim
+exists.  Dev machines that already hold a version-1 database with
+``task_*`` tables are handled by migration 2, which detects the legacy
+table names and ``ALTER TABLE ... RENAME TO``s them to their current
+names before anything else assumes the new model.  The rename step runs
+inside the same transaction as its version stamp, so a crash mid-rename
+rolls both back together.
+
+Migration entries are either an ordered sequence of SQL statements or
+an async callable taking the open database.  Callables exist for steps
+whose SQL depends on the database's current state (the legacy rename
+only fires when a legacy table is actually present) and run under the
+same per-migration transaction as statement lists.
+
 Each migration's statements and its version stamp run inside ONE
 transaction, and the stamp is written as DELETE + INSERT rather than
 UPDATE because a version-0 database has no version row to update yet.
@@ -43,12 +59,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Union
 
 from .db import NestQuestDatabase
 from .schema import SCHEMA_V1_STATEMENTS
 
 LOGGER = logging.getLogger(__name__)
+
+#: One migration entry: either an ordered sequence of SQL statements or
+#: an async callable run under the entry's migration transaction.
+MigrationStep = Union[Sequence[str], Callable[[NestQuestDatabase], Awaitable[None]]]
 
 #: Metadata table holding the applied schema version.  Prefixed with the
 #: integration domain so a config directory shared with other tools can
@@ -73,10 +94,48 @@ VERSION_TABLE_DDL = f"""
 #: version ``n-1`` to version ``n``.
 MIGRATION_1_V1_DDL: list[str] = list(SCHEMA_V1_STATEMENTS)
 
+#: Legacy (pre-D-007) table name -> current table name.  Order matters:
+#: the parent table renames first so the child's foreign key reference
+#: is rewritten while its parent's new name is already in place.
+LEGACY_TASK_TABLE_RENAMES: tuple[tuple[str, str], ...] = (
+    ("task_definitions", "quest_definitions"),
+    ("task_instances", "quest_instances"),
+)
+
+
+async def _rename_legacy_task_tables(database: NestQuestDatabase) -> None:
+    """Rename any surviving ``task_*`` tables to their ``quest_*`` names.
+
+    Dev-machines-only path (D-007): a database stamped version 1 by the
+    pre-rename runner holds ``task_definitions``/``task_instances``.
+    Each legacy name still present is renamed; fresh databases find
+    nothing and this step is a no-op.  Modern SQLite rewrites foreign
+    key clauses in other tables to follow the rename, so the renamed
+    schema is indistinguishable from a freshly created one apart from
+    internal autoindex names.  Runs inside the migration transaction,
+    so the renames and the version stamp commit or roll back together.
+    """
+    for legacy_name, current_name in LEGACY_TASK_TABLE_RENAMES:
+        row = await database.fetch_one(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = ?",
+            (legacy_name,),
+        )
+        if row is not None:
+            await database.execute(
+                f'ALTER TABLE "{legacy_name}" RENAME TO "{current_name}"'
+            )
+            LOGGER.info(
+                "Renamed legacy table %s to %s", legacy_name, current_name
+            )
+
+
 #: The ordered migration list.  Append-only: never edit an applied
-#: entry, add the next one instead.
-MIGRATIONS: Sequence[Sequence[str]] = [
+#: entry, add the next one instead.  (Migration 1's content was
+#: rewritten pre-release per D-007 — no version 1 database shipped.)
+MIGRATIONS: Sequence[MigrationStep] = [
     MIGRATION_1_V1_DDL,
+    _rename_legacy_task_tables,
 ]
 
 
@@ -140,7 +199,7 @@ def _migration_lock(database: NestQuestDatabase) -> asyncio.Lock:
 
 async def apply_migrations(
     database: NestQuestDatabase,
-    migrations: Sequence[Sequence[str]] = MIGRATIONS,
+    migrations: Sequence[MigrationStep] = MIGRATIONS,
 ) -> int:
     """Bring the database schema up to the latest version.
 
@@ -208,8 +267,14 @@ async def apply_migrations(
                         f"{latest}); downgrades are not supported"
                     )
                 if in_tx_version < target:
-                    for sql in migrations[target - 1]:
-                        await database.execute(sql)
+                    step = migrations[target - 1]
+                    if callable(step):
+                        await step(database)
+                        applied_statements = 0
+                    else:
+                        for sql in step:
+                            await database.execute(sql)
+                        applied_statements = len(step)
                     # INSERT keyed on the singleton row (id = 1): a
                     # fresh file has no row yet, and migration 1 is the
                     # only migration a version-0 database can run, so
@@ -225,12 +290,18 @@ async def apply_migrations(
                     )
                     applied = True
             if applied:
-                LOGGER.info(
-                    "NestQuest schema migrated to version %d "
-                    "(%d statement%s)",
-                    target,
-                    len(migrations[target - 1]),
-                    "s" if len(migrations[target - 1]) != 1 else "",
-                )
+                if applied_statements == 0:
+                    LOGGER.info(
+                        "NestQuest schema migrated to version %d",
+                        target,
+                    )
+                else:
+                    LOGGER.info(
+                        "NestQuest schema migrated to version %d "
+                        "(%d statement%s)",
+                        target,
+                        applied_statements,
+                        "s" if applied_statements != 1 else "",
+                    )
 
         return latest

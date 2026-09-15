@@ -15,8 +15,8 @@ from custom_components.nestquest.schema import (
     SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
     SCHEMA_V1_SCHEDULE_RULES_DDL,
     SCHEMA_V1_STATEMENTS,
-    SCHEMA_V1_TASK_DEFINITIONS_DDL,
-    SCHEMA_V1_TASK_INSTANCES_DDL,
+    SCHEMA_V1_QUEST_DEFINITIONS_DDL,
+    SCHEMA_V1_QUEST_INSTANCES_DDL,
     async_apply_ddl,
 )
 
@@ -91,7 +91,7 @@ def _insert_definition(database, child_id=1, rule_id=1, **overrides):
     placeholders = ", ".join("?" for _ in values)
     result = _run(
         database.execute(
-            f"INSERT INTO task_definitions ({columns}) VALUES ({placeholders})",
+            f"INSERT INTO quest_definitions ({columns}) VALUES ({placeholders})",
             tuple(values.values()),
         )
     )
@@ -161,10 +161,10 @@ def test_schema_v1_statements_compose_the_six_tables() -> None:
         *SCHEMA_V1_CHILDREN_DDL,
         *SCHEMA_V1_ADMIN_USERS_DDL,
         *SCHEMA_V1_SCHEDULE_RULES_DDL,
-        *SCHEMA_V1_TASK_DEFINITIONS_DDL,
+        *SCHEMA_V1_QUEST_DEFINITIONS_DDL,
         *SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
         *SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
-        *SCHEMA_V1_TASK_INSTANCES_DDL,
+        *SCHEMA_V1_QUEST_INSTANCES_DDL,
         *SCHEMA_V1_COMPLETION_EVENTS_DDL,
     ]
 
@@ -256,17 +256,17 @@ def test_schedule_rules_table_exists_after_applying_ddl(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_definitions_table_exists_after_applying_ddl(tmp_path) -> None:
+def test_quest_definitions_table_exists_after_applying_ddl(tmp_path) -> None:
     database = _open_db(tmp_path / "definitions.db")
     try:
         _apply(database)
         row = _run(
             database.fetch_one(
                 "SELECT name FROM sqlite_master WHERE type = 'table' "
-                "AND name = 'task_definitions'"
+                "AND name = 'quest_definitions'"
             )
         )
-        assert row is not None and row[0] == "task_definitions"
+        assert row is not None and row[0] == "quest_definitions"
     finally:
         _run(database.close())
 
@@ -292,11 +292,11 @@ def test_schedule_rules_columns_types_and_constraints(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_definitions_columns_types_and_constraints(tmp_path) -> None:
+def test_quest_definitions_columns_types_and_constraints(tmp_path) -> None:
     database = _open_db(tmp_path / "definitions-columns.db")
     try:
         _apply(database)
-        columns = _run(database.fetch_all("PRAGMA table_info(task_definitions)"))
+        columns = _run(database.fetch_all("PRAGMA table_info(quest_definitions)"))
         assert [(row[1], row[2], row[3], row[4], row[5]) for row in columns] == [
             ("id", "INTEGER", 0, None, 1),
             ("title", "TEXT", 1, None, 0),
@@ -312,11 +312,11 @@ def test_task_definitions_columns_types_and_constraints(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_definitions_foreign_keys_declared(tmp_path) -> None:
+def test_quest_definitions_foreign_keys_declared(tmp_path) -> None:
     database = _open_db(tmp_path / "definitions-fks.db")
     try:
         _apply(database)
-        fks = _run(database.fetch_all("PRAGMA foreign_key_list(task_definitions)"))
+        fks = _run(database.fetch_all("PRAGMA foreign_key_list(quest_definitions)"))
         declared = {(row[2], row[3], row[4]) for row in fks}
         assert declared == {
             ("children", "child_id", "id"),
@@ -519,7 +519,7 @@ def test_failed_statement_rolls_back_whole_application(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# schedule_rules and task_definitions constraint enforcement
+# schedule_rules and quest_definitions constraint enforcement
 # ---------------------------------------------------------------------------
 
 
@@ -813,7 +813,7 @@ def test_schedule_rules_start_date_not_null_enforced(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_definitions_insert_requires_existing_child_and_rule(
+def test_quest_definitions_insert_requires_existing_child_and_rule(
     tmp_path,
 ) -> None:
     database = _open_db(tmp_path / "definitions-fk-unknown.db")
@@ -831,7 +831,7 @@ def test_task_definitions_insert_requires_existing_child_and_rule(
         )
         row = _run(
             database.fetch_one(
-                "SELECT title, child_id, schedule_rule_id FROM task_definitions "
+                "SELECT title, child_id, schedule_rule_id FROM quest_definitions "
                 "WHERE id = ?",
                 (definition_id,),
             )
@@ -841,7 +841,7 @@ def test_task_definitions_insert_requires_existing_child_and_rule(
         _run(database.close())
 
 
-def test_task_definitions_unknown_child_id_fails(tmp_path) -> None:
+def test_quest_definitions_unknown_child_id_fails(tmp_path) -> None:
     database = _open_db(tmp_path / "definitions-bad-child.db")
     try:
         _apply(database)
@@ -852,7 +852,7 @@ def test_task_definitions_unknown_child_id_fails(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_definitions_unknown_schedule_rule_id_fails(tmp_path) -> None:
+def test_quest_definitions_unknown_schedule_rule_id_fails(tmp_path) -> None:
     database = _open_db(tmp_path / "definitions-bad-rule.db")
     try:
         _apply(database)
@@ -868,7 +868,7 @@ def test_task_definitions_unknown_schedule_rule_id_fails(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_definitions_is_active_check_enforced(tmp_path) -> None:
+def test_quest_definitions_is_active_check_enforced(tmp_path) -> None:
     database = _open_db(tmp_path / "definitions-is-active.db")
     try:
         _apply(database)
@@ -880,7 +880,7 @@ def test_task_definitions_is_active_check_enforced(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("bad_is_active", ["abc", 1.5])
-def test_task_definitions_is_active_non_integer_fails(
+def test_quest_definitions_is_active_non_integer_fails(
     tmp_path, bad_is_active
 ) -> None:
     database = _open_db(tmp_path / "definitions-is-active-typeof.db")
@@ -901,7 +901,7 @@ def test_task_definitions_is_active_non_integer_fails(
         _run(database.close())
 
 
-def test_task_definitions_title_not_null_enforced(tmp_path) -> None:
+def test_quest_definitions_title_not_null_enforced(tmp_path) -> None:
     database = _open_db(tmp_path / "definitions-title.db")
     try:
         _apply(database)
@@ -912,7 +912,7 @@ def test_task_definitions_title_not_null_enforced(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_definitions_created_at_not_null_enforced(tmp_path) -> None:
+def test_quest_definitions_created_at_not_null_enforced(tmp_path) -> None:
     database = _open_db(tmp_path / "definitions-created-at.db")
     try:
         _apply(database)
@@ -925,7 +925,7 @@ def test_task_definitions_created_at_not_null_enforced(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_definitions_defaults_apply_on_insert(tmp_path) -> None:
+def test_quest_definitions_defaults_apply_on_insert(tmp_path) -> None:
     database = _open_db(tmp_path / "definitions-defaults.db")
     try:
         _apply(database)
@@ -941,7 +941,7 @@ def test_task_definitions_defaults_apply_on_insert(tmp_path) -> None:
         )
         row = _run(
             database.fetch_one(
-                "SELECT is_active, due_time FROM task_definitions WHERE id = ?",
+                "SELECT is_active, due_time FROM quest_definitions WHERE id = ?",
                 (definition_id,),
             )
         )
@@ -969,7 +969,7 @@ def test_applying_extended_ddl_twice_keeps_new_table_rows(tmp_path) -> None:
         _insert_definition(database, child_id=1, rule_id=1)
         _apply(database)
         counts = []
-        for table in ("children", "schedule_rules", "task_definitions"):
+        for table in ("children", "schedule_rules", "quest_definitions"):
             row = _run(database.fetch_one(f"SELECT COUNT(*) FROM {table}"))
             counts.append(row[0])
         assert counts == [1, 1, 1]
@@ -1406,7 +1406,7 @@ def test_applying_presence_ddl_twice_keeps_rows(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# task_instances and completion_events: helpers
+# quest_instances and completion_events: helpers
 # ---------------------------------------------------------------------------
 
 
@@ -1428,7 +1428,7 @@ def _insert_instance(database, definition_id=1, **overrides):
     placeholders = ", ".join("?" for _ in values)
     result = _run(
         database.execute(
-            f"INSERT INTO task_instances ({columns}) VALUES ({placeholders})",
+            f"INSERT INTO quest_instances ({columns}) VALUES ({placeholders})",
             tuple(values.values()),
         )
     )
@@ -1466,28 +1466,28 @@ def _insert_event(database, instance_id=1, **overrides):
 
 
 def _setup_definition(database) -> None:
-    """Create one child, one schedule rule and one task definition."""
+    """Create one child, one schedule rule and one quest definition."""
     _child(database)
     _insert_rule(database)
     _insert_definition(database, child_id=1, rule_id=1)
 
 
 # ---------------------------------------------------------------------------
-# task_instances and completion_events: DDL shape
+# quest_instances and completion_events: DDL shape
 # ---------------------------------------------------------------------------
 
 
-def test_task_instances_table_exists_after_applying_ddl(tmp_path) -> None:
+def test_quest_instances_table_exists_after_applying_ddl(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances.db")
     try:
         _apply(database)
         row = _run(
             database.fetch_one(
                 "SELECT name FROM sqlite_master WHERE type = 'table' "
-                "AND name = 'task_instances'"
+                "AND name = 'quest_instances'"
             )
         )
-        assert row is not None and row[0] == "task_instances"
+        assert row is not None and row[0] == "quest_instances"
     finally:
         _run(database.close())
 
@@ -1507,11 +1507,11 @@ def test_completion_events_table_exists_after_applying_ddl(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_instances_columns_types_and_constraints(tmp_path) -> None:
+def test_quest_instances_columns_types_and_constraints(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances-columns.db")
     try:
         _apply(database)
-        columns = _run(database.fetch_all("PRAGMA table_info(task_instances)"))
+        columns = _run(database.fetch_all("PRAGMA table_info(quest_instances)"))
         # cid, name, type, notnull, dflt_value, pk
         assert [(row[1], row[2], row[3], row[4], row[5]) for row in columns] == [
             ("id", "INTEGER", 0, None, 1),
@@ -1544,14 +1544,14 @@ def test_completion_events_columns_types_and_constraints(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_instances_foreign_keys_declared(tmp_path) -> None:
+def test_quest_instances_foreign_keys_declared(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances-fks.db")
     try:
         _apply(database)
-        fks = _run(database.fetch_all("PRAGMA foreign_key_list(task_instances)"))
+        fks = _run(database.fetch_all("PRAGMA foreign_key_list(quest_instances)"))
         declared = {(row[2], row[3], row[4]) for row in fks}
         assert declared == {
-            ("task_definitions", "definition_id", "id"),
+            ("quest_definitions", "definition_id", "id"),
             ("children", "child_id", "id"),
         }
     finally:
@@ -1565,14 +1565,14 @@ def test_completion_events_foreign_keys_declared(tmp_path) -> None:
         fks = _run(database.fetch_all("PRAGMA foreign_key_list(completion_events)"))
         declared = {(row[2], row[3], row[4]) for row in fks}
         assert declared == {
-            ("task_instances", "instance_id", "id"),
+            ("quest_instances", "instance_id", "id"),
             ("children", "child_id", "id"),
         }
     finally:
         _run(database.close())
 
 
-def test_task_instances_unique_index_on_definition_and_date(tmp_path) -> None:
+def test_quest_instances_unique_index_on_definition_and_date(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances-unique.db")
     try:
         _apply(database)
@@ -1580,7 +1580,7 @@ def test_task_instances_unique_index_on_definition_and_date(tmp_path) -> None:
         rows = _run(
             database.fetch_all(
                 "SELECT name, sql FROM sqlite_master WHERE type = 'index' "
-                "AND tbl_name = 'task_instances'"
+                "AND tbl_name = 'quest_instances'"
             )
         )
         implicit = [(name, sql) for name, sql in rows if sql is None]
@@ -1599,7 +1599,7 @@ def test_task_instances_unique_index_on_definition_and_date(tmp_path) -> None:
         row = _run(
             database.fetch_one(
                 "SELECT COUNT(DISTINCT name) FROM pragma_index_list"
-                "('task_instances') WHERE \"unique\" = 1"
+                "('quest_instances') WHERE \"unique\" = 1"
             )
         )
         assert row == (1,)
@@ -1608,11 +1608,11 @@ def test_task_instances_unique_index_on_definition_and_date(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# task_instances: constraint enforcement
+# quest_instances: constraint enforcement
 # ---------------------------------------------------------------------------
 
 
-def test_task_instances_valid_insert_round_trips(tmp_path) -> None:
+def test_quest_instances_valid_insert_round_trips(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances-valid.db")
     try:
         _apply(database)
@@ -1621,7 +1621,7 @@ def test_task_instances_valid_insert_round_trips(tmp_path) -> None:
         row = _run(
             database.fetch_one(
                 "SELECT definition_id, child_id, due_date, due_time, generated_at "
-                "FROM task_instances WHERE id = ?",
+                "FROM quest_instances WHERE id = ?",
                 (instance_id,),
             )
         )
@@ -1630,7 +1630,7 @@ def test_task_instances_valid_insert_round_trips(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_instances_due_time_round_trips(tmp_path) -> None:
+def test_quest_instances_due_time_round_trips(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances-due-time.db")
     try:
         _apply(database)
@@ -1640,7 +1640,7 @@ def test_task_instances_due_time_round_trips(tmp_path) -> None:
         )
         row = _run(
             database.fetch_one(
-                "SELECT due_time FROM task_instances WHERE id = ?",
+                "SELECT due_time FROM quest_instances WHERE id = ?",
                 (instance_id,),
             )
         )
@@ -1649,7 +1649,7 @@ def test_task_instances_due_time_round_trips(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_instances_duplicate_definition_date_fails(tmp_path) -> None:
+def test_quest_instances_duplicate_definition_date_fails(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances-duplicate.db")
     try:
         _apply(database)
@@ -1661,7 +1661,7 @@ def test_task_instances_duplicate_definition_date_fails(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_instances_same_date_different_definitions_allowed(
+def test_quest_instances_same_date_different_definitions_allowed(
     tmp_path,
 ) -> None:
     database = _open_db(tmp_path / "task-instances-multi-def.db")
@@ -1678,26 +1678,26 @@ def test_task_instances_same_date_different_definitions_allowed(
         _insert_definition(database, child_id=2, rule_id=rule_id)
         _insert_instance(database, definition_id=1, due_date="2026-09-14")
         _insert_instance(database, definition_id=2, due_date="2026-09-14")
-        row = _run(database.fetch_one("SELECT COUNT(*) FROM task_instances"))
+        row = _run(database.fetch_one("SELECT COUNT(*) FROM quest_instances"))
         assert row == (2,)
     finally:
         _run(database.close())
 
 
-def test_task_instances_same_definition_different_dates_allowed(tmp_path) -> None:
+def test_quest_instances_same_definition_different_dates_allowed(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances-multi-date.db")
     try:
         _apply(database)
         _setup_definition(database)
         _insert_instance(database, definition_id=1, due_date="2026-09-14")
         _insert_instance(database, definition_id=1, due_date="2026-09-15")
-        row = _run(database.fetch_one("SELECT COUNT(*) FROM task_instances"))
+        row = _run(database.fetch_one("SELECT COUNT(*) FROM quest_instances"))
         assert row == (2,)
     finally:
         _run(database.close())
 
 
-def test_task_instances_unknown_definition_fails(tmp_path) -> None:
+def test_quest_instances_unknown_definition_fails(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances-bad-def.db")
     try:
         _apply(database)
@@ -1708,7 +1708,7 @@ def test_task_instances_unknown_definition_fails(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_instances_unknown_child_fails(tmp_path) -> None:
+def test_quest_instances_unknown_child_fails(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances-bad-child.db")
     try:
         _apply(database)
@@ -1719,7 +1719,7 @@ def test_task_instances_unknown_child_fails(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_instances_due_date_not_null_enforced(tmp_path) -> None:
+def test_quest_instances_due_date_not_null_enforced(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances-due-null.db")
     try:
         _apply(database)
@@ -1730,7 +1730,7 @@ def test_task_instances_due_date_not_null_enforced(tmp_path) -> None:
         _run(database.close())
 
 
-def test_task_instances_generated_at_not_null_enforced(tmp_path) -> None:
+def test_quest_instances_generated_at_not_null_enforced(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances-generated-null.db")
     try:
         _apply(database)
@@ -2026,8 +2026,8 @@ def test_applying_full_ddl_twice_keeps_rows(tmp_path) -> None:
         for table in (
             "children",
             "schedule_rules",
-            "task_definitions",
-            "task_instances",
+            "quest_definitions",
+            "quest_instances",
             "completion_events",
         ):
             row = _run(database.fetch_one(f"SELECT COUNT(*) FROM {table}"))

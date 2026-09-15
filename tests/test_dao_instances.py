@@ -1,4 +1,4 @@
-"""Tests for dao_instances.py: task_instances + append-only completion_events."""
+"""Tests for dao_instances.py: quest_instances + append-only completion_events."""
 from __future__ import annotations
 
 import asyncio
@@ -11,10 +11,10 @@ from custom_components.nestquest.dao_children import ChildrenDao
 from custom_components.nestquest.dao_instances import (
     CompletionEventRecord,
     CompletionEventsDao,
-    TaskInstanceRecord,
-    TaskInstancesDao,
+    QuestInstanceRecord,
+    QuestInstancesDao,
 )
-from custom_components.nestquest.dao_rules import ScheduleRulesDao, TaskDefinitionsDao
+from custom_components.nestquest.dao_rules import ScheduleRulesDao, QuestDefinitionsDao
 from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.migrations import apply_migrations
 
@@ -76,8 +76,8 @@ async def _prepare(path) -> tuple:
     await apply_migrations(database)
     children = ChildrenDao(database)
     rules = ScheduleRulesDao(database)
-    definitions = TaskDefinitionsDao(database)
-    instances = TaskInstancesDao(database)
+    definitions = QuestDefinitionsDao(database)
+    instances = QuestInstancesDao(database)
     events = CompletionEventsDao(database)
     child = await children.create("Ada", _now_stamp())
     rule = await rules.create("daily", D1)
@@ -111,7 +111,7 @@ def _with_db(tmp_path, name):
 
 
 # ---------------------------------------------------------------------------
-# task_instances: upsert idempotency
+# quest_instances: upsert idempotency
 # ---------------------------------------------------------------------------
 
 
@@ -121,13 +121,13 @@ def test_upsert_creates_then_is_idempotent(tmp_path) -> None:
         first = await instances.upsert(
             definition.id, child.id, D1, _now_stamp()
         )
-        assert isinstance(first, TaskInstanceRecord)
+        assert isinstance(first, QuestInstanceRecord)
         second = await instances.upsert(
             definition.id, child.id, D1, _now_stamp()
         )
         assert second.id == first.id
         rows = await database.fetch_one(
-            "SELECT COUNT(*) FROM task_instances"
+            "SELECT COUNT(*) FROM quest_instances"
         )
         assert rows == (1,)
         return second
@@ -323,8 +323,8 @@ def test_upsert_no_past_check_uses_execution_date_not_call_date(
             await apply_migrations(database)
             children = ChildrenDao(database)
             rules = ScheduleRulesDao(database)
-            definitions = TaskDefinitionsDao(database)
-            instances = TaskInstancesDao(database)
+            definitions = QuestDefinitionsDao(database)
+            instances = QuestInstancesDao(database)
             events = CompletionEventsDao(database)
             child = await children.create("Ada", _now_stamp())
             rule = await rules.create("daily", D1)
@@ -369,7 +369,7 @@ def test_upsert_refuses_immutable_completed_instance(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# task_instances: get / list
+# quest_instances: get / list
 # ---------------------------------------------------------------------------
 
 
@@ -453,7 +453,7 @@ def test_list_by_date_range_rejects_inverted_range(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# task_instances: delete_future_uncompleted
+# quest_instances: delete_future_uncompleted
 # ---------------------------------------------------------------------------
 
 
@@ -1084,8 +1084,8 @@ def test_append_concurrent_events_serialize(tmp_path) -> None:
     async def _prepare_in(database):
         children = ChildrenDao(database)
         rules = ScheduleRulesDao(database)
-        definitions = TaskDefinitionsDao(database)
-        instances = TaskInstancesDao(database)
+        definitions = QuestDefinitionsDao(database)
+        instances = QuestInstancesDao(database)
         events = CompletionEventsDao(database)
         child = await children.create("Ada", _now_stamp())
         rule = await rules.create("daily", D1)
