@@ -476,3 +476,126 @@ def test_engine_is_immutable() -> None:
         engine._schedules = {}
     with pytest.raises(AttributeError, match="immutable snapshot"):
         engine.something_new = 1
+
+
+# ---------------------------------------------------------------------------
+# Overrides take precedence over the pattern
+# ---------------------------------------------------------------------------
+
+
+def _engine_with_overrides(*overrides_for_declan) -> PresenceEngine:
+    anchor = datetime.date(2026, 1, 5)  # Monday
+    return PresenceEngine(
+        {
+            1: PresenceSchedule(
+                1, 2, anchor, {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()}
+            )
+        },
+        overrides={1: list(overrides_for_declan)} if overrides_for_declan else {},
+    )
+
+
+def test_absent_override_on_normally_present_day_wins() -> None:
+    # 2026-01-06 is Tuesday of Declan's week 0: normally present.
+    engine = _engine_with_overrides(
+        PresenceOverride(1, "2026-01-06", "2026-01-06", False, note="away")
+    )
+    assert engine.is_present(1, datetime.date(2026, 1, 6)) is False
+    # The pattern resumes outside the override.
+    assert engine.is_present(1, datetime.date(2026, 1, 7)) is True
+
+
+def test_present_override_on_normally_absent_day_wins() -> None:
+    # 2026-01-13 is in Declan's week 1 (away all week); a present
+    # override on the Tuesday of week 1 brings him home for that day.
+    engine = _engine_with_overrides(
+        PresenceOverride(1, "2026-01-13", "2026-01-13", True, note="trade")
+    )
+    assert engine.is_present(1, datetime.date(2026, 1, 13)) is True
+    assert engine.is_present(1, datetime.date(2026, 1, 14)) is False
+
+
+def test_override_applies_without_a_schedule() -> None:
+    """An override on a schedule-free child still applies: holidays and
+    swaps must work for the always-present sibling too."""
+    engine = PresenceEngine(
+        {},
+        overrides={
+            3: [
+                PresenceOverride(
+                    3, "2026-07-20", "2026-07-24", False, note="holiday"
+                )
+            ]
+        },
+    )
+    assert engine.is_present(3, datetime.date(2026, 7, 22)) is False
+    assert engine.is_present(3, datetime.date(2026, 7, 19)) is True
+    assert engine.is_present(3, datetime.date(2026, 7, 25)) is True
+
+
+def test_override_range_beats_pattern_for_its_span() -> None:
+    engine = _engine_with_overrides(
+        PresenceOverride(1, "2026-01-13", "2026-01-17", True, note="traded week")
+    )
+    for offset in range(12, 17):
+        day = datetime.date(2026, 1, 1) + datetime.timedelta(days=offset)
+        assert engine.is_present(1, day) is True, f"{day}"
+    # Days outside the span stay on the pattern (week 1: absent).
+    assert engine.is_present(1, datetime.date(2026, 1, 12)) is False
+    assert engine.is_present(1, datetime.date(2026, 1, 18)) is False
+
+
+def test_engine_override_snapshot_validation() -> None:
+    schedule = PresenceSchedule(1, 1, ANCHOR, {0: {0}})
+    entry = PresenceOverride(1, "2026-07-20", "2026-07-20", True)
+    with pytest.raises(ValueError, match="must map child_id"):
+        PresenceEngine({1: schedule}, overrides=[entry])
+    with pytest.raises(ValueError, match="must be a list"):
+        PresenceEngine({1: schedule}, overrides={1: entry})
+    with pytest.raises(ValueError, match="must be"):
+        PresenceEngine({1: schedule}, overrides={1: ["nope"]})
+    with pytest.raises(ValueError, match="holds an override"):
+        PresenceEngine({1: schedule}, overrides={2: [entry]})
+    with pytest.raises(ValueError, match="child_id must be an integer"):
+        PresenceEngine({1: schedule}, overrides={True: [entry]})
+
+
+def test_engine_overlapping_snapshot_uses_latest_start() -> None:
+    """The DAO layer refuses overlapping overrides per child; if a
+    snapshot carries them anyway (hand-built), the latest start date
+    wins deterministically."""
+    engine = _engine_with_overrides(
+        PresenceOverride(1, "2026-01-06", "2026-01-10", False),
+        PresenceOverride(1, "2026-01-08", "2026-01-12", True),
+    )
+    # Jan 6-7: only the earlier override covers -> absent.
+    assert engine.is_present(1, datetime.date(2026, 1, 6)) is False
+    # Jan 8-10: both cover; the LATER start (present) wins.
+    assert engine.is_present(1, datetime.date(2026, 1, 9)) is True
+    # Jan 11-12: only the later override covers -> present.
+    assert engine.is_present(1, datetime.date(2026, 1, 11)) is True
+
+
+def test_engine_override_lists_are_frozen() -> None:
+    """The overrides snapshot must be truly read-only: the engine is
+    built directly on the CALLER's list, so mutating that list after
+    construction would change answers under a shallow copy — under the
+    frozen snapshot it must not."""
+    entry = PresenceOverride(1, "2026-01-06", "2026-01-06", False)
+    entries = [entry]
+    schedule = PresenceSchedule(
+        1, 2, ANCHOR, {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()}
+    )
+    engine = PresenceEngine(
+        {1: schedule}, overrides={1: entries}  # caller-owned list
+    )
+    assert engine.is_present(1, datetime.date(2026, 1, 6)) is False
+    entries.append(PresenceOverride(1, "2026-01-07", "2026-01-07", False))
+    # The late append must NOT change the engine's answers...
+    assert engine.is_present(1, datetime.date(2026, 1, 7)) is True
+    # Tuples have no append at all (AttributeError), and the mapping
+    # itself refuses reassignment.
+    with pytest.raises(AttributeError):
+        engine._overrides[1].append(entry)
+    with pytest.raises(AttributeError, match="immutable snapshot"):
+        engine._overrides = {}

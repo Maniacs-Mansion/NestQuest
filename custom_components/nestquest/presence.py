@@ -332,7 +332,11 @@ class PresenceEngine:
     :func:`cycle_week_index`, never ISO week parity).
     """
 
-    def __init__(self, schedules: dict[int, PresenceSchedule]) -> None:
+    def __init__(
+        self,
+        schedules: dict[int, PresenceSchedule],
+        overrides: dict[int, list[PresenceOverride]] | None = None,
+    ) -> None:
         if not isinstance(schedules, dict):
             raise ValueError(
                 f"schedules must map child_id to PresenceSchedule, got "
@@ -353,16 +357,66 @@ class PresenceEngine:
                     f"schedules is keyed {child_id!r} but holds the "
                     f"schedule of child {schedule.child_id}"
                 )
+        if overrides is None:
+            overrides = {}
+        if not isinstance(overrides, dict):
+            raise ValueError(
+                "overrides must map child_id to a list of "
+                f"PresenceOverride, got {overrides!r}"
+            )
+        for child_id, entries in overrides.items():
+            _validate_child_id(child_id)
+            if not isinstance(entries, list):
+                raise ValueError(
+                    f"overrides[{child_id!r}] must be a list of "
+                    f"PresenceOverride, got {entries!r}"
+                )
+            for entry in entries:
+                if not isinstance(entry, PresenceOverride):
+                    raise ValueError(
+                        f"overrides[{child_id!r}] entries must be "
+                        f"PresenceOverride, got {entry!r}"
+                    )
+                if entry.child_id != child_id:
+                    raise ValueError(
+                        f"overrides is keyed {child_id!r} but holds an "
+                        f"override of child {entry.child_id}"
+                    )
         # Read-only snapshot: reassignment is refused and no mutator
         # exists, so a built engine answers consistently for its
-        # lifetime.
+        # lifetime.  The overrides lists are copied to immutable
+        # tuples — a shallow mapping copy alone would leave caller-
+        # owned lists reachable through _overrides, and mutating one
+        # later would change is_present results.
         object.__setattr__(self, "_schedules", MappingProxyType(dict(schedules)))
+        object.__setattr__(
+            self,
+            "_overrides",
+            MappingProxyType(
+                {child_id: tuple(entries) for child_id, entries in overrides.items()}
+            ),
+        )
 
     def is_present(self, child_id: object, date: object) -> bool:
-        """Return whether ``child_id`` is present on ``date``."""
+        """Return whether ``child_id`` is present on ``date``.
+
+        Overrides take precedence over the repeating pattern: when an
+        override covers the date, its flag IS the answer — including
+        for a child with no schedule at all.  The DAO layer guarantees
+        a child's overrides never overlap; if a snapshot still carries
+        two covering the same date, the one with the LATEST start date
+        wins (deterministic, and matches "the most specific swap wins").
+        """
         if isinstance(child_id, bool) or not isinstance(child_id, int):
             raise ValueError(f"child_id must be an integer, got {child_id!r}")
         target = _parse_date(date, "date")
+        entries = self._overrides.get(child_id) or []
+        covering = [
+            entry for entry in entries if entry.covers(target)
+        ]
+        if covering:
+            winner = max(covering, key=lambda entry: entry.start_date)
+            return winner.is_present
         schedule = self._schedules.get(child_id)
         if schedule is None:
             # No schedule at all: present every day (household default).
