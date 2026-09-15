@@ -14,7 +14,7 @@ from custom_components.nestquest.children import (
     list_children,
     set_child_active,
 )
-from custom_components.nestquest.dao_children import ChildRecord
+from custom_components.nestquest.dao_children import ChildRecord, ChildrenDao
 from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.migrations import apply_migrations
 
@@ -448,12 +448,11 @@ def test_edit_child_concurrent_opposite_edits_return_own_values(
             assert record_a.sort_order == 1
             assert record_b.colour == "#BBBBBB"
             assert record_b.sort_order == 2
-            # B landed last: the stored row is B's.
-            row = await database.fetch_one(
-                "SELECT colour, sort_order FROM children WHERE id = ?",
-                (child.id,),
-            )
-            assert row == ("#BBBBBB", 2)
+            # B landed last: the stored row is B's (read via the DAO —
+            # the children leak guard forbids raw probes here).
+            stored = await ChildrenDao(database).get(child.id)
+            assert stored is not None
+            assert (stored.colour, stored.sort_order) == ("#BBBBBB", 2)
         finally:
             await database.close()
 
@@ -494,10 +493,9 @@ def test_set_child_active_concurrent_opposite_transitions_return_own(
 
             assert record_a.is_active is False
             assert record_b.is_active is True
-            row = await database.fetch_one(
-                "SELECT is_active FROM children WHERE id = ?", (child.id,)
-            )
-            assert row == (1,)
+            stored = await ChildrenDao(database).get(child.id)
+            assert stored is not None
+            assert stored.is_active is True
         finally:
             await database.close()
 
