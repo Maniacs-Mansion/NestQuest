@@ -339,6 +339,10 @@ class PresenceEngine:
                 f"{schedules!r}"
             )
         for child_id, schedule in schedules.items():
+            # Validate the KEY as a model child id too: True and 1.0
+            # compare equal to 1, so {True: schedule(1)} would be
+            # accepted and then behave differently on lookup.
+            _validate_child_id(child_id)
             if not isinstance(schedule, PresenceSchedule):
                 raise ValueError(
                     f"schedules[{child_id!r}] must be a PresenceSchedule, "

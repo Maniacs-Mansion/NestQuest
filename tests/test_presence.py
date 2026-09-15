@@ -393,11 +393,21 @@ def _three_child_engine() -> PresenceEngine:
 
 
 def test_engine_child_without_schedule_is_always_present() -> None:
+    """Every day of the four-week span, all three children get the
+    expected verdict: Chloe (no schedule) always present; the two
+    rotation children complementary per the anchor pattern."""
     engine = _three_child_engine()
-    # Chloe has no schedule: present every day, including weekends.
-    for offset in range(0, 28, 3):
-        day = datetime.date(2026, 1, 5) + datetime.timedelta(days=offset)
-        assert engine.is_present(3, day) is True, f"offset {offset}"
+    anchor = datetime.date(2026, 1, 5)
+    for offset in range(28):
+        day = anchor + datetime.timedelta(days=offset)
+        week = ((day - anchor).days // 7) % 2
+        assert engine.is_present(3, day) is True, f"offset {offset}: Chloe"
+        assert engine.is_present(1, day) is (week == 0), (
+            f"offset {offset}: Declan should follow week {week}"
+        )
+        assert engine.is_present(2, day) is (week == 1), (
+            f"offset {offset}: Jordyn should follow week {week}"
+        )
 
 
 def test_engine_alternating_children_are_complementary_for_four_weeks() -> None:
@@ -449,6 +459,10 @@ def test_engine_rejects_bad_construction_and_inputs() -> None:
         PresenceEngine({1: "not-a-schedule"})
     with pytest.raises(ValueError, match="holds the schedule"):
         PresenceEngine({2: schedule})
+    with pytest.raises(ValueError, match="child_id must be an integer"):
+        PresenceEngine({True: schedule})
+    with pytest.raises(ValueError, match="child_id must be an integer"):
+        PresenceEngine({1.0: PresenceSchedule(1, 1, ANCHOR, {0: {0}})})
     engine = PresenceEngine({1: schedule})
     with pytest.raises(ValueError, match="child_id must be an integer"):
         engine.is_present(True, ANCHOR)
