@@ -15,13 +15,13 @@ event.  A package-wide guard test (bottom of the test module) keeps
 mutation SQL for this table out of every other module.
 
 Upsert semantics: ``QuestInstancesDao.upsert`` is idempotent on
-(definition_id, due_date) — re-running materialization for a date
-whose instance already exists updates nothing that matters
-(child_id/due_time are refreshed only in the degenerate re-generation
-case where they changed) and never duplicates a row.  The schema's
-UNIQUE(definition_id, due_date) is the last line of defense.  The
-upsert refuses a child that is not an assignee of the definition
-(D-008 multi-assignee model).
+(definition_id, child_id, due_date, window) — re-running
+materialization for a tuple whose instance already exists refreshes
+only the generation-time snapshot columns and never duplicates a row.
+The schema's UNIQUE(definition_id, child_id, due_date, window) is the
+last line of defense.  The upsert refuses a child that is not an
+assignee of the definition and a window outside ``const.QUEST_WINDOWS``
+(D-008 multi-assignee, multi-window model).
 
 ``delete_future_uncompleted`` implements the Feature 06/07 rule that
 reassignment and schedule edits regenerate future instances: it
@@ -37,7 +37,7 @@ import datetime
 from dataclasses import dataclass
 
 from .dao_children import _connection_lock
-from .dao_rules import _validate_date
+from .dao_rules import _validate_date, _validate_window
 from .db import NestQuestDatabase
 
 #: Timestamp policy for completion_events.occurred_at: strict UTC
@@ -90,6 +90,7 @@ class QuestInstanceRecord:
     id: int
     definition_id: int
     child_id: int
+    window: str
     due_date: str
     due_time: str | None
     generated_at: str
@@ -110,7 +111,7 @@ class CompletionEventRecord:
 
 
 _INSTANCE_COLUMNS = (
-    "id, definition_id, child_id, due_date, due_time, generated_at"
+    "id, definition_id, child_id, window, due_date, due_time, generated_at"
 )
 _EVENT_COLUMNS = (
     "id, instance_id, child_id, event_type, actor_source, actor_user_id, "
@@ -128,9 +129,10 @@ def _instance_from_row(row: tuple) -> QuestInstanceRecord:
         id=row[0],
         definition_id=row[1],
         child_id=row[2],
-        due_date=row[3],
-        due_time=row[4],
-        generated_at=row[5],
+        window=row[3],
+        due_date=row[4],
+        due_time=row[5],
+        generated_at=row[6],
     )
 
 
@@ -160,31 +162,40 @@ class QuestInstancesDao:
         due_date: str,
         generated_at: str,
         *,
+        window: str,
         due_time: str | None = None,
     ) -> QuestInstanceRecord:
-        """Create the dated instance for (definition_id, due_date) idempotently.
+        """Create the dated instance for the widened key idempotently.
 
-        Running materialization twice for the same definition/date
-        yields ONE row: the ON CONFLICT path refreshes the
-        generation-time snapshot columns (child_id, due_time) and
-        regenerates the stamp, but can never create a duplicate — the
-        schema UNIQUE(definition_id, due_date) backs this up.
+        The instance key is (definition_id, child_id, due_date, window)
+        (D-008): running materialization twice for the same tuple
+        yields ONE row — the ON CONFLICT path refreshes the
+        generation-time snapshot columns (due_time) and regenerates the
+        stamp, but can never create a duplicate.  The schema's
+        UNIQUE(definition_id, child_id, due_date, window) backs this
+        up, so the twice-daily case (two windows, one child, one date)
+        yields two rows and the shared case (three assignees, one
+        window) yields three.
 
         Guardrails enforced here:
 
         - ``due_date`` must be TODAY or later: instances are never
           generated in the past (Feature 07).  The caller's
           materialization horizon is future-dated by definition.
+        - ``window`` must be one of ``const.QUEST_WINDOWS``.
         - An existing instance WITH a completion event is IMMUTABLE:
           the conflict path must not rewrite its snapshot columns
           (Feature 07/08).  The upsert refuses with ValueError in that
           case — silently no-oping would mask a materialization bug.
+        - The child must be an assignee of the definition (D-008
+          multi-assignee model).
 
         The definition must exist (validated atomically under the
         connection lock so a concurrent definition deactivation or
         child deletion cannot slip between check and insert).
         """
         _validate_date(due_date, "due_date")
+        _validate_window(window)
         # Fail fast on obviously-past dates BEFORE queuing on the
         # connection lock (a nice early error); the AUTHORITATIVE
         # check runs after the lock is acquired, because a caller can
@@ -227,51 +238,56 @@ class QuestInstancesDao:
                         f"assigned to child {child_id}; instance must "
                         "carry an assigned child"
                     )
-                child = await self._database.fetch_one(
-                    "SELECT 1 FROM children WHERE id = ?", (child_id,)
-                )
-                if child is None:
-                    raise ValueError(f"child {child_id} does not exist")
                 existing = await self._database.fetch_one(
                     "SELECT 1 FROM completion_events "
                     "WHERE instance_id = (SELECT id FROM quest_instances "
-                    "WHERE definition_id = ? AND due_date = ?)",
-                    (definition_id, due_date),
+                    "WHERE definition_id = ? AND child_id = ? "
+                    "AND due_date = ? AND window = ?)",
+                    (definition_id, child_id, due_date, window),
                 )
                 if existing is not None:
                     raise ValueError(
                         f"instance for (definition {definition_id}, "
-                        f"due_date {due_date!r}) already has a completion "
+                        f"child {child_id}, due_date {due_date!r}, "
+                        f"window {window!r}) already has a completion "
                         "event and is immutable; it cannot be regenerated"
                     )
                 await self._database.execute(
                     "INSERT INTO quest_instances (definition_id, child_id, "
-                    "due_date, due_time, generated_at) "
-                    "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT (definition_id, due_date) DO UPDATE SET "
-                    "child_id = excluded.child_id, "
+                    "window, due_date, due_time, generated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (definition_id, child_id, due_date, "
+                    "window) DO UPDATE SET "
                     "due_time = excluded.due_time, "
                     "generated_at = excluded.generated_at",
                     (
                         definition_id,
                         child_id,
+                        window,
                         due_date,
                         due_time,
                         generated_at,
                     ),
                 )
-                instance = await self.get(definition_id, due_date)
+                instance = await self.get(
+                    definition_id, child_id, due_date, window
+                )
         assert instance is not None
         return instance
 
     async def get(
-        self, definition_id: int, due_date: str
+        self,
+        definition_id: int,
+        child_id: int,
+        due_date: str,
+        window: str,
     ) -> QuestInstanceRecord | None:
-        """Return the instance for (definition_id, due_date), or None."""
+        """Return the instance for the widened key tuple, or None."""
         row = await self._database.fetch_one(
             f"SELECT {_INSTANCE_COLUMNS} FROM quest_instances "
-            "WHERE definition_id = ? AND due_date = ?",
-            (definition_id, due_date),
+            "WHERE definition_id = ? AND child_id = ? AND due_date = ? "
+            "AND window = ?",
+            (definition_id, child_id, due_date, window),
         )
         return _instance_from_row(row) if row is not None else None
 

@@ -149,13 +149,16 @@ def test_migration_list_shape() -> None:
     (D-007) to create the quest_* tables directly; migration 2 exists
     for dev databases stamped version 1 by the pre-rename runner,
     migration 3 brings pre-D-008 definitions to the multi-assignee
-    model, and migration 4 adds the windows table.
+    model, migration 4 adds the windows table, and migration 5 rebuilds
+    quest_instances onto the widened (definition, child, date, window)
+    key.
     """
     assert MIGRATIONS[0] == SCHEMA_V1_STATEMENTS
     assert callable(MIGRATIONS[1])
     assert callable(MIGRATIONS[2])
     assert MIGRATIONS[3] == SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL
-    assert len(MIGRATIONS) == 4
+    assert callable(MIGRATIONS[4])
+    assert len(MIGRATIONS) == 5
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +428,20 @@ _V2_DEFINITIONS_DDL = [
     """,
 ]
 
+_V2_INSTANCES_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS quest_instances (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        definition_id INTEGER NOT NULL REFERENCES quest_definitions(id),
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        due_date TEXT NOT NULL,
+        due_time TEXT,
+        generated_at TEXT NOT NULL,
+        UNIQUE (definition_id, due_date)
+    )
+    """,
+]
+
 
 def _seed_v2_multi_assignee_upgrade(database) -> None:
     """Create a database shaped like a post-rename, pre-D-008 dev file.
@@ -433,11 +450,20 @@ def _seed_v2_multi_assignee_upgrade(database) -> None:
     single child_id column and no assignees table exists — stamped at
     version 2, with definition and instance rows that must survive.
     """
+    # Freeze the version-2 shape: definitions carry child_id, the
+    # instance table has no window column, and the assignees/windows
+    # tables do not exist yet — everything else matches the current DDL.
+    _v2_replaced = (
+        "quest_definitions ",
+        "quest_definition_assignees ",
+        "quest_definition_windows ",
+        "quest_instances ",
+    )
     for sql in SCHEMA_V1_STATEMENTS:
-        if "quest_definitions " in sql:
-            continue  # replaced by the legacy-shape DDL below
+        if any(name in sql for name in _v2_replaced):
+            continue
         _run(database.execute(sql))
-    for sql in _V2_DEFINITIONS_DDL:
+    for sql in _V2_DEFINITIONS_DDL + _V2_INSTANCES_DDL:
         _run(database.execute(sql))
     _run(database.execute(VERSION_TABLE_DDL))
     _run(
@@ -506,14 +532,33 @@ def test_v2_definitions_rebuilt_to_multi_assignee(tmp_path) -> None:
             )
         )
         assert assignees == [(1, 2)]
-        # The instance survived, still referencing the definition.
+        # The instance survived the rebuild, pinned to the migrated
+        # window, still referencing the definition.
         instance = _run(
             database.fetch_one(
-                "SELECT definition_id, child_id, due_date "
+                "SELECT definition_id, child_id, window, due_date "
                 "FROM quest_instances WHERE id = 1"
             )
         )
-        assert instance == (1, 2, "2026-09-15")
+        assert instance == (1, 2, "morning", "2026-09-15")
+        # The rebuilt instance table carries the widened unique key.
+        index_rows = _run(
+            database.fetch_all(
+                "PRAGMA index_list(quest_instances)"
+            )
+        )
+        unique_columns = []
+        for index_row in index_rows:
+            if index_row[2]:  # unique flag
+                info = _run(
+                    database.fetch_all(
+                        f"PRAGMA index_info('{index_row[1]}')"
+                    )
+                )
+                unique_columns.append([col[2] for col in info])
+        assert [
+            "definition_id", "child_id", "due_date", "window"
+        ] in unique_columns
         # No dangling references anywhere.
         assert _run(database.fetch_all("PRAGMA foreign_key_check")) == []
         # The rebuilt table is live for the new model: a definition

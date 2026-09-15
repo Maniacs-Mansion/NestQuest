@@ -109,25 +109,31 @@ status column.  An instance's current state derives from the latest row
 in ``completion_events`` (Feature 08), so materialization (Feature 07)
 can insert instances without knowing anything about completion and the
 append-only log stays the single source of truth.  ``definition_id``,
-``due_date`` and ``child_id`` snapshot the materialization-time facts
-("why this instance exists"): reassignment and rule edits change future
-instances only and never rewrite these rows.  ``due_time`` snapshots
-the definition's optional due time at generation for the same reason —
-the instance keeps its generation-time value even if the definition is
-edited later.  ``generated_at`` is a caller-set UTC ISO-8601 timestamp
-per the module timestamp policy (no DB default, so a generation batch
-stamps one coherent time).
+``child_id``, ``due_date`` and ``window`` snapshot the
+materialization-time facts ("why this instance exists"): assignment
+edits and rule edits change future instances only and never rewrite
+these rows.  ``window`` records which declared day window produced the
+instance (D-008), CHECK-constrained to the same three spellings
+``const`` owns.  ``due_time`` snapshots the window's optional due time
+at generation for the same reason — the instance keeps its
+generation-time value even if the definition is edited later.
+``generated_at`` is a caller-set UTC ISO-8601 timestamp per the module
+timestamp policy (no DB default, so a generation batch stamps one
+coherent time).
 
-Uniqueness: the (definition_id, due_date) pair is declared as a
-table-level ``UNIQUE`` constraint rather than a separate ``CREATE
-UNIQUE INDEX`` statement.  SQLite materializes it as an implicit unique
-index (``sqlite_autoindex_quest_instances_1``) — the required "unique
-index prevents duplicate instances" — and the constraint form cannot be
-silently dropped the way a standalone index can, so the duplicate door
-stays shut.  Idempotent materialization keys on exactly this pair.  No
-secondary indexes beyond it are declared yet: history and board queries
-(Features 08/10/13) should justify their indexes as a later migration
-once their query shapes exist.
+Uniqueness: the (definition_id, child_id, due_date, window) tuple is
+declared as a table-level ``UNIQUE`` constraint rather than a separate
+``CREATE UNIQUE INDEX`` statement.  SQLite materializes it as an
+implicit unique index (``sqlite_autoindex_quest_instances_1``) — the
+required "unique index prevents duplicate instances" — and the
+constraint form cannot be silently dropped the way a standalone index
+can, so the duplicate door stays shut.  Idempotent materialization keys
+on exactly this tuple: the twice-daily case (one definition, two
+windows, one child, one date) yields two rows and the shared case (one
+definition, three assignees, one window) yields three.  No secondary
+indexes beyond it are declared yet: history and board queries (Features
+08/10/13) should justify their indexes as a later migration once their
+query shapes exist.
 
 No ``ON DELETE`` clauses are declared on any foreign key in this
 module: children and definitions are deactivated, never deleted, so a
@@ -316,17 +322,25 @@ SCHEMA_V1_PRESENCE_OVERRIDES_DDL: list[str] = [
     """,
 ]
 
+#: Column body of ``quest_instances``, shared between the v1 DDL
+#: below and the instance-key rebuild migration, which must recreate
+#: the table in exactly this shape (D-008: the instance key is
+#: (definition_id, child_id, due_date, window) — one instance per
+#: assigned child per declared window per firing date).
+QUEST_INSTANCES_TABLE_SQL = """(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    definition_id INTEGER NOT NULL REFERENCES quest_definitions(id),
+    child_id INTEGER NOT NULL REFERENCES children(id),
+    window TEXT NOT NULL CHECK (window IN ('morning', 'afternoon', 'evening')),
+    due_date TEXT NOT NULL,
+    due_time TEXT,
+    generated_at TEXT NOT NULL,
+    UNIQUE (definition_id, child_id, due_date, window)
+)"""
+
 SCHEMA_V1_QUEST_INSTANCES_DDL: list[str] = [
-    """
-    CREATE TABLE IF NOT EXISTS quest_instances (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        definition_id INTEGER NOT NULL REFERENCES quest_definitions(id),
-        child_id INTEGER NOT NULL REFERENCES children(id),
-        due_date TEXT NOT NULL,
-        due_time TEXT,
-        generated_at TEXT NOT NULL,
-        UNIQUE (definition_id, due_date)
-    )
+    f"""
+    CREATE TABLE IF NOT EXISTS quest_instances {QUEST_INSTANCES_TABLE_SQL}
     """,
 ]
 
