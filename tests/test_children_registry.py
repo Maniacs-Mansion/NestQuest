@@ -441,6 +441,21 @@ def test_set_child_active_missing_raises(tmp_path) -> None:
     _with_db(tmp_path, "set-active-missing.db")(_body)
 
 
+@pytest.mark.parametrize("bad", ["1", "0", 1, 0, 1.0, None, "true"])
+def test_set_child_active_rejects_non_bool(tmp_path, bad) -> None:
+    """The DAO's int() would silently coerce "1"/0/1.0 into a state the
+    caller never asked for; the business layer refuses non-bools."""
+    async def _body(database):
+        child = await create_child(database, "Ada")
+        with pytest.raises(ValueError, match="is_active must be a real bool"):
+            await set_child_active(database, child.id, bad)
+        # The refused transition left the child untouched.
+        assert (await list_children(database))[0].is_active is True
+        return None
+
+    _with_db(tmp_path, "set-active-non-bool.db")(_body)
+
+
 # ---------------------------------------------------------------------------
 # Concurrency: edit/set_active are atomic under the connection lock
 # ---------------------------------------------------------------------------

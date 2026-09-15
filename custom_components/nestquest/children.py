@@ -213,7 +213,10 @@ async def set_child_active(
 
     Deactivation hides the child from the panel without deleting their
     history (feature guardrail); this is the only removal path.
-    Raises ValueError when the child does not exist.
+    ``is_active`` must be a real bool: the DAO's ``int()`` would
+    otherwise silently coerce strings and numerics ("1", 0) into a
+    state the caller never asked for.  Raises ValueError when the
+    child does not exist.
 
     Atomicity: existence check, UPDATE and readback run inside the
     connection-scoped lock, so a concurrent opposite transition cannot
@@ -223,6 +226,10 @@ async def set_child_active(
         dao = ChildrenDao(database)
         if await dao.get(child_id) is None:
             raise ValueError(f"child {child_id} does not exist")
+        if not isinstance(is_active, bool):
+            raise ValueError(
+                f"is_active must be a real bool, got {is_active!r}"
+            )
         await dao.set_active(child_id, is_active)
         updated = await dao.get(child_id)
     assert updated is not None
