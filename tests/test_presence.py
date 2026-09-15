@@ -599,3 +599,122 @@ def test_engine_override_lists_are_frozen() -> None:
         engine._overrides[1].append(entry)
     with pytest.raises(AttributeError, match="immutable snapshot"):
         engine._overrides = {}
+
+
+# ---------------------------------------------------------------------------
+# next_present_dates: the parent's pattern preview
+# ---------------------------------------------------------------------------
+
+
+def _preview_engine() -> PresenceEngine:
+    """Declan: home all of week 0, away all of week 1 (anchor
+    2026-01-05, a Monday); an away override Tue Jan 13 (his away week)
+    would matter only for the override test."""
+    return PresenceEngine(
+        {
+            1: PresenceSchedule(
+                1, 2, datetime.date(2026, 1, 5),
+                {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()},
+            )
+        }
+    )
+
+
+def test_preview_returns_the_next_present_days_of_a_known_pattern() -> None:
+    engine = _preview_engine()
+    # Starting Monday Jan 5 (present week 0): five straight days.
+    preview = engine.next_present_dates(1, "2026-01-05", 5)
+    assert preview == [
+        datetime.date(2026, 1, 5),
+        datetime.date(2026, 1, 6),
+        datetime.date(2026, 1, 7),
+        datetime.date(2026, 1, 8),
+        datetime.date(2026, 1, 9),
+    ]
+    # Starting mid-week: the rest of week 0 first, then the absent
+    # week 1 is skipped and the next present week picks up.
+    preview = engine.next_present_dates(1, "2026-01-07", 3)
+    assert preview == [
+        datetime.date(2026, 1, 7),
+        datetime.date(2026, 1, 8),
+        datetime.date(2026, 1, 9),
+    ]
+    preview = engine.next_present_dates(1, "2026-01-07", 6)
+    # Week 0 runs Mon Jan 5 .. Sun Jan 11 (all present); the away week
+    # (Jan 12-18) is skipped; week 2 resumes Jan 19.
+    assert preview == [
+        datetime.date(2026, 1, 7),
+        datetime.date(2026, 1, 8),
+        datetime.date(2026, 1, 9),
+        datetime.date(2026, 1, 10),
+        datetime.date(2026, 1, 11),
+        datetime.date(2026, 1, 19),
+    ]
+
+
+def test_preview_start_date_is_inclusive() -> None:
+    engine = _preview_engine()
+    # Jan 12 (Monday of the away week) is absent: the first present day
+    # is Jan 19 — the start date itself when present.
+    preview = engine.next_present_dates(1, "2026-01-19", 1)
+    assert preview == [datetime.date(2026, 1, 19)]
+
+
+def test_preview_honours_overrides() -> None:
+    schedule = PresenceSchedule(
+        1, 2, datetime.date(2026, 1, 5),
+        {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()},
+    )
+    engine = PresenceEngine(
+        {1: schedule},
+        overrides={
+            1: [
+                PresenceOverride(
+                    1, "2026-01-05", "2026-01-06", False, note="holiday"
+                )
+            ]
+        },
+    )
+    # Jan 5-6 blocked by the override: the preview starts Jan 7.
+    preview = engine.next_present_dates(1, "2026-01-04", 3)
+    assert preview == [
+        datetime.date(2026, 1, 7),
+        datetime.date(2026, 1, 8),
+        datetime.date(2026, 1, 9),
+    ]
+
+
+def test_preview_schedule_free_child_returns_consecutive_days() -> None:
+    engine = PresenceEngine({})
+    preview = engine.next_present_dates(3, "2026-03-01", 3)
+    assert preview == [
+        datetime.date(2026, 3, 1),
+        datetime.date(2026, 3, 2),
+        datetime.date(2026, 3, 3),
+    ]
+
+
+def test_preview_rejects_bad_inputs() -> None:
+    engine = _preview_engine()
+    with pytest.raises(ValueError, match="count must be an integer"):
+        engine.next_present_dates(1, "2026-01-05", "3")
+    with pytest.raises(ValueError, match="count must be at least 1"):
+        engine.next_present_dates(1, "2026-01-05", 0)
+    with pytest.raises(ValueError, match="child_id must be an integer"):
+        engine.next_present_dates(True, "2026-01-05", 1)
+    with pytest.raises(ValueError, match="plain calendar date"):
+        engine.next_present_dates(1, datetime.datetime(2026, 1, 5), 1)
+
+
+def test_preview_always_absent_child_raises_not_loops() -> None:
+    """A child absent every scanned day must surface as an error, not
+    hang the admin preview."""
+    engine = PresenceEngine(
+        {
+            1: PresenceSchedule(
+                1, 1, datetime.date(2026, 1, 5), {0: set()}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="not present on any"):
+        engine.next_present_dates(1, "2026-01-05", 2)
