@@ -309,18 +309,55 @@ def test_cycle_week_index_stable_across_three_year_boundaries() -> None:
     schedule = PresenceSchedule(
         1, 2, datetime.date(2019, 1, 6), {0: {0, 2, 4}, 1: {1, 3}}
     )
-    for year in (2019, 2020, 2021):
-        day = datetime.date(year, 12, 24)
-        while day < datetime.date(year + 1, 1, 8):
-            current = cycle_week_index(schedule, day)
-            following = cycle_week_index(
-                schedule, day + datetime.timedelta(days=1)
-            )
-            assert following in (current, (current + 1) % 2), (
-                f"{day} -> {day + datetime.timedelta(days=1)}: {current} "
-                f"-> {following} breaks the cycle across the year boundary"
-            )
-            day += datetime.timedelta(days=1)
+    # Independently derived expectations (anchor 2019-01-06, index =
+    # floor(days-since-anchor / 7) % 2, hand-verified) — hardcoded so
+    # even an implementation that resets or inverts at January 1st
+    # cannot pass by coincidence:
+    expected = {
+        # 2019 -> 2020 boundary
+        datetime.date(2019, 12, 26): 0,
+        datetime.date(2019, 12, 27): 0,
+        datetime.date(2019, 12, 28): 0,
+        datetime.date(2019, 12, 29): 1,
+        datetime.date(2019, 12, 30): 1,
+        datetime.date(2019, 12, 31): 1,
+        datetime.date(2020, 1, 1): 1,
+        datetime.date(2020, 1, 2): 1,
+        datetime.date(2020, 1, 3): 1,
+        datetime.date(2020, 1, 4): 1,
+        datetime.date(2020, 1, 5): 0,
+        datetime.date(2020, 1, 6): 0,
+        datetime.date(2020, 1, 7): 0,
+        # 2020 (53 ISO weeks) -> 2021 boundary
+        datetime.date(2020, 12, 27): 1,
+        datetime.date(2020, 12, 28): 1,
+        datetime.date(2020, 12, 29): 1,
+        datetime.date(2020, 12, 30): 1,
+        datetime.date(2020, 12, 31): 1,
+        datetime.date(2021, 1, 1): 1,
+        datetime.date(2021, 1, 2): 1,
+        datetime.date(2021, 1, 3): 0,
+        datetime.date(2021, 1, 4): 0,
+        datetime.date(2021, 1, 5): 0,
+        datetime.date(2021, 1, 6): 0,
+        datetime.date(2021, 1, 7): 0,
+        # 2021 -> 2022 boundary
+        datetime.date(2021, 12, 27): 1,
+        datetime.date(2021, 12, 28): 1,
+        datetime.date(2021, 12, 29): 1,
+        datetime.date(2021, 12, 30): 1,
+        datetime.date(2021, 12, 31): 1,
+        datetime.date(2022, 1, 1): 1,
+        datetime.date(2022, 1, 2): 0,
+        datetime.date(2022, 1, 3): 0,
+        datetime.date(2022, 1, 4): 0,
+        datetime.date(2022, 1, 5): 0,
+        datetime.date(2022, 1, 6): 0,
+        datetime.date(2022, 1, 7): 0,
+    }
+    for day, wanted in expected.items():
+        got = cycle_week_index(schedule, day)
+        assert got == wanted, f"{day}: expected week {wanted}, got {got}"
     # And 2020 really is the 53-ISO-week year this guards against.
     assert datetime.date(2020, 12, 31).isocalendar()[1] == 53
 
