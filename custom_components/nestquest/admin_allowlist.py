@@ -91,6 +91,23 @@ async def set_admin_ids(
                 await dao.add(user_id, _now_stamp())
 
 
+async def is_admin(
+    database: NestQuestDatabase, user_id: object
+) -> bool:
+    """Resolve an HA user ID against the allowlist — FAILS CLOSED.
+
+    True only for an allowlisted user id.  Everything else is False:
+    a non-allowlisted id, an unknown id, a None or non-string value
+    (a service call with no user context), and an empty allowlist
+    (nobody is admin rather than everybody).  The Feature 09 gate
+    wraps every admin-only service with this verdict; it never raises
+    for malformed input — malformed means not admin.
+    """
+    if not isinstance(user_id, str) or not user_id:
+        return False
+    return await AdminUsersDao(database).exists(user_id)
+
+
 async def seed_setup_admin(
     database: NestQuestDatabase,
     *,
