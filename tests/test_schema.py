@@ -17,6 +17,7 @@ from custom_components.nestquest.schema import (
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V1_QUEST_DEFINITIONS_DDL,
     SCHEMA_V1_QUEST_DEFINITION_ASSIGNEES_DDL,
+    SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL,
     SCHEMA_V1_QUEST_INSTANCES_DDL,
     async_apply_ddl,
 )
@@ -167,13 +168,14 @@ def _insert_override(database, child_id, **overrides):
 # ---------------------------------------------------------------------------
 
 
-def test_schema_v1_statements_compose_the_seven_tables() -> None:
+def test_schema_v1_statements_compose_the_eight_tables() -> None:
     assert SCHEMA_V1_STATEMENTS == [
         *SCHEMA_V1_CHILDREN_DDL,
         *SCHEMA_V1_ADMIN_USERS_DDL,
         *SCHEMA_V1_SCHEDULE_RULES_DDL,
         *SCHEMA_V1_QUEST_DEFINITIONS_DDL,
         *SCHEMA_V1_QUEST_DEFINITION_ASSIGNEES_DDL,
+        *SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL,
         *SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
         *SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
         *SCHEMA_V1_QUEST_INSTANCES_DDL,
@@ -968,6 +970,166 @@ def test_quest_definition_assignees_duplicate_pair_fails(tmp_path) -> None:
                     "INSERT INTO quest_definition_assignees "
                     "(definition_id, child_id) VALUES (?, 1)",
                     (definition_id,),
+                )
+            )
+    finally:
+        _run(database.close())
+
+
+def test_quest_definition_windows_table_exists_after_applying_ddl(
+    tmp_path,
+) -> None:
+    database = _open_db(tmp_path / "windows.db")
+    try:
+        _apply(database)
+        row = _run(
+            database.fetch_one(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'quest_definition_windows'"
+            )
+        )
+        assert row is not None and row[0] == "quest_definition_windows"
+    finally:
+        _run(database.close())
+
+
+def test_quest_definition_windows_columns_types_and_constraints(
+    tmp_path,
+) -> None:
+    database = _open_db(tmp_path / "windows-columns.db")
+    try:
+        _apply(database)
+        columns = _run(
+            database.fetch_all("PRAGMA table_info(quest_definition_windows)")
+        )
+        # cid, name, type, notnull, dflt_value, pk — the composite
+        # primary key spans definition_id and window.
+        assert [(row[1], row[2], row[3], row[4], row[5]) for row in columns] == [
+            ("definition_id", "INTEGER", 1, None, 1),
+            ("window", "TEXT", 1, None, 2),
+            ("due_time", "TEXT", 0, None, 0),
+        ]
+    finally:
+        _run(database.close())
+
+
+def test_quest_definition_windows_foreign_keys_declared(tmp_path) -> None:
+    database = _open_db(tmp_path / "windows-fks.db")
+    try:
+        _apply(database)
+        fks = _run(
+            database.fetch_all(
+                "PRAGMA foreign_key_list(quest_definition_windows)"
+            )
+        )
+        declared = {(row[2], row[3], row[4]) for row in fks}
+        assert declared == {
+            ("quest_definitions", "definition_id", "id"),
+        }
+    finally:
+        _run(database.close())
+
+
+def test_quest_definition_windows_valid_rows_round_trip(tmp_path) -> None:
+    database = _open_db(tmp_path / "windows-roundtrip.db")
+    try:
+        _apply(database)
+        _run(
+            database.execute(
+                "INSERT INTO children (display_name, created_at) VALUES (?, ?)",
+                ("Ada", "2026-09-13T00:00:00+00:00"),
+            )
+        )
+        _insert_rule(database)
+        definition_id = _insert_definition(database, assignees=None)
+        for window, due in (
+            ("morning", "09:00"),
+            ("afternoon", None),
+            ("evening", "19:30"),
+        ):
+            _run(
+                database.execute(
+                    "INSERT INTO quest_definition_windows "
+                    "(definition_id, window, due_time) VALUES (?, ?, ?)",
+                    (definition_id, window, due),
+                )
+            )
+        rows = _run(
+            database.fetch_all(
+                "SELECT window, due_time FROM quest_definition_windows "
+                "WHERE definition_id = ? ORDER BY window",
+                (definition_id,),
+            )
+        )
+        assert rows == [
+            ("afternoon", None),
+            ("evening", "19:30"),
+            ("morning", "09:00"),
+        ]
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize(
+    "window", ["Midnight", "MORNING", "noon", "", "evenings"]
+)
+def test_quest_definition_windows_window_check_enforced(
+    tmp_path, window
+) -> None:
+    database = _open_db(tmp_path / "windows-check.db")
+    try:
+        _apply(database)
+        _insert_rule(database)
+        definition_id = _insert_definition(database, assignees=None)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _run(
+                database.execute(
+                    "INSERT INTO quest_definition_windows "
+                    "(definition_id, window, due_time) VALUES (?, ?, NULL)",
+                    (definition_id, window),
+                )
+            )
+    finally:
+        _run(database.close())
+
+
+def test_quest_definition_windows_duplicate_window_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "windows-duplicate.db")
+    try:
+        _apply(database)
+        _insert_rule(database)
+        definition_id = _insert_definition(database, assignees=None)
+        _run(
+            database.execute(
+                "INSERT INTO quest_definition_windows "
+                "(definition_id, window, due_time) "
+                "VALUES (?, 'morning', NULL)",
+                (definition_id,),
+            )
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            _run(
+                database.execute(
+                    "INSERT INTO quest_definition_windows "
+                    "(definition_id, window, due_time) "
+                    "VALUES (?, 'morning', '09:00')",
+                    (definition_id,),
+                )
+            )
+    finally:
+        _run(database.close())
+
+
+def test_quest_definition_windows_unknown_definition_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "windows-bad-definition.db")
+    try:
+        _apply(database)
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            _run(
+                database.execute(
+                    "INSERT INTO quest_definition_windows "
+                    "(definition_id, window, due_time) "
+                    "VALUES (999, 'morning', NULL)"
                 )
             )
     finally:

@@ -95,6 +95,15 @@ migration runner rebuilds a pre-D-008 table into this shape and copies
 its single-assignee column across.  The composite primary key makes
 duplicate assignment impossible at the storage layer.
 
+Quest windows (D-008): ``quest_definition_windows`` declares which day
+windows a definition spans — one row per (definition, window), the
+composite primary key making a window idempotent per definition.
+``window`` is CHECK-constrained to the three spellings ``const`` owns;
+``due_time`` optionally pins a due time inside the window and is
+caller-validated (strict HH:MM) by the DAO layer, matching the date
+policy above.  The window clock ranges live in ``const.py``, not here:
+this layer stores what the caller declares and never interprets clocks.
+
 Quest instances: ``quest_instances`` deliberately carries NO completion
 status column.  An instance's current state derives from the latest row
 in ``completion_events`` (Feature 08), so materialization (Feature 07)
@@ -260,6 +269,17 @@ SCHEMA_V1_QUEST_DEFINITION_ASSIGNEES_DDL: list[str] = [
     """,
 ]
 
+SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS quest_definition_windows (
+        definition_id INTEGER NOT NULL REFERENCES quest_definitions(id),
+        window TEXT NOT NULL CHECK (window IN ('morning', 'afternoon', 'evening')),
+        due_time TEXT,
+        PRIMARY KEY (definition_id, window)
+    )
+    """,
+]
+
 SCHEMA_V1_PRESENCE_SCHEDULES_DDL: list[str] = [
     f"""
     CREATE TABLE IF NOT EXISTS presence_schedules (
@@ -342,6 +362,7 @@ SCHEMA_V1_STATEMENTS: list[str] = [
     *SCHEMA_V1_SCHEDULE_RULES_DDL,
     *SCHEMA_V1_QUEST_DEFINITIONS_DDL,
     *SCHEMA_V1_QUEST_DEFINITION_ASSIGNEES_DDL,
+    *SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL,
     *SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
     *SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
     *SCHEMA_V1_QUEST_INSTANCES_DDL,

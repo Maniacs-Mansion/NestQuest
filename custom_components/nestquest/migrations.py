@@ -73,6 +73,7 @@ from .schema import (
     QUEST_DEFINITIONS_TABLE_SQL,
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V1_QUEST_DEFINITION_ASSIGNEES_DDL,
+    SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -256,6 +257,10 @@ MIGRATIONS: Sequence[MigrationStep] = [
     MIGRATION_1_V1_DDL,
     _rename_legacy_task_tables,
     _add_definition_assignees,
+    # Migration 4 (D-008): the windows table is a plain new table — a
+    # CREATE IF NOT EXISTS suffices for both fresh databases (which
+    # already made it in migration 1) and pre-window databases.
+    list(SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL),
 ]
 
 

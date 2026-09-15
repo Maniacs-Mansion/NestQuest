@@ -11,6 +11,7 @@ from custom_components.nestquest.dao_rules import (
     ScheduleRuleRecord,
     ScheduleRulesDao,
     QuestDefinitionRecord,
+    QuestDefinitionWindowRecord,
     QuestDefinitionsDao,
 )
 from custom_components.nestquest.db import NestQuestDatabase
@@ -790,6 +791,96 @@ def test_definition_list_assignees_orders_by_child_sort_order(
     _with_db(tmp_path, "definition-assignees-order.db")(_body)
 
 
+def test_definition_upsert_window_round_trip(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        definition = await definitions.create("A", rule.id, NOW)
+        window = await definitions.upsert_window(
+            definition.id, "morning", due_time="09:00"
+        )
+        assert window == QuestDefinitionWindowRecord(
+            definition.id, "morning", "09:00"
+        )
+        # Upsert: re-declaring the same window updates in place, never
+        # duplicates (one row per definition+window).
+        updated = await definitions.upsert_window(
+            definition.id, "morning", due_time="09:30"
+        )
+        assert updated.due_time == "09:30"
+        rows = await definitions.list_windows(definition.id)
+        assert [w.window for w in rows] == ["morning"]
+        # All three windows list in const order regardless of insertion.
+        await definitions.upsert_window(definition.id, "evening")
+        await definitions.upsert_window(definition.id, "afternoon")
+        rows = await definitions.list_windows(definition.id)
+        assert [w.window for w in rows] == [
+            "morning",
+            "afternoon",
+            "evening",
+        ]
+        assert rows[1].due_time is None
+        return rows
+
+    _with_db(tmp_path, "definition-window-roundtrip.db")(_body)
+
+
+def test_definition_window_unknown_name_raises(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        definition = await definitions.create("A", rule.id, NOW)
+        with pytest.raises(ValueError, match="window must be one of"):
+            await definitions.upsert_window(definition.id, "noon")
+        with pytest.raises(ValueError, match="window must be one of"):
+            await definitions.remove_window(definition.id, "MORNING")
+        return None
+
+    _with_db(tmp_path, "definition-window-bad-name.db")(_body)
+
+
+def test_definition_window_bad_due_time_raises(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        definition = await definitions.create("A", rule.id, NOW)
+        with pytest.raises(ValueError, match="HH:MM"):
+            await definitions.upsert_window(
+                definition.id, "morning", due_time="9:30"
+            )
+        with pytest.raises(ValueError, match="HH:MM"):
+            await definitions.upsert_window(
+                definition.id, "morning", due_time="25:00"
+            )
+        return None
+
+    _with_db(tmp_path, "definition-window-bad-time.db")(_body)
+
+
+def test_definition_window_missing_definition_raises(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        with pytest.raises(ValueError, match="does not exist"):
+            await definitions.upsert_window(999, "morning")
+        return None
+
+    _with_db(tmp_path, "definition-window-missing.db")(_body)
+
+
+def test_definition_remove_window_round_trip(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        definition = await definitions.create("A", rule.id, NOW)
+        await definitions.upsert_window(definition.id, "morning")
+        assert await definitions.remove_window(
+            definition.id, "morning"
+        ) is True
+        assert await definitions.list_windows(definition.id) == []
+        # Removing an absent window reports False.
+        assert await definitions.remove_window(
+            definition.id, "morning"
+        ) is False
+        return None
+
+    _with_db(tmp_path, "definition-window-remove.db")(_body)
+
+
 def test_definition_unassigned_has_no_assignees(tmp_path) -> None:
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
@@ -889,7 +980,7 @@ def test_rules_and_definitions_sql_lives_only_in_dao_module() -> None:
     }
     sql_pattern = re.compile(
         r"(FROM|INTO|UPDATE|DELETE\s+FROM|JOIN)\s+[`'\"]*(\[)?"
-        r"(schedule_rules|quest_definitions|quest_definition_assignees)\b",
+        r"(schedule_rules|quest_definitions|quest_definition_assignees|quest_definition_windows)\b",
         re.IGNORECASE,
     )
     offenders: list[str] = []
@@ -941,7 +1032,7 @@ def test_dao_instances_test_file_uses_dao_not_raw_rules_sql() -> None:
     )
     sql_pattern = re.compile(
         r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM|"
-        r"FROM|JOIN)\s+[`'\"]*(\[)?(schedule_rules|quest_definitions|quest_definition_assignees)\b",
+        r"FROM|JOIN)\s+[`'\"]*(\[)?(schedule_rules|quest_definitions|quest_definition_assignees|quest_definition_windows)\b",
         re.IGNORECASE,
     )
     assert sql_pattern.search(remaining) is None, (
@@ -986,7 +1077,7 @@ def test_dao_rules_test_file_uses_dao_not_raw_table_sql() -> None:
     )
     sql_pattern = re.compile(
         r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM|"
-        r"FROM|JOIN)\s+[`'\"]*(\[)?(schedule_rules|quest_definitions|quest_definition_assignees)\b",
+        r"FROM|JOIN)\s+[`'\"]*(\[)?(schedule_rules|quest_definitions|quest_definition_assignees|quest_definition_windows)\b",
         re.IGNORECASE,
     )
     assert sql_pattern.search(remaining) is None, (

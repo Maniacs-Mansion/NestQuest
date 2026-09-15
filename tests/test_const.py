@@ -73,6 +73,36 @@ def test_panel_idle_timeout_config() -> None:
     assert const.DEFAULT_PANEL_IDLE_TIMEOUT > 0
 
 
+def test_quest_windows_canonical_order() -> None:
+    """QUEST_WINDOWS is exactly the three spellings in canonical order."""
+    assert const.QUEST_WINDOWS == ("morning", "afternoon", "evening")
+    assert const.WINDOW_MORNING == "morning"
+    assert const.WINDOW_AFTERNOON == "afternoon"
+    assert const.WINDOW_EVENING == "evening"
+    # No duplicates, every name covered by its individual constant.
+    assert len(set(const.QUEST_WINDOWS)) == 3
+
+
+def test_window_clock_ranges_cover_every_window() -> None:
+    """Each window has a strict HH:MM (start, end) range.
+
+    The ranges follow the documented boundaries (D-008): morning ends
+    11:59, afternoon spans 12:00-17:00, evening 17:00-21:00, and each
+    window's end equals the next window's start (the boundary belongs
+    to the later window at classification time).
+    """
+    assert const.WINDOW_CLOCK_RANGES == {
+        "morning": ("00:00", "11:59"),
+        "afternoon": ("12:00", "17:00"),
+        "evening": ("17:00", "21:00"),
+    }
+    for window in const.QUEST_WINDOWS:
+        start, end = const.WINDOW_CLOCK_RANGES[window]
+        for value in (start, end):
+            parsed = datetime.strptime(value, "%H:%M").time()
+            assert parsed.strftime("%H:%M") == value
+
+
 def test_no_hardcoded_domain_or_db_filename_in_modules() -> None:
     """Ensure no module other than const.py hardcodes DOMAIN string or SQLITE_DB_FILENAME."""
     pkg_dir = Path(const.__file__).parent
