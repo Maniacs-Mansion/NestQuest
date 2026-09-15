@@ -159,11 +159,12 @@ self-describing without joins.
 Actor policy: ``actor_source`` distinguishes an authenticated HA user
 (``'user'``, with ``actor_user_id`` holding the HA user id) from a
 panel tap with no user context (``'panel'``, with ``actor_user_id``
-NULL — the tapped child profile is already ``child_id``).  A coherence
-CHECK makes the pair shape non-negotiable: ``'user'`` requires
-``actor_user_id``, ``'panel'`` forbids it.  Other actor sources are
-rejected; if an unattended system actor is ever needed, that is a
-schema migration, not a silent widening.
+NULL — the tapped child profile is ``actor_child_id``, D-008).  Two
+coherence CHECKs make both shapes non-negotiable: ``'user'`` requires
+``actor_user_id`` and forbids ``actor_child_id``; ``'panel'`` requires
+``actor_child_id`` (the tapped profile) and forbids ``actor_user_id``.
+Other actor sources are rejected; if an unattended system actor is
+ever needed, that is a schema migration, not a silent widening.
 
 On-time policy: ``was_on_time`` is required (integer 0 or 1) for
 ``completed`` events — at completion time the due date is known and the
@@ -344,29 +345,42 @@ SCHEMA_V1_QUEST_INSTANCES_DDL: list[str] = [
     """,
 ]
 
-SCHEMA_V1_COMPLETION_EVENTS_DDL: list[str] = [
-    """
-    CREATE TABLE IF NOT EXISTS completion_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        instance_id INTEGER NOT NULL REFERENCES quest_instances(id),
-        child_id INTEGER NOT NULL REFERENCES children(id),
-        event_type TEXT NOT NULL CHECK (event_type IN ('completed', 'uncompleted')),
-        actor_source TEXT NOT NULL CHECK (actor_source IN ('user', 'panel')),
-        actor_user_id TEXT,
-        occurred_at TEXT NOT NULL,
-        was_on_time INTEGER CHECK (
-            was_on_time IS NULL
-            OR (typeof(was_on_time) = 'integer' AND was_on_time IN (0, 1))
-        ),
-        CHECK (
-            (actor_source = 'user' AND actor_user_id IS NOT NULL)
-            OR (actor_source = 'panel' AND actor_user_id IS NULL)
-        ),
-        CHECK (
-            (event_type = 'completed' AND was_on_time IS NOT NULL)
-            OR (event_type = 'uncompleted')
-        )
+#: Column body of ``completion_events``, shared between the v1 DDL
+#: below and the actor-child rebuild migration, which must recreate the
+#: table in exactly this shape (D-008: ``actor_child_id`` records which
+#: panel profile was tapped — set for panel events, NULL for admin
+#: ones; legacy panel rows backfill to ``child_id``, the child they
+#: always were).
+COMPLETION_EVENTS_TABLE_SQL = """(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id INTEGER NOT NULL REFERENCES quest_instances(id),
+    child_id INTEGER NOT NULL REFERENCES children(id),
+    event_type TEXT NOT NULL CHECK (event_type IN ('completed', 'uncompleted')),
+    actor_source TEXT NOT NULL CHECK (actor_source IN ('user', 'panel')),
+    actor_user_id TEXT,
+    actor_child_id INTEGER REFERENCES children(id),
+    occurred_at TEXT NOT NULL,
+    was_on_time INTEGER CHECK (
+        was_on_time IS NULL
+        OR (typeof(was_on_time) = 'integer' AND was_on_time IN (0, 1))
+    ),
+    CHECK (
+        (actor_source = 'user' AND actor_user_id IS NOT NULL)
+        OR (actor_source = 'panel' AND actor_user_id IS NULL)
+    ),
+    CHECK (
+        (actor_source = 'user' AND actor_child_id IS NULL)
+        OR (actor_source = 'panel' AND actor_child_id IS NOT NULL)
+    ),
+    CHECK (
+        (event_type = 'completed' AND was_on_time IS NOT NULL)
+        OR (event_type = 'uncompleted')
     )
+)"""
+
+SCHEMA_V1_COMPLETION_EVENTS_DDL: list[str] = [
+    f"""
+    CREATE TABLE IF NOT EXISTS completion_events {COMPLETION_EVENTS_TABLE_SQL}
     """,
 ]
 

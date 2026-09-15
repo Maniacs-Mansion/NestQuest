@@ -149,16 +149,17 @@ def test_migration_list_shape() -> None:
     (D-007) to create the quest_* tables directly; migration 2 exists
     for dev databases stamped version 1 by the pre-rename runner,
     migration 3 brings pre-D-008 definitions to the multi-assignee
-    model, migration 4 adds the windows table, and migration 5 rebuilds
+    model, migration 4 adds the windows table, migration 5 rebuilds
     quest_instances onto the widened (definition, child, date, window)
-    key.
+    key, and migration 6 adds actor_child_id to completion_events.
     """
     assert MIGRATIONS[0] == SCHEMA_V1_STATEMENTS
     assert callable(MIGRATIONS[1])
     assert callable(MIGRATIONS[2])
     assert MIGRATIONS[3] == SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL
     assert callable(MIGRATIONS[4])
-    assert len(MIGRATIONS) == 5
+    assert callable(MIGRATIONS[5])
+    assert len(MIGRATIONS) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +443,21 @@ _V2_INSTANCES_DDL = [
     """,
 ]
 
+_V2_EVENTS_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS completion_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        instance_id INTEGER NOT NULL REFERENCES quest_instances(id),
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        event_type TEXT NOT NULL,
+        actor_source TEXT NOT NULL,
+        actor_user_id TEXT,
+        occurred_at TEXT NOT NULL,
+        was_on_time INTEGER
+    )
+    """,
+]
+
 
 def _seed_v2_multi_assignee_upgrade(database) -> None:
     """Create a database shaped like a post-rename, pre-D-008 dev file.
@@ -458,12 +474,13 @@ def _seed_v2_multi_assignee_upgrade(database) -> None:
         "quest_definition_assignees ",
         "quest_definition_windows ",
         "quest_instances ",
+        "completion_events ",
     )
     for sql in SCHEMA_V1_STATEMENTS:
         if any(name in sql for name in _v2_replaced):
             continue
         _run(database.execute(sql))
-    for sql in _V2_DEFINITIONS_DDL + _V2_INSTANCES_DDL:
+    for sql in _V2_DEFINITIONS_DDL + _V2_INSTANCES_DDL + _V2_EVENTS_DDL:
         _run(database.execute(sql))
     _run(database.execute(VERSION_TABLE_DDL))
     _run(
@@ -501,6 +518,26 @@ def _seed_v2_multi_assignee_upgrade(database) -> None:
             "INSERT INTO quest_instances (definition_id, child_id, "
             "due_date, generated_at) "
             "VALUES (1, 2, '2026-09-15', '2026-09-14T00:00:00+00:00')"
+        )
+    )
+    # One legacy panel event and one legacy admin event: the panel one
+    # must backfill actor_child_id to its own child; the admin one must
+    # stay NULL.
+    _run(
+        database.execute(
+            "INSERT INTO completion_events (instance_id, child_id, "
+            "event_type, actor_source, occurred_at, was_on_time) "
+            "VALUES (1, 2, 'completed', 'panel', "
+            "'2026-09-15T10:00:00+00:00', 1)"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO completion_events (instance_id, child_id, "
+            "event_type, actor_source, actor_user_id, occurred_at, "
+            "was_on_time) "
+            "VALUES (1, 2, 'uncompleted', 'user', 'parent-1', "
+            "'2026-09-15T11:00:00+00:00', 1)"
         )
     )
 
@@ -559,6 +596,23 @@ def test_v2_definitions_rebuilt_to_multi_assignee(tmp_path) -> None:
         assert [
             "definition_id", "child_id", "due_date", "window"
         ] in unique_columns
+        # The completion events survived the actor_child_id rebuild:
+        # the panel row backfilled to its own child, the admin row
+        # stayed NULL, and ids are preserved.
+        events = _run(
+            database.fetch_all(
+                "SELECT id, event_type, actor_source, actor_child_id "
+                "FROM completion_events ORDER BY id"
+            )
+        )
+        assert events == [
+            (1, "completed", "panel", 2),
+            (2, "uncompleted", "user", None),
+        ]
+        columns = _run(
+            database.fetch_all("PRAGMA table_info(completion_events)")
+        )
+        assert "actor_child_id" in {c[1] for c in columns}
         # No dangling references anywhere.
         assert _run(database.fetch_all("PRAGMA foreign_key_check")) == []
         # The rebuilt table is live for the new model: a definition

@@ -106,6 +106,7 @@ class CompletionEventRecord:
     event_type: str
     actor_source: str
     actor_user_id: str | None
+    actor_child_id: int | None
     occurred_at: str
     was_on_time: bool | None
 
@@ -115,7 +116,7 @@ _INSTANCE_COLUMNS = (
 )
 _EVENT_COLUMNS = (
     "id, instance_id, child_id, event_type, actor_source, actor_user_id, "
-    "occurred_at, was_on_time"
+    "actor_child_id, occurred_at, was_on_time"
 )
 
 #: The only event types the append path accepts; the schema CHECK is
@@ -144,8 +145,9 @@ def _event_from_row(row: tuple) -> CompletionEventRecord:
         event_type=row[3],
         actor_source=row[4],
         actor_user_id=row[5],
-        occurred_at=row[6],
-        was_on_time=None if row[7] is None else bool(row[7]),
+        actor_child_id=row[6],
+        occurred_at=row[7],
+        was_on_time=None if row[8] is None else bool(row[8]),
     )
 
 
@@ -396,19 +398,21 @@ class CompletionEventsDao:
         was_on_time: bool | None,
         *,
         actor_user_id: str | None = None,
+        actor_child_id: int | None = None,
     ) -> CompletionEventRecord:
         """Append one completion or un-completion event.
 
-        ``actor_source`` is 'user' (with ``actor_user_id`` set) or
-        'panel' (no user id — the tapped child is ``child_id``); the
-        actor-pair CHECK enforces this shape at the schema level.
-        ``occurred_at`` must be the module's one strict UTC shape
-        (YYYY-MM-DDTHH:MM:SS+00:00) so lexicographic range queries
-        stay exact.  ``was_on_time`` is required (True/False) for
-        completions; for un-completions it may be None or the reversed
-        completion's flag (Feature 08 still deciding).  The instance
-        and child must exist — validated atomically under the
-        connection lock.
+        ``actor_source`` is 'user' (an admin action: ``actor_user_id``
+        set, ``actor_child_id`` NULL) or 'panel' (a panel tap: no user
+        id, and ``actor_child_id`` carrying the tapped child profile,
+        D-008); the actor-pair CHECKs enforce this shape at the schema
+        level.  ``occurred_at`` must be the module's one strict UTC
+        shape (YYYY-MM-DDTHH:MM:SS+00:00) so lexicographic range
+        queries stay exact.  ``was_on_time`` is required (True/False)
+        for completions; for un-completions it may be None or the
+        reversed completion's flag (Feature 08 still deciding).  The
+        instance, child and — for panel events — the tapped child must
+        exist — validated atomically under the connection lock.
         """
         if event_type not in (EVENT_COMPLETED, EVENT_UNCOMPLETED):
             raise ValueError(
@@ -427,6 +431,15 @@ class CompletionEventsDao:
         if actor_source == "panel" and actor_user_id is not None:
             raise ValueError(
                 "actor_source 'panel' must not carry actor_user_id"
+            )
+        if actor_source == "panel" and actor_child_id is None:
+            raise ValueError(
+                "actor_source 'panel' requires actor_child_id "
+                "(the tapped child profile)"
+            )
+        if actor_source == "user" and actor_child_id is not None:
+            raise ValueError(
+                "actor_source 'user' must not carry actor_child_id"
             )
         if was_on_time is not None and type(was_on_time) is not bool:
             raise ValueError(
@@ -458,16 +471,28 @@ class CompletionEventsDao:
                 )
                 if child is None:
                     raise ValueError(f"child {child_id} does not exist")
+                if actor_child_id is not None:
+                    tapped = await self._database.fetch_one(
+                        "SELECT 1 FROM children WHERE id = ?",
+                        (actor_child_id,),
+                    )
+                    if tapped is None:
+                        raise ValueError(
+                            f"actor_child_id {actor_child_id} does not "
+                            "reference an existing child"
+                        )
                 result = await self._database.execute(
                     "INSERT INTO completion_events (instance_id, child_id, "
-                    "event_type, actor_source, actor_user_id, occurred_at, "
-                    "was_on_time) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "event_type, actor_source, actor_user_id, "
+                    "actor_child_id, occurred_at, was_on_time) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         instance_id,
                         child_id,
                         event_type,
                         actor_source,
                         actor_user_id,
+                        actor_child_id,
                         occurred_at,
                         None if was_on_time is None else int(was_on_time),
                     ),

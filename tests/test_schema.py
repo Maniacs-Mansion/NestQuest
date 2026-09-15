@@ -1851,6 +1851,7 @@ def test_completion_events_columns_types_and_constraints(tmp_path) -> None:
             ("event_type", "TEXT", 1, None, 0),
             ("actor_source", "TEXT", 1, None, 0),
             ("actor_user_id", "TEXT", 0, None, 0),
+            ("actor_child_id", "INTEGER", 0, None, 0),
             ("occurred_at", "TEXT", 1, None, 0),
             ("was_on_time", "INTEGER", 0, None, 0),
         ]
@@ -1881,6 +1882,7 @@ def test_completion_events_foreign_keys_declared(tmp_path) -> None:
         assert declared == {
             ("quest_instances", "instance_id", "id"),
             ("children", "child_id", "id"),
+            ("children", "actor_child_id", "id"),
         }
     finally:
         _run(database.close())
@@ -2182,16 +2184,71 @@ def test_completion_events_valid_panel_completion_round_trips(tmp_path) -> None:
             instance_id=instance_id,
             actor_source="panel",
             actor_user_id=None,
+            actor_child_id=1,
             was_on_time=0,
         )
         row = _run(
             database.fetch_one(
-                "SELECT actor_source, actor_user_id, was_on_time "
-                "FROM completion_events WHERE id = ?",
+                "SELECT actor_source, actor_user_id, actor_child_id, "
+                "was_on_time FROM completion_events WHERE id = ?",
                 (event_id,),
             )
         )
-        assert row == ("panel", None, 0)
+        assert row == ("panel", None, 1, 0)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize(
+    ("actor_source", "actor_user_id", "actor_child_id"),
+    [
+        ("user", "user-1", 1),  # admin event must not carry a profile
+        ("panel", None, None),  # panel event requires the profile
+        ("panel", "user-1", 1),  # panel must not carry a user id either
+        ("panel", "user-1", None),
+        ("user", None, None),
+    ],
+)
+def test_completion_events_actor_child_coherence_enforced(
+    tmp_path, actor_source, actor_user_id, actor_child_id
+) -> None:
+    """D-008 actor-pair shape: 'user' events carry actor_user_id and no
+    actor_child_id; 'panel' events carry actor_child_id and no
+    actor_user_id.  The CHECKs make both halves non-negotiable."""
+    database = _open_db(tmp_path / "completion-events-coherence.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_event(
+                database,
+                instance_id=instance_id,
+                event_type="completed",
+                actor_source=actor_source,
+                actor_user_id=actor_user_id,
+                actor_child_id=actor_child_id,
+                was_on_time=1,
+            )
+    finally:
+        _run(database.close())
+
+
+def test_completion_events_actor_child_unknown_child_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "completion-events-bad-actor-child.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        instance_id = _insert_instance(database, definition_id=1)
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            _insert_event(
+                database,
+                instance_id=instance_id,
+                actor_source="panel",
+                actor_user_id=None,
+                actor_child_id=999,
+                was_on_time=1,
+            )
     finally:
         _run(database.close())
 
