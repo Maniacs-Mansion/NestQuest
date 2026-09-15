@@ -82,7 +82,7 @@ async def _prepare(path) -> tuple:
     child = await children.create("Ada", _now_stamp())
     rule = await rules.create("daily", D1)
     definition = await definitions.create(
-        "Brush teeth", child.id, rule.id, _now_stamp()
+        "Brush teeth", rule.id, _now_stamp(), assignee_child_ids=[child.id]
     )
     return (
         database,
@@ -184,17 +184,15 @@ def test_upsert_rejects_unknown_definition_and_child(tmp_path) -> None:
         with pytest.raises(ValueError, match="definition 999"):
             await instances.upsert(999, child.id, D1, _now_stamp())
         # Unknown child: the definition-assignee check fires first and
-        # is the one that matters (an instance must carry its
-        # definition's assignee).  To reach the child-existence check
-        # at all, the definition would have to claim child 999 — an
-        # FK-impossible state — so the child check only guards direct
-        # callers with a matching fake assignee; assert the guard
-        # order instead of forcing the FK-impossible state.
+        # is the one that matters (an instance must carry an assigned
+        # child).  Under D-008 the assignee check is a membership test
+        # against quest_definition_assignees, so child 999 simply is
+        # not an assignee — the error names the pair.
         rule = await rules.create("daily", D1)
         other_definition = await definitions.create(
-            "X", child.id, rule.id, _now_stamp()
+            "X", rule.id, _now_stamp(), assignee_child_ids=[child.id]
         )
-        with pytest.raises(ValueError, match="not 999"):
+        with pytest.raises(ValueError, match="not assigned to child 999"):
             await instances.upsert(other_definition.id, 999, D1, _now_stamp())
         return None
 
@@ -329,7 +327,10 @@ def test_upsert_no_past_check_uses_execution_date_not_call_date(
             child = await children.create("Ada", _now_stamp())
             rule = await rules.create("daily", D1)
             definition = await definitions.create(
-                "Brush teeth", child.id, rule.id, _now_stamp()
+                "Brush teeth",
+                rule.id,
+                _now_stamp(),
+                assignee_child_ids=[child.id],
             )
             return await _body(
                 database, children, rules, definitions, instances,
@@ -406,7 +407,7 @@ def test_list_by_child_and_date_filters(tmp_path) -> None:
         other = await children.create("Bo", _now_stamp())
         rule = await rules.create("daily", D1)
         other_definition = await definitions.create(
-            "Make bed", other.id, rule.id, _now_stamp()
+            "Make bed", rule.id, _now_stamp(), assignee_child_ids=[other.id]
         )
         await instances.upsert(definition.id, child.id, D1, _now_stamp())
         await instances.upsert(definition.id, child.id, D2, _now_stamp())
@@ -537,8 +538,8 @@ def test_delete_future_uncompleted_other_definitions_untouched(
     async def _body(database, children, rules, definitions, instances,
                     events, child, definition):
         other = await definitions.create(
-            "Make bed", child.id, (await rules.create("daily", D1)).id,
-            _now_stamp(),
+            "Make bed", (await rules.create("daily", D1)).id,
+            _now_stamp(), assignee_child_ids=[child.id],
         )
         await instances.upsert(definition.id, child.id, D20, _now_stamp())
         await instances.upsert(other.id, child.id, D20, _now_stamp())
@@ -1090,7 +1091,7 @@ def test_append_concurrent_events_serialize(tmp_path) -> None:
         child = await children.create("Ada", _now_stamp())
         rule = await rules.create("daily", D1)
         definition = await definitions.create(
-            "Brush teeth", child.id, rule.id, _now_stamp()
+            "Brush teeth", rule.id, _now_stamp(), assignee_child_ids=[child.id]
         )
         return (database, children, rules, definitions, instances,
                 events, child, definition)

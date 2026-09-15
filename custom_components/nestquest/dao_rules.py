@@ -1,8 +1,10 @@
-"""Typed DAO layer for the schedule_rules and quest_definitions tables.
+"""Typed DAO layer for the schedule_rules, quest_definitions and
+quest_definition_assignees tables.
 
-All SQL for ``schedule_rules`` and ``quest_definitions`` lives in this
-module per the feature guardrails: callers get typed dataclasses back
-and never see raw rows or SQL.  Every method is async and runs through
+All SQL for ``schedule_rules``, ``quest_definitions`` and
+``quest_definition_assignees`` lives in this module per the feature
+guardrails: callers get typed dataclasses back and never see raw rows
+or SQL.  Every method is async and runs through
 :class:`~.db.NestQuestDatabase`, so each statement executes on the HA
 executor and the event loop never blocks.
 
@@ -13,25 +15,29 @@ Guardrail mapping:
   not cascaded.
 - ``quest_definitions`` has no delete path at all: definitions are
   deactivated, never hard-deleted, and history must survive.
-- ``set_assignee`` changes future instances only — the DAO writes the
-  definition row and nothing else; reassignment never rewrites
+- Assignment is multi-assignee (D-008): :meth:`add_assignee` and
+  :meth:`remove_assignee` change future instances only — the DAO writes
+  the assignee table and nothing else; assignment edits never rewrite
   existing instances or completion history (Feature 06 guardrail).
 - Validation of rule well-formedness and child activeness lives partly
   in the schema CHECKs (rule-type coherence) and partly in
-  :meth:`QuestDefinitionsDao.create` (active child, rule existence);
-  no permission checks here, that is the Feature 09 gate's job.
+  :meth:`QuestDefinitionsDao.create` (rule existence) and
+  :meth:`QuestDefinitionsDao.add_assignee` (active child); no
+  permission checks here, that is the Feature 09 gate's job.
 
-Concurrency: ``delete_rule_if_unreferenced`` performs its reference
-check and DELETE inside one transaction under the connection-scoped
-lock shared with :mod:`.dao_children`, so a definition referencing the
-rule cannot appear between check and delete on this connection.
+Concurrency: ``delete_rule_if_unreferenced`` and the assignee
+mutations perform their checks and writes inside one transaction under
+the connection-scoped lock shared with :mod:`.dao_children`, so a
+definition referencing the rule (or an assignee appearing) cannot slip
+in between check and write on this connection.
 """
 from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
 
-from .dao_children import _connection_lock
+from .dao_children import ChildRecord, _child_from_row, _connection_lock
+from .dao_children import _CHILD_COLUMNS
 from .db import NestQuestDatabase
 
 #: Sentinel distinguishing "argument omitted" from "explicit SQL NULL"
@@ -82,13 +88,12 @@ class ScheduleRuleRecord:
 
 @dataclass(frozen=True)
 class QuestDefinitionRecord:
-    """One row of ``quest_definitions``."""
+    """One row of ``quest_definitions`` (without its assignees)."""
 
     id: int
     title: str
     description: str | None
     icon: str | None
-    child_id: int
     schedule_rule_id: int
     due_time: str | None
     is_active: bool
@@ -100,7 +105,7 @@ _RULE_COLUMNS = (
     "month, start_date, end_date"
 )
 _DEFINITION_COLUMNS = (
-    "id, title, description, icon, child_id, schedule_rule_id, due_time, "
+    "id, title, description, icon, schedule_rule_id, due_time, "
     "is_active, created_at"
 )
 
@@ -125,11 +130,10 @@ def _definition_from_row(row: tuple) -> QuestDefinitionRecord:
         title=row[1],
         description=row[2],
         icon=row[3],
-        child_id=row[4],
-        schedule_rule_id=row[5],
-        due_time=row[6],
-        is_active=bool(row[7]),
-        created_at=row[8],
+        schedule_rule_id=row[4],
+        due_time=row[5],
+        is_active=bool(row[6]),
+        created_at=row[7],
     )
 
 
@@ -272,11 +276,14 @@ class ScheduleRulesDao:
 
 
 class QuestDefinitionsDao:
-    """Typed async access to the ``quest_definitions`` table.
+    """Typed async access to ``quest_definitions`` and its assignees.
 
     No delete method exists: definitions are deactivated via
     :meth:`set_active`, never hard-deleted, so completion history keeps
-    its references (feature guardrail).
+    its references (feature guardrail).  Assignment is multi-assignee
+    (D-008): the definition row carries no child; assignees live in
+    ``quest_definition_assignees`` and are managed explicitly so the
+    operations stay separately loggable and permission-gateable.
     """
 
     def __init__(self, database: NestQuestDatabase) -> None:
@@ -285,7 +292,6 @@ class QuestDefinitionsDao:
     async def create(
         self,
         title: str,
-        child_id: int,
         schedule_rule_id: int,
         created_at: str,
         *,
@@ -293,53 +299,55 @@ class QuestDefinitionsDao:
         icon: str | None = None,
         due_time: str | None = None,
         is_active: bool = True,
+        assignee_child_ids: list[int] | None = None,
     ) -> QuestDefinitionRecord:
         """Insert one definition and return the record as stored.
 
-        Validates the assignment target as part of the same serialized
-        transaction as the insert: the child must exist and be active,
-        and the rule must exist, AT INSERT TIME — a child deactivated
-        or a rule deleted concurrently cannot slip between the checks
-        and the INSERT, which would otherwise create an invalid
-        assignment or surface as a raw FK IntegrityError instead of
-        the documented ValueError.  An INACTIVE child would pass the
-        schema foreign keys, which is why the activeness check lives
-        here.
+        Validates the schedule rule as part of the same serialized
+        transaction as the insert: the rule must exist AT INSERT TIME —
+        a rule deleted concurrently cannot slip between the check and
+        the INSERT.  ``assignee_child_ids`` (each child must exist and
+        be active) is applied in the same transaction, so a definition
+        can never be observed with a stale or missing assignee set; an
+        empty list or None creates an unassigned definition, which
+        callers may fill via :meth:`add_assignee`.
         """
         async with _connection_lock(self._database):
             async with self._database.transaction():
-                await self._validate_assignable(
-                    child_id, schedule_rule_id
-                )
+                await self._validate_rule_exists(schedule_rule_id)
+                for child_id in assignee_child_ids or []:
+                    await self._validate_assignable_child(child_id)
                 result = await self._database.execute(
                     "INSERT INTO quest_definitions (title, description, "
-                    "icon, child_id, schedule_rule_id, due_time, "
-                    "is_active, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "icon, schedule_rule_id, due_time, is_active, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         title,
                         description,
                         icon,
-                        child_id,
                         schedule_rule_id,
                         due_time,
                         int(is_active),
                         created_at,
                     ),
                 )
-                definition = await self.get(result.lastrowid)
+                definition_id = result.lastrowid
+                for child_id in assignee_child_ids or []:
+                    await self._database.execute(
+                        "INSERT INTO quest_definition_assignees "
+                        "(definition_id, child_id) VALUES (?, ?)",
+                        (definition_id, child_id),
+                    )
+                definition = await self.get(definition_id)
         assert definition is not None
         return definition
 
-    async def _validate_assignable(
-        self, child_id: int, schedule_rule_id: int
-    ) -> None:
-        """Raise ValueError unless child (active) and rule both exist.
+    async def _validate_rule_exists(self, schedule_rule_id: int) -> None:
+        """Raise ValueError unless the rule exists.
 
         MUST be called inside the connection lock so the verdict cannot
         go stale before the caller's INSERT commits.
         """
-        await self._validate_assignable_child(child_id)
         rule = await self._database.fetch_one(
             "SELECT 1 FROM schedule_rules WHERE id = ?",
             (schedule_rule_id,),
@@ -359,10 +367,17 @@ class QuestDefinitionsDao:
         return _definition_from_row(row) if row is not None else None
 
     async def list_by_child(self, child_id: int) -> list[QuestDefinitionRecord]:
-        """Return all definitions assigned to ``child_id``, newest first."""
+        """Return all definitions assigned to ``child_id``, newest first.
+
+        Assignment is read through ``quest_definition_assignees``
+        (D-008): a definition appears once per child regardless of how
+        many assignees share it.
+        """
         rows = await self._database.fetch_all(
             f"SELECT {_DEFINITION_COLUMNS} FROM quest_definitions "
-            "WHERE child_id = ? ORDER BY id DESC",
+            "WHERE id IN (SELECT definition_id "
+            "FROM quest_definition_assignees WHERE child_id = ?) "
+            "ORDER BY id DESC",
             (child_id,),
         )
         return [_definition_from_row(row) for row in rows]
@@ -391,8 +406,9 @@ class QuestDefinitionsDao:
         SQL NULL, so callers can remove optional metadata
         (description, icon, due_time).  Assignment and activation are
         deliberately NOT settable here: they have their own explicit
-        operations (:meth:`set_assignee`, :meth:`set_active`) so they
-        stay separately loggable and permission-gateable.
+        operations (:meth:`add_assignee`, :meth:`remove_assignee`,
+        :meth:`set_active`) so they stay separately loggable and
+        permission-gateable.
         """
         assignments: list[str] = []
         parameters: list[object] = []
@@ -427,32 +443,75 @@ class QuestDefinitionsDao:
         )
         return result.rowcount
 
-    async def set_assignee(
+    async def add_assignee(
         self, definition_id: int, child_id: int
-    ) -> int:
-        """Reassign the definition to ``child_id``; rows updated (0 if absent).
+    ) -> None:
+        """Assign ``child_id`` to the definition (idempotent).
 
-        Validates the new assignee inside the same serialized
-        transaction as the UPDATE (existing and active AT ASSIGNMENT
-        TIME), so a child deactivated concurrently cannot become the
-        assignee.  Changes future instances only: already-generated
-        instances and completion history are never rewritten here.
+        Validates the assignee inside the same serialized transaction
+        as the INSERT (existing and active AT ASSIGNMENT TIME), so a
+        child deactivated concurrently cannot become an assignee.
+        Assigning an already-assigned child is a no-op, mirroring the
+        composite primary key's storage-level guarantee.  Changes
+        future instances only: already-generated instances and
+        completion history are never rewritten here.
         """
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 await self._validate_assignable_child(child_id)
-                result = await self._database.execute(
-                    "UPDATE quest_definitions SET child_id = ? "
-                    "WHERE id = ?",
-                    (child_id, definition_id),
+                definition = await self._database.fetch_one(
+                    "SELECT 1 FROM quest_definitions WHERE id = ?",
+                    (definition_id,),
                 )
-        return result.rowcount
+                if definition is None:
+                    raise ValueError(
+                        f"quest definition {definition_id} does not exist"
+                    )
+                await self._database.execute(
+                    "INSERT INTO quest_definition_assignees "
+                    "(definition_id, child_id) VALUES (?, ?) "
+                    "ON CONFLICT (definition_id, child_id) DO NOTHING",
+                    (definition_id, child_id),
+                )
+
+    async def remove_assignee(
+        self, definition_id: int, child_id: int
+    ) -> bool:
+        """Remove the assignee link; True when a row was removed.
+
+        Future materialization stops for this (definition, child) pair;
+        existing instances and completion history are never touched
+        here (Feature 06 guardrail).
+        """
+        async with _connection_lock(self._database):
+            result = await self._database.execute(
+                "DELETE FROM quest_definition_assignees "
+                "WHERE definition_id = ? AND child_id = ?",
+                (definition_id, child_id),
+            )
+        return result.rowcount > 0
+
+    async def list_assignees(self, definition_id: int) -> list[ChildRecord]:
+        """Return the definition's assignees as child records.
+
+        Ordered by the children table's stable display order
+        (``sort_order``, then id) so callers render a deterministic
+        roster.  A definition with no assignees returns [].
+        """
+        rows = await self._database.fetch_all(
+            f"SELECT {_CHILD_COLUMNS} FROM children "
+            "WHERE id IN (SELECT child_id "
+            "FROM quest_definition_assignees WHERE definition_id = ?) "
+            "ORDER BY sort_order, id",
+            (definition_id,),
+        )
+        return [_child_from_row(row) for row in rows]
 
     async def _validate_assignable_child(self, child_id: int) -> None:
         """Raise ValueError unless the child exists and is active.
 
         MUST be called inside the connection lock so the verdict cannot
-        go stale before the caller's UPDATE commits.
+        go stale before the caller's INSERT commits.
         """
         child = await self._database.fetch_one(
             "SELECT is_active FROM children WHERE id = ?", (child_id,)

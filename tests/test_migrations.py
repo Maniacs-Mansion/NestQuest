@@ -63,6 +63,7 @@ def _counts(database) -> dict[str, int]:
         "admin_users",
         "schedule_rules",
         "quest_definitions",
+        "quest_definition_assignees",
         "presence_schedules",
         "presence_overrides",
         "quest_instances",
@@ -99,6 +100,7 @@ def test_fresh_file_migration_creates_all_v1_tables(tmp_path) -> None:
             "admin_users",
             "schedule_rules",
             "quest_definitions",
+            "quest_definition_assignees",
             "presence_schedules",
             "presence_overrides",
             "quest_instances",
@@ -136,15 +138,18 @@ def test_empty_version_table_reads_as_version_0(tmp_path) -> None:
 
 
 def test_migration_list_shape() -> None:
-    """Migration 1 is the v1 DDL; migration 2 is the legacy rename step.
+    """Migration 1 is the v1 DDL; 2 and 3 are the callable steps.
 
     Nothing ever shipped, so migration 1 was rewritten pre-release
     (D-007) to create the quest_* tables directly; migration 2 exists
-    for dev databases stamped version 1 by the pre-rename runner.
+    for dev databases stamped version 1 by the pre-rename runner, and
+    migration 3 brings pre-D-008 definitions to the multi-assignee
+    model.
     """
     assert MIGRATIONS[0] == SCHEMA_V1_STATEMENTS
     assert callable(MIGRATIONS[1])
-    assert len(MIGRATIONS) == 2
+    assert callable(MIGRATIONS[2])
+    assert len(MIGRATIONS) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +317,20 @@ def test_legacy_task_tables_are_renamed_and_keep_their_rows(tmp_path) -> None:
             )
             == ("2026-09-15",)
         )
+        # Migration 3 moved the legacy single-assignee column into the
+        # assignees table: the definition kept its child, the column is
+        # gone.
+        assignees = _run(
+            database.fetch_one(
+                "SELECT child_id FROM quest_definition_assignees "
+                "WHERE definition_id = 1"
+            )
+        )
+        assert assignees == (1,)
+        columns = _run(
+            database.fetch_all("PRAGMA table_info(quest_definitions)")
+        )
+        assert "child_id" not in {row[1] for row in columns}
         # The untouched completion_events table still exists and is empty.
         assert "completion_events" in tables
         assert (
@@ -376,6 +395,136 @@ def test_fresh_database_never_holds_legacy_table_names(tmp_path) -> None:
         tables = _tables(database)
         assert not any(name.startswith("task_") for name in tables)
         assert _version(database) == len(MIGRATIONS)
+    finally:
+        _run(database.close())
+
+
+# ---------------------------------------------------------------------------
+# Pre-D-008 database: quest_definitions with child_id stamped version 2
+# ---------------------------------------------------------------------------
+
+_V2_DEFINITIONS_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS quest_definitions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        description TEXT,
+        icon TEXT,
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        schedule_rule_id INTEGER NOT NULL REFERENCES schedule_rules(id),
+        due_time TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+    )
+    """,
+]
+
+
+def _seed_v2_multi_assignee_upgrade(database) -> None:
+    """Create a database shaped like a post-rename, pre-D-008 dev file.
+
+    Fresh quest_* tables — but quest_definitions still carries the
+    single child_id column and no assignees table exists — stamped at
+    version 2, with definition and instance rows that must survive.
+    """
+    for sql in SCHEMA_V1_STATEMENTS:
+        if "quest_definitions " in sql:
+            continue  # replaced by the legacy-shape DDL below
+        _run(database.execute(sql))
+    for sql in _V2_DEFINITIONS_DDL:
+        _run(database.execute(sql))
+    _run(database.execute(VERSION_TABLE_DDL))
+    _run(
+        database.execute(
+            f"INSERT INTO {VERSION_TABLE} (id, version) VALUES (1, 2)"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO children (display_name, created_at) "
+            "VALUES ('Ada', '2026-09-14T00:00:00+00:00')"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO children (display_name, created_at) "
+            "VALUES ('Bo', '2026-09-14T00:00:00+00:00')"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO schedule_rules (rule_type, start_date) "
+            "VALUES ('daily', '2026-09-14')"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO quest_definitions (title, child_id, "
+            "schedule_rule_id, created_at) "
+            "VALUES ('Dishes', 2, 1, '2026-09-14T00:00:00+00:00')"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO quest_instances (definition_id, child_id, "
+            "due_date, generated_at) "
+            "VALUES (1, 2, '2026-09-15', '2026-09-14T00:00:00+00:00')"
+        )
+    )
+
+
+def test_v2_definitions_rebuilt_to_multi_assignee(tmp_path) -> None:
+    database = _open_db(tmp_path / "v2-upgrade.db")
+    try:
+        _seed_v2_multi_assignee_upgrade(database)
+        final = _migrate(database)
+        assert final == len(MIGRATIONS)
+        assert _version(database) == len(MIGRATIONS)
+        # The definition row survived and lost its child_id column.
+        row = _run(
+            database.fetch_one(
+                "SELECT title, schedule_rule_id, is_active "
+                "FROM quest_definitions WHERE id = 1"
+            )
+        )
+        assert row == ("Dishes", 1, 1)
+        columns = _run(
+            database.fetch_all("PRAGMA table_info(quest_definitions)")
+        )
+        assert "child_id" not in {c[1] for c in columns}
+        # The single assignee moved into the assignees table.
+        assignees = _run(
+            database.fetch_all(
+                "SELECT definition_id, child_id "
+                "FROM quest_definition_assignees ORDER BY child_id"
+            )
+        )
+        assert assignees == [(1, 2)]
+        # The instance survived, still referencing the definition.
+        instance = _run(
+            database.fetch_one(
+                "SELECT definition_id, child_id, due_date "
+                "FROM quest_instances WHERE id = 1"
+            )
+        )
+        assert instance == (1, 2, "2026-09-15")
+        # No dangling references anywhere.
+        assert _run(database.fetch_all("PRAGMA foreign_key_check")) == []
+        # The rebuilt table is live for the new model: a definition
+        # insert carries no child column at all.
+        _run(
+            database.execute(
+                "INSERT INTO quest_definitions (title, schedule_rule_id, "
+                "created_at) VALUES ('Laundry', 1, "
+                "'2026-09-14T00:00:00+00:00')"
+            )
+        )
+        _run(
+            database.execute(
+                "INSERT INTO quest_definition_assignees "
+                "(definition_id, child_id) VALUES (2, 1)"
+            )
+        )
     finally:
         _run(database.close())
 
@@ -481,22 +630,28 @@ def test_noop_run_is_logged_at_debug_level(caplog, tmp_path) -> None:
 
 
 def _failing_migrations(prior_statements: list[str]) -> list[list[str]]:
-    """Three-migration list where migration 3 fails mid-application.
+    """Migration list where the LAST entry fails mid-application.
 
-    Migration 2 is a harmless no-op filler so the real runner — which
-    has already stamped version 2 by the time these tests re-run it —
-    still has a pending migration to fail on.
+    Sized one entry longer than the real MIGRATIONS and padded with
+    harmless no-op fillers, so a fully-migrated database (already at
+    len(MIGRATIONS)) still has exactly one pending migration — the
+    failing one — to attempt.
     """
-    return [
-        prior_statements,
+    steps: list[list[str]] = [prior_statements]
+    steps += [
         [
-            "CREATE TABLE IF NOT EXISTS filler_table (id INTEGER PRIMARY KEY)"
-        ],
+            f"CREATE TABLE IF NOT EXISTS filler_{index} "
+            "(id INTEGER PRIMARY KEY)"
+        ]
+        for index in range(len(MIGRATIONS) - 1)
+    ]
+    steps.append(
         [
             "CREATE TABLE IF NOT EXISTS later_table (id INTEGER PRIMARY KEY)",
             "CREATE TABLE broken (",
-        ],
-    ]
+        ]
+    )
+    return steps
 
 
 def test_failing_migration_rolls_back_to_prior_version(tmp_path) -> None:

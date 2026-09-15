@@ -19,7 +19,9 @@ Upsert semantics: ``QuestInstancesDao.upsert`` is idempotent on
 whose instance already exists updates nothing that matters
 (child_id/due_time are refreshed only in the degenerate re-generation
 case where they changed) and never duplicates a row.  The schema's
-UNIQUE(definition_id, due_date) is the last line of defense.
+UNIQUE(definition_id, due_date) is the last line of defense.  The
+upsert refuses a child that is not an assignee of the definition
+(D-008 multi-assignee model).
 
 ``delete_future_uncompleted`` implements the Feature 06/07 rule that
 reassignment and schedule edits regenerate future instances: it
@@ -207,18 +209,23 @@ class QuestInstancesDao:
                         f"{today!r}"
                     )
                 definition = await self._database.fetch_one(
-                    "SELECT child_id FROM quest_definitions WHERE id = ?",
+                    "SELECT 1 FROM quest_definitions WHERE id = ?",
                     (definition_id,),
                 )
                 if definition is None:
                     raise ValueError(
                         f"quest definition {definition_id} does not exist"
                     )
-                if definition[0] != child_id:
+                assignee = await self._database.fetch_one(
+                    "SELECT 1 FROM quest_definition_assignees "
+                    "WHERE definition_id = ? AND child_id = ?",
+                    (definition_id, child_id),
+                )
+                if assignee is None:
                     raise ValueError(
-                        f"quest definition {definition_id} is assigned to "
-                        f"child {definition[0]}, not {child_id}; instance "
-                        "must carry the definition's assignee"
+                        f"quest definition {definition_id} is not "
+                        f"assigned to child {child_id}; instance must "
+                        "carry an assigned child"
                     )
                 child = await self._database.fetch_one(
                     "SELECT 1 FROM children WHERE id = ?", (child_id,)
