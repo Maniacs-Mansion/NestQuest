@@ -7,6 +7,7 @@ import pytest
 
 from custom_components.nestquest.presence import (
     MAX_CYCLE_LENGTH_WEEKS,
+    PresenceEngine,
     PresenceOverride,
     PresenceSchedule,
     cycle_week_index,
@@ -371,3 +372,93 @@ def test_module_uses_no_iso_week_functions() -> None:
     ).read_text()
     assert "isocalendar" not in source
     assert "isoweek" not in source
+
+
+# ---------------------------------------------------------------------------
+# PresenceEngine: is_present with the always-present default
+# ---------------------------------------------------------------------------
+
+
+def _three_child_engine() -> PresenceEngine:
+    """Two children on opposite weeks of one two-week rotation, one
+    with no schedule at all (the always-present sibling)."""
+    anchor = datetime.date(2026, 1, 5)  # Monday, week 0
+    declan = PresenceSchedule(
+        1, 2, anchor, {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()}
+    )
+    jordyn = PresenceSchedule(
+        2, 2, anchor, {0: set(), 1: {0, 1, 2, 3, 4, 5, 6}}
+    )
+    return PresenceEngine({1: declan, 2: jordyn})
+
+
+def test_engine_child_without_schedule_is_always_present() -> None:
+    engine = _three_child_engine()
+    # Chloe has no schedule: present every day, including weekends.
+    for offset in range(0, 28, 3):
+        day = datetime.date(2026, 1, 5) + datetime.timedelta(days=offset)
+        assert engine.is_present(3, day) is True, f"offset {offset}"
+
+
+def test_engine_alternating_children_are_complementary_for_four_weeks() -> None:
+    """Every day of a four-week span: the two rotation children swap
+    presence exactly per the anchor pattern — when one is home the
+    other is away."""
+    engine = _three_child_engine()
+    anchor = datetime.date(2026, 1, 5)
+    for offset in range(28):
+        day = anchor + datetime.timedelta(days=offset)
+        d = engine.is_present(1, day)
+        j = engine.is_present(2, day)
+        assert d == (not j), f"offset {offset}: {d}/{j} not complementary"
+        expected_week = ((day - anchor).days // 7) % 2
+        expected_present = day.weekday() in {0, 1, 2, 3, 4, 5, 6}
+        assert engine.is_present(1, day) == (expected_week == 0), (
+            f"offset {offset}: Declan week {expected_week}"
+        )
+    # Spot-check the swap days.
+    assert engine.is_present(1, anchor) is True
+    assert engine.is_present(2, anchor) is False
+    assert engine.is_present(1, anchor + datetime.timedelta(days=7)) is False
+    assert engine.is_present(2, anchor + datetime.timedelta(days=7)) is True
+
+
+def test_engine_weekend_absence_respects_the_pattern() -> None:
+    """A weekday-set pattern excludes days outside the set even in the
+    child's present week."""
+    engine = PresenceEngine(
+        {
+            1: PresenceSchedule(
+                1, 2, datetime.date(2026, 1, 5), {0: {1, 3}, 1: {2, 4}}
+            )
+        }
+    )
+    # 2026-01-06 (Tue) is week 0, weekday 1 -> present.
+    assert engine.is_present(1, datetime.date(2026, 1, 6)) is True
+    # 2026-01-07 (Wed) is week 0, weekday 2 -> absent.
+    assert engine.is_present(1, datetime.date(2026, 1, 7)) is False
+    # 2026-01-14 (Wed) is week 1, weekday 2 -> present.
+    assert engine.is_present(1, datetime.date(2026, 1, 14)) is True
+
+
+def test_engine_rejects_bad_construction_and_inputs() -> None:
+    schedule = PresenceSchedule(1, 1, ANCHOR, {0: {0}})
+    with pytest.raises(ValueError, match="must map child_id"):
+        PresenceEngine([schedule])
+    with pytest.raises(ValueError, match="must be a PresenceSchedule"):
+        PresenceEngine({1: "not-a-schedule"})
+    with pytest.raises(ValueError, match="holds the schedule"):
+        PresenceEngine({2: schedule})
+    engine = PresenceEngine({1: schedule})
+    with pytest.raises(ValueError, match="child_id must be an integer"):
+        engine.is_present(True, ANCHOR)
+    with pytest.raises(ValueError, match="plain calendar date"):
+        engine.is_present(1, datetime.datetime(2026, 1, 5))
+
+
+def test_engine_is_immutable() -> None:
+    engine = _three_child_engine()
+    with pytest.raises(AttributeError, match="immutable snapshot"):
+        engine._schedules = {}
+    with pytest.raises(AttributeError, match="immutable snapshot"):
+        engine.something_new = 1
