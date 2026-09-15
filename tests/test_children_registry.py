@@ -655,10 +655,10 @@ def test_no_code_path_deletes_a_child_row() -> None:
 
     The DAO exposes no delete method at all, and no module in the
     package (nor any test outside the sanctioned DDL/migration layers,
-    which create the tables) carries SQL that deletes from children —
-    the leak guard in test_dao_children enforces the file allowlist,
-    this asserts the no-delete property itself across every file that
-    may legitimately name the table.
+    which create the tables) carries a statement that removes child
+    rows — the leak guard in test_dao_children enforces the file
+    allowlist, this asserts the no-delete property itself across every
+    file that may legitimately name the table.
     """
     import re
     from pathlib import Path
