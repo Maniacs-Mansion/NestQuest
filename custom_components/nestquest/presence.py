@@ -317,3 +317,61 @@ def cycle_week_index(
     target = _parse_date(target_date, "target_date")
     days = (target - schedule.anchor_date).days
     return (days // 7) % schedule.cycle_length_weeks
+
+
+class PresenceEngine:
+    """Answers "is this child at this house on this date?".
+
+    Pure and side-effect-free: built from an immutable snapshot of the
+    children's schedules (``child_id -> PresenceSchedule``), it never
+    touches the database — callers build a snapshot from the DAO layer
+    and pass it in.  A child with NO schedule entry is present every
+    day (the third household child's case); a child WITH a schedule is
+    present exactly when the date's weekday is in that schedule's
+    pattern for the date's cycle week index (anchor-date arithmetic —
+    :func:`cycle_week_index`, never ISO week parity).
+    """
+
+    def __init__(self, schedules: dict[int, PresenceSchedule]) -> None:
+        if not isinstance(schedules, dict):
+            raise ValueError(
+                f"schedules must map child_id to PresenceSchedule, got "
+                f"{schedules!r}"
+            )
+        for child_id, schedule in schedules.items():
+            # Validate the KEY as a model child id too: True and 1.0
+            # compare equal to 1, so {True: schedule(1)} would be
+            # accepted and then behave differently on lookup.
+            _validate_child_id(child_id)
+            if not isinstance(schedule, PresenceSchedule):
+                raise ValueError(
+                    f"schedules[{child_id!r}] must be a PresenceSchedule, "
+                    f"got {schedule!r}"
+                )
+            if schedule.child_id != child_id:
+                raise ValueError(
+                    f"schedules is keyed {child_id!r} but holds the "
+                    f"schedule of child {schedule.child_id}"
+                )
+        # Read-only snapshot: reassignment is refused and no mutator
+        # exists, so a built engine answers consistently for its
+        # lifetime.
+        object.__setattr__(self, "_schedules", MappingProxyType(dict(schedules)))
+
+    def is_present(self, child_id: object, date: object) -> bool:
+        """Return whether ``child_id`` is present on ``date``."""
+        if isinstance(child_id, bool) or not isinstance(child_id, int):
+            raise ValueError(f"child_id must be an integer, got {child_id!r}")
+        target = _parse_date(date, "date")
+        schedule = self._schedules.get(child_id)
+        if schedule is None:
+            # No schedule at all: present every day (household default).
+            return True
+        week = cycle_week_index(schedule, target)
+        return target.weekday() in schedule.pattern[week]
+
+    def __setattr__(self, name: object, value: object) -> None:
+        raise AttributeError(
+            "PresenceEngine is an immutable snapshot; build a new engine "
+            "instead of mutating this one"
+        )
