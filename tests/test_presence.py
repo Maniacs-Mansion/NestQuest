@@ -738,10 +738,12 @@ def test_custody_rotation_walks_full_years_without_inversion(
     """REGRESSION GUARD for the week-parity bug (D-004).
 
     Walks a two-week alternating rotation day by day across a FULL
-    {length}-day year ({year} — {reason}), asserting the present/absent
-    sequence never breaks or inverts at any point, including January
-    1st.  ISO week parity silently flips in 53-ISO-week years and would
-    invert every custody schedule on January 1st; anchor-date
+    {length}-day year ({year} — {reason}) plus the following January,
+    asserting the present/absent sequence never breaks or inverts at
+    any point, including January 1st.  ISO week parity silently flips
+    at the ISO-week rollover (the Monday on or after January 4th —
+    January 4th itself in both of these years, which end ISO week 53)
+    and would invert every custody schedule there; anchor-date
     arithmetic must not.
     """.format(length=length, year=year, reason=reason)
     if year == 2020:
@@ -751,7 +753,12 @@ def test_custody_rotation_walks_full_years_without_inversion(
         assert datetime.date(2015, 12, 31).isocalendar()[1] == 53
         assert (datetime.date(2016, 1, 1) - datetime.date(2015, 1, 1)).days == 365
 
-    anchor = datetime.date(year, 1, 6)  # a Monday of an on-week
+    # The first Monday of January (2020: Jan 6; 2015: Jan 5) — an
+    # on-week anchor, whatever the year.
+    anchor = datetime.date(year, 1, 1) + datetime.timedelta(
+        days=(7 - datetime.date(year, 1, 1).weekday()) % 7
+    )
+    assert anchor.weekday() == 0
     rotation = PresenceSchedule(
         1, 2, anchor, {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()}
     )
