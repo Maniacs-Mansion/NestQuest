@@ -112,7 +112,8 @@ class World:
             self.child.id, D1, D2, True, note="test"
         )
         self.instance = await self.instances.upsert(
-            self.definition.id, self.child.id, D1, _stamp()
+            self.definition.id, self.child.id, D1, _stamp(),
+            window="morning",
         )
 
 
@@ -291,12 +292,15 @@ def test_matrix_presence_overrides_crud_and_constraints(tmp_path) -> None:
 def test_matrix_quest_instances_crud_and_constraints(tmp_path) -> None:
     async def _body(w: World):
         # insert (seeded) + read
-        fetched = await w.instances.get(w.definition.id, D1)
+        fetched = await w.instances.get(
+            w.definition.id, w.child.id, D1, "morning"
+        )
         assert fetched == w.instance
         # update path: conflict refresh on the OPEN instance — same row
         # id, snapshot columns (due_time) actually rewritten.
         refreshed = await w.instances.upsert(
-            w.definition.id, w.child.id, D1, _stamp(), due_time="17:00"
+            w.definition.id, w.child.id, D1, _stamp(),
+            window="morning", due_time="17:00",
         )
         assert refreshed.id == fetched.id, (
             "the conflict path must refresh the existing row in place"
@@ -316,15 +320,15 @@ def test_matrix_quest_instances_constraints(tmp_path) -> None:
         # proving the schema backs the DAO's idempotency.
         await w.database.execute(
             "INSERT INTO quest_instances (definition_id, child_id, "
-            "due_date, due_time, generated_at) "
-            "VALUES (?, ?, ?, NULL, ?)",
+            "window, due_date, due_time, generated_at) "
+            "VALUES (?, ?, 'morning', ?, NULL, ?)",
             (w.definition.id, w.child.id, D20, _stamp()),
         )
         with pytest.raises(sqlite3.IntegrityError):
             await w.database.execute(
                 "INSERT INTO quest_instances (definition_id, child_id, "
-                "due_date, due_time, generated_at) "
-                "VALUES (?, ?, ?, NULL, ?)",
+                "window, due_date, due_time, generated_at) "
+                "VALUES (?, ?, 'morning', ?, NULL, ?)",
                 (w.definition.id, w.child.id, D20, _stamp()),
             )
         # delete future uncompleted removes D20's open instance
@@ -340,10 +344,11 @@ def test_matrix_quest_instances_constraints(tmp_path) -> None:
 def test_matrix_quest_instances_upsert_idempotency(tmp_path) -> None:
     async def _body(w: World):
         first = await w.instances.upsert(
-            w.definition.id, w.child.id, D2, _stamp()
+            w.definition.id, w.child.id, D2, _stamp(), window="morning"
         )
         second = await w.instances.upsert(
-            w.definition.id, w.child.id, D2, _stamp(), due_time="17:00"
+            w.definition.id, w.child.id, D2, _stamp(),
+            window="morning", due_time="17:00",
         )
         assert second.id == first.id
         count = await w.database.fetch_one(

@@ -927,7 +927,7 @@ def test_definition_assignment_leaves_history_rows_alone(
         # this table, but its row shape proves assignment isolation).
         await database.execute(
             "INSERT INTO quest_instances (definition_id, child_id, "
-            "due_date, generated_at) VALUES (?, ?, ?, ?)",
+            "window, due_date, generated_at) VALUES (?, ?, 'morning', ?, ?)",
             (definition.id, child.id, "2026-09-15", NOW),
         )
         await definitions.add_assignee(definition.id, other.id)

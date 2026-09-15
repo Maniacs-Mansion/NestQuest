@@ -24,9 +24,12 @@ names before anything else assumes the new model.  Migration 3 brings
 pre-D-008 databases to the multi-assignee model: it creates
 ``quest_definition_assignees`` and, when ``quest_definitions`` still
 carries a single ``child_id`` column, rebuilds the table without it,
-copying each definition's assignee across.  Each callable migration
-runs inside its own transaction together with its version stamp, so a
-crash mid-step rolls the statements and the stamp back together.
+copying each definition's assignee across.  Migration 4 adds the
+windows table and migration 5 rebuilds ``quest_instances`` onto the
+widened (definition_id, child_id, due_date, window) key.  Each callable
+migration runs inside its own transaction together with its version
+stamp, so a crash mid-step rolls the statements and the stamp back
+together.
 
 Migration entries are either an ordered sequence of SQL statements or
 an async callable taking ``(database, target_version)``.  Callables
@@ -71,6 +74,7 @@ from typing import Union
 from .db import NestQuestDatabase
 from .schema import (
     QUEST_DEFINITIONS_TABLE_SQL,
+    QUEST_INSTANCES_TABLE_SQL,
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V1_QUEST_DEFINITION_ASSIGNEES_DDL,
     SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL,
@@ -145,6 +149,14 @@ async def _table_has_column(
     """Return True when ``table`` currently carries ``column``."""
     rows = await database.fetch_all(f"PRAGMA table_info({table})")
     return any(row[1] == column for row in rows)
+
+
+#: Window assigned to instances migrated from the pre-window instance
+#: shape (D-008).  Pre-window rows were generated for whole-day
+#: obligations; the morning window is the documented default landing
+#: spot, and future dates are regenerated with real window declarations
+#: by materialization (delete_future_uncompleted + re-run).
+LEGACY_MIGRATED_WINDOW = "morning"
 
 
 async def _rename_legacy_task_tables(
@@ -250,6 +262,70 @@ async def _add_definition_assignees(
         await database.execute("PRAGMA foreign_keys = ON")
 
 
+async def _widen_instance_key(
+    database: NestQuestDatabase, target_version: int
+) -> None:
+    """Bring ``quest_instances`` to the D-008 instance key.
+
+    Databases whose instance table still carries the pre-window shape
+    (no ``window`` column, UNIQUE on (definition_id, due_date)) are
+    rebuilt via SQLite's canonical procedure into the widened shape —
+    UNIQUE (definition_id, child_id, due_date, window) — with every
+    migrated row landing in :data:`LEGACY_MIGRATED_WINDOW` so existing
+    ids (and the completion events referencing them) survive intact.
+    The old rows were unique per (definition, due_date), so pinning one
+    window cannot collide with the widened key.  Fresh databases whose
+    table already matches the canonical shape only stamp.
+
+    The rebuild runs with ``foreign_keys = OFF`` (dropping the old
+    table under enforcement would fire the implicit DELETE and violate
+    the ``completion_events`` foreign key) and verifies
+    ``PRAGMA foreign_key_check`` inside the transaction before the
+    stamp, so a corrupt copy aborts the whole migration.
+    """
+    legacy_shape = not await _table_has_column(
+        database, "quest_instances", "window"
+    )
+    await database.execute("PRAGMA foreign_keys = OFF")
+    try:
+        async with database.transaction():
+            if legacy_shape:
+                await database.execute(
+                    "CREATE TABLE quest_instances_rebuilt "
+                    f"{QUEST_INSTANCES_TABLE_SQL}"
+                )
+                await database.execute(
+                    "INSERT INTO quest_instances_rebuilt "
+                    "(id, definition_id, child_id, window, due_date, "
+                    "due_time, generated_at) "
+                    "SELECT id, definition_id, child_id, ?, due_date, "
+                    "due_time, generated_at "
+                    "FROM quest_instances ORDER BY id",
+                    (LEGACY_MIGRATED_WINDOW,),
+                )
+                await database.execute("DROP TABLE quest_instances")
+                await database.execute(
+                    "ALTER TABLE quest_instances_rebuilt "
+                    "RENAME TO quest_instances"
+                )
+                violations = await database.fetch_all(
+                    "PRAGMA foreign_key_check"
+                )
+                if violations:
+                    raise RuntimeError(
+                        "instance rebuild produced foreign-key "
+                        f"violations: {violations!r}"
+                    )
+                LOGGER.info(
+                    "Widened quest_instances key; migrated rows pinned "
+                    "to the %r window",
+                    LEGACY_MIGRATED_WINDOW,
+                )
+            await stamp_schema_version(database, target_version)
+    finally:
+        await database.execute("PRAGMA foreign_keys = ON")
+
+
 #: The ordered migration list.  Append-only: never edit an applied
 #: entry, add the next one instead.  (Migration 1's content was
 #: rewritten pre-release per D-007 — no version 1 database shipped.)
@@ -261,6 +337,9 @@ MIGRATIONS: Sequence[MigrationStep] = [
     # CREATE IF NOT EXISTS suffices for both fresh databases (which
     # already made it in migration 1) and pre-window databases.
     list(SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL),
+    # Migration 5 (D-008): rebuild quest_instances onto the widened
+    # (definition_id, child_id, due_date, window) key.
+    _widen_instance_key,
 ]
 
 

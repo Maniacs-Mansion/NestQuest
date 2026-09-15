@@ -1722,8 +1722,8 @@ def test_applying_presence_ddl_twice_keeps_rows(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _insert_instance(database, definition_id=1, **overrides):
-    """Insert one valid task_instance, returning the instance id.
+def _insert_instance(database, definition_id=1, window="morning", **overrides):
+    """Insert one valid quest_instance, returning the instance id.
 
     Pass ``_OMIT`` as a value to leave that column out of the INSERT so
     its DDL DEFAULT applies.
@@ -1731,6 +1731,7 @@ def _insert_instance(database, definition_id=1, **overrides):
     values: dict[str, object] = {
         "definition_id": definition_id,
         "child_id": 1,
+        "window": window,
         "due_date": "2026-09-14",
         "generated_at": "2026-09-14T00:00:00+00:00",
     }
@@ -1829,6 +1830,7 @@ def test_quest_instances_columns_types_and_constraints(tmp_path) -> None:
             ("id", "INTEGER", 0, None, 1),
             ("definition_id", "INTEGER", 1, None, 0),
             ("child_id", "INTEGER", 1, None, 0),
+            ("window", "TEXT", 1, None, 0),
             ("due_date", "TEXT", 1, None, 0),
             ("due_time", "TEXT", 0, None, 0),
             ("generated_at", "TEXT", 1, None, 0),
@@ -1884,7 +1886,7 @@ def test_completion_events_foreign_keys_declared(tmp_path) -> None:
         _run(database.close())
 
 
-def test_quest_instances_unique_index_on_definition_and_date(tmp_path) -> None:
+def test_quest_instances_unique_index_on_widened_key(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances-unique.db")
     try:
         _apply(database)
@@ -1897,15 +1899,20 @@ def test_quest_instances_unique_index_on_definition_and_date(tmp_path) -> None:
         )
         implicit = [(name, sql) for name, sql in rows if sql is None]
         assert len(implicit) == 1, (
-            "the (definition_id, due_date) UNIQUE constraint must be backed "
-            "by exactly one implicit unique index"
+            "the (definition_id, child_id, due_date, window) UNIQUE "
+            "constraint must be backed by exactly one implicit unique index"
         )
         columns = _run(
             database.fetch_all(
                 f"PRAGMA index_info('{implicit[0][0]}')"
             )
         )
-        assert [row[2] for row in columns] == ["definition_id", "due_date"]
+        assert [row[2] for row in columns] == [
+            "definition_id",
+            "child_id",
+            "due_date",
+            "window",
+        ]
         # The implicit index is genuinely unique: UNIQUE(...) is the only
         # constraint SQLite backs with a sql-less autoindex on this table.
         row = _run(
@@ -1932,12 +1939,16 @@ def test_quest_instances_valid_insert_round_trips(tmp_path) -> None:
         instance_id = _insert_instance(database, definition_id=1, child_id=1)
         row = _run(
             database.fetch_one(
-                "SELECT definition_id, child_id, due_date, due_time, generated_at "
+                "SELECT definition_id, child_id, window, due_date, "
+                "due_time, generated_at "
                 "FROM quest_instances WHERE id = ?",
                 (instance_id,),
             )
         )
-        assert row == (1, 1, "2026-09-14", None, "2026-09-14T00:00:00+00:00")
+        assert row == (
+            1, 1, "morning", "2026-09-14", None,
+            "2026-09-14T00:00:00+00:00",
+        )
     finally:
         _run(database.close())
 
@@ -1961,7 +1972,7 @@ def test_quest_instances_due_time_round_trips(tmp_path) -> None:
         _run(database.close())
 
 
-def test_quest_instances_duplicate_definition_date_fails(tmp_path) -> None:
+def test_quest_instances_duplicate_tuple_fails(tmp_path) -> None:
     database = _open_db(tmp_path / "task-instances-duplicate.db")
     try:
         _apply(database)
@@ -1969,6 +1980,78 @@ def test_quest_instances_duplicate_definition_date_fails(tmp_path) -> None:
         _insert_instance(database, definition_id=1, due_date="2026-09-14")
         with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
             _insert_instance(database, definition_id=1, due_date="2026-09-14")
+    finally:
+        _run(database.close())
+
+
+def test_quest_instances_duplicate_tuple_different_child_allowed(
+    tmp_path,
+) -> None:
+    """D-008: same definition, date and window for two different
+    assignees of the same definition are two distinct instances."""
+    database = _open_db(tmp_path / "task-instances-shared.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        _run(
+            database.execute(
+                "INSERT INTO children (display_name, created_at) VALUES (?, ?)",
+                ("Bo", "2026-09-13T00:00:00+00:00"),
+            )
+        )
+        _run(
+            database.execute(
+                "INSERT INTO quest_definition_assignees "
+                "(definition_id, child_id) VALUES (1, 2)"
+            )
+        )
+        _insert_instance(database, definition_id=1, child_id=1)
+        _insert_instance(database, definition_id=1, child_id=2)
+        row = _run(database.fetch_one("SELECT COUNT(*) FROM quest_instances"))
+        assert row == (2,)
+    finally:
+        _run(database.close())
+
+
+def test_quest_instances_duplicate_tuple_different_window_allowed(
+    tmp_path,
+) -> None:
+    """D-008 twice-daily case: one definition, one child, one date,
+    two windows — two rows."""
+    database = _open_db(tmp_path / "task-instances-twice-daily.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        _insert_instance(database, definition_id=1, window="morning")
+        _insert_instance(database, definition_id=1, window="evening")
+        rows = _run(
+            database.fetch_all(
+                "SELECT window FROM quest_instances ORDER BY window"
+            )
+        )
+        assert [row[0] for row in rows] == ["evening", "morning"]
+    finally:
+        _run(database.close())
+
+
+def test_quest_instances_unknown_window_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances-bad-window.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_instance(database, definition_id=1, window="noon")
+    finally:
+        _run(database.close())
+
+
+def test_quest_instances_window_not_null_enforced(tmp_path) -> None:
+    database = _open_db(tmp_path / "task-instances-window-null.db")
+    try:
+        _apply(database)
+        _setup_definition(database)
+        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+            _insert_instance(database, definition_id=1, window=_OMIT)
     finally:
         _run(database.close())
 
