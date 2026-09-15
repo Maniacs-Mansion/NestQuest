@@ -205,12 +205,20 @@ class PresenceOverridesDao:
                 )
                 if child is None:
                     raise ValueError(f"child {child_id} does not exist")
-                conflicting = await self._database.fetch_one(
-                    f"SELECT {_OVERRIDE_COLUMNS} FROM presence_overrides "
-                    "WHERE child_id = ? AND end_date >= ? "
-                    "AND start_date <= ? ORDER BY id LIMIT 1",
-                    (child_id, start_date, end_date),
-                )
+                # Only a well-ordered range has overlap semantics:
+                # inverted ranges fall through to the INSERT and hit
+                # the schema's end>=start CHECK, preserving the
+                # IntegrityError contract the matrix tests rely on.
+                if end_date >= start_date:
+                    conflicting = await self._database.fetch_one(
+                        f"SELECT {_OVERRIDE_COLUMNS} "
+                        "FROM presence_overrides "
+                        "WHERE child_id = ? AND end_date >= ? "
+                        "AND start_date <= ? ORDER BY id LIMIT 1",
+                        (child_id, start_date, end_date),
+                    )
+                else:
+                    conflicting = None
                 if conflicting is not None:
                     conflict = _override_from_row(conflicting)
                     raise ValueError(
