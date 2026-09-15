@@ -36,6 +36,7 @@ from __future__ import annotations
 import datetime
 from dataclasses import dataclass
 
+from .const import QUEST_WINDOWS
 from .dao_children import ChildRecord, _child_from_row, _connection_lock
 from .dao_children import _CHILD_COLUMNS
 from .db import NestQuestDatabase
@@ -71,6 +72,38 @@ def _validate_date(value: str, field: str) -> None:
         )
 
 
+_TIME_FORMAT = "%H:%M"
+
+
+def _validate_time(value: str, field: str) -> None:
+    """Raise ValueError unless ``value`` is a strict 24-hour HH:MM.
+
+    Same strictness policy as _validate_date: parse with the exact
+    format, then round-trip so '9:30' (non-padded) is rejected.  Time
+    shapes are caller-side policy (the schema stores TEXT): windows'
+    optional ``due_time`` and definition ``due_time`` both use this.
+    """
+    try:
+        parsed = datetime.datetime.strptime(value, _TIME_FORMAT).time()
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{field} must be a 24-hour HH:MM time, got {value!r}"
+        ) from None
+    if parsed.strftime(_TIME_FORMAT) != value:
+        raise ValueError(
+            f"{field} must be a strict HH:MM time, got {value!r}"
+        )
+
+
+def _validate_window(window: str) -> None:
+    """Raise ValueError unless ``window`` is a ``const`` window name."""
+    if window not in QUEST_WINDOWS:
+        raise ValueError(
+            f"window must be one of {', '.join(QUEST_WINDOWS)}, "
+            f"got {window!r}"
+        )
+
+
 @dataclass(frozen=True)
 class ScheduleRuleRecord:
     """One row of ``schedule_rules``."""
@@ -100,6 +133,15 @@ class QuestDefinitionRecord:
     created_at: str
 
 
+@dataclass(frozen=True)
+class QuestDefinitionWindowRecord:
+    """One row of ``quest_definition_windows``."""
+
+    definition_id: int
+    window: str
+    due_time: str | None
+
+
 _RULE_COLUMNS = (
     "id, rule_type, interval, weekday_set, day_of_month, nth_weekday, "
     "month, start_date, end_date"
@@ -108,6 +150,7 @@ _DEFINITION_COLUMNS = (
     "id, title, description, icon, schedule_rule_id, due_time, "
     "is_active, created_at"
 )
+_WINDOW_COLUMNS = "definition_id, window, due_time"
 
 
 def _rule_from_row(row: tuple) -> ScheduleRuleRecord:
@@ -134,6 +177,14 @@ def _definition_from_row(row: tuple) -> QuestDefinitionRecord:
         due_time=row[5],
         is_active=bool(row[6]),
         created_at=row[7],
+    )
+
+
+def _window_from_row(row: tuple) -> QuestDefinitionWindowRecord:
+    return QuestDefinitionWindowRecord(
+        definition_id=row[0],
+        window=row[1],
+        due_time=row[2],
     )
 
 
@@ -506,6 +557,92 @@ class QuestDefinitionsDao:
             (definition_id,),
         )
         return [_child_from_row(row) for row in rows]
+
+    async def upsert_window(
+        self,
+        definition_id: int,
+        window: str,
+        *,
+        due_time: str | None = None,
+    ) -> QuestDefinitionWindowRecord:
+        """Declare (or re-declare) ``window`` on the definition.
+
+        The composite primary key makes the write idempotent per
+        (definition, window): re-declaring updates ``due_time`` in
+        place instead of duplicating.  The window name must be one of
+        ``const.QUEST_WINDOWS`` (the schema CHECK backs this up) and a
+        provided ``due_time`` must be strict 24-hour HH:MM.  The
+        definition must exist — validated under the connection lock so
+        the verdict cannot go stale before the write.
+        """
+        _validate_window(window)
+        if due_time is not None:
+            _validate_time(due_time, "due_time")
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                definition = await self._database.fetch_one(
+                    "SELECT 1 FROM quest_definitions WHERE id = ?",
+                    (definition_id,),
+                )
+                if definition is None:
+                    raise ValueError(
+                        f"quest definition {definition_id} does not exist"
+                    )
+                await self._database.execute(
+                    "INSERT INTO quest_definition_windows "
+                    "(definition_id, window, due_time) VALUES (?, ?, ?) "
+                    "ON CONFLICT (definition_id, window) DO UPDATE SET "
+                    "due_time = excluded.due_time",
+                    (definition_id, window, due_time),
+                )
+                row = await self._database.fetch_one(
+                    f"SELECT {_WINDOW_COLUMNS} "
+                    "FROM quest_definition_windows "
+                    "WHERE definition_id = ? AND window = ?",
+                    (definition_id, window),
+                )
+        assert row is not None
+        return _window_from_row(row)
+
+    async def list_windows(
+        self, definition_id: int
+    ) -> list[QuestDefinitionWindowRecord]:
+        """Return the definition's windows in ``const`` order.
+
+        Ordered by the canonical window sequence (morning, afternoon,
+        evening) rather than insertion order, so callers always render
+        the Quest Log's three columns consistently.  A definition with
+        no windows returns [].
+        """
+        rows = await self._database.fetch_all(
+            f"SELECT {_WINDOW_COLUMNS} FROM quest_definition_windows "
+            "WHERE definition_id = ?",
+            (definition_id,),
+        )
+        by_name = {row[1]: _window_from_row(row) for row in rows}
+        return [
+            by_name[name]
+            for name in QUEST_WINDOWS
+            if name in by_name
+        ]
+
+    async def remove_window(
+        self, definition_id: int, window: str
+    ) -> bool:
+        """Remove the window declaration; True when a row was removed.
+
+        Future materialization stops producing instances for this
+        (definition, window); existing instances and completion history
+        are never touched here (Feature 06 guardrail).
+        """
+        _validate_window(window)
+        async with _connection_lock(self._database):
+            result = await self._database.execute(
+                "DELETE FROM quest_definition_windows "
+                "WHERE definition_id = ? AND window = ?",
+                (definition_id, window),
+            )
+        return result.rowcount > 0
 
     async def _validate_assignable_child(self, child_id: int) -> None:
         """Raise ValueError unless the child exists and is active.

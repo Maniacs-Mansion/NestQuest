@@ -17,7 +17,10 @@ from custom_components.nestquest.migrations import (
     apply_migrations,
     read_schema_version,
 )
-from custom_components.nestquest.schema import SCHEMA_V1_STATEMENTS
+from custom_components.nestquest.schema import (
+    SCHEMA_V1_STATEMENTS,
+    SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL,
+)
 
 
 def _run(coro):
@@ -64,6 +67,7 @@ def _counts(database) -> dict[str, int]:
         "schedule_rules",
         "quest_definitions",
         "quest_definition_assignees",
+        "quest_definition_windows",
         "presence_schedules",
         "presence_overrides",
         "quest_instances",
@@ -101,6 +105,7 @@ def test_fresh_file_migration_creates_all_v1_tables(tmp_path) -> None:
             "schedule_rules",
             "quest_definitions",
             "quest_definition_assignees",
+            "quest_definition_windows",
             "presence_schedules",
             "presence_overrides",
             "quest_instances",
@@ -138,18 +143,19 @@ def test_empty_version_table_reads_as_version_0(tmp_path) -> None:
 
 
 def test_migration_list_shape() -> None:
-    """Migration 1 is the v1 DDL; 2 and 3 are the callable steps.
+    """Migration 1 is the v1 DDL; 2 and 3 are callable steps.
 
     Nothing ever shipped, so migration 1 was rewritten pre-release
     (D-007) to create the quest_* tables directly; migration 2 exists
-    for dev databases stamped version 1 by the pre-rename runner, and
+    for dev databases stamped version 1 by the pre-rename runner,
     migration 3 brings pre-D-008 definitions to the multi-assignee
-    model.
+    model, and migration 4 adds the windows table.
     """
     assert MIGRATIONS[0] == SCHEMA_V1_STATEMENTS
     assert callable(MIGRATIONS[1])
     assert callable(MIGRATIONS[2])
-    assert len(MIGRATIONS) == 3
+    assert MIGRATIONS[3] == SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL
+    assert len(MIGRATIONS) == 4
 
 
 # ---------------------------------------------------------------------------
