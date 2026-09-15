@@ -372,14 +372,16 @@ def test_matrix_completion_events_append_read_and_no_mutation(
     async def _body(w: World):
         # insert: append a completion then a reversal, then re-complete
         await w.events.append(
-            w.instance.id, w.child.id, "completed", "panel", _stamp(), True
+            w.instance.id, w.child.id, "completed", "panel", _stamp(), True,
+            actor_child_id=w.child.id,
         )
         await w.events.append(
             w.instance.id, w.child.id, "uncompleted", "user", _stamp(), None,
             actor_user_id="user-1",
         )
         await w.events.append(
-            w.instance.id, w.child.id, "completed", "panel", _stamp(), False
+            w.instance.id, w.child.id, "completed", "panel", _stamp(), False,
+            actor_child_id=w.child.id,
         )
         # read: full ordered history + latest
         history = await w.events.list_by_instance(w.instance.id)

@@ -664,6 +664,7 @@ def test_append_panel_event_round_trips(tmp_path) -> None:
             definition.id, child.id, D1, _now_stamp(), window="morning")
         event = await events.append(
             instance.id, child.id, "completed", "panel", _now_stamp(), False,
+                actor_child_id=child.id,
             actor_user_id=None,
         )
         assert event.actor_source == "panel"
@@ -718,17 +719,31 @@ def test_append_validation_rejects_bad_shapes(tmp_path) -> None:
         with pytest.raises(ValueError, match="must not carry"):
             await events.append(
                 instance.id, child.id, "completed", "panel", _now_stamp(), True,
+                actor_child_id=child.id,
                 actor_user_id="user-1",
+            )
+        with pytest.raises(ValueError, match="requires actor_child_id"):
+            await events.append(
+                instance.id, child.id, "completed", "panel",
+                _now_stamp(), True,
+            )
+        with pytest.raises(ValueError, match="must not carry actor_child_id"):
+            await events.append(
+                instance.id, child.id, "completed", "user", _now_stamp(), True,
+                actor_user_id="user-1",
+                actor_child_id=child.id,
             )
         with pytest.raises(ValueError, match="requires was_on_time"):
             await events.append(
-                instance.id, child.id, "completed", "panel", _now_stamp(), None
+                instance.id, child.id, "completed", "panel", _now_stamp(), None,
+                actor_child_id=child.id
             )
         # was_on_time must be a real bool: int-convertible junk that
         # would silently coerce (0.5 -> False) is rejected outright.
         with pytest.raises(ValueError, match="must be True, False or None"):
             await events.append(
-                instance.id, child.id, "completed", "panel", _now_stamp(), 0.5
+                instance.id, child.id, "completed", "panel",
+                _now_stamp(), 0.5, actor_child_id=child.id,
             )
         with pytest.raises(ValueError, match="must be True, False or None"):
             await events.append(
@@ -758,7 +773,7 @@ def test_append_rejects_non_utc_timestamps(tmp_path) -> None:
             with pytest.raises(ValueError, match="UTC"):
                 await events.append(
                     instance.id, child.id, "completed", "panel", bad,
-                    True,
+                    True, actor_child_id=child.id,
                 )
         return None
 
@@ -815,14 +830,16 @@ def test_completed_uncompleted_recompleted_three_ordered_events(
         instance = await instances.upsert(
             definition.id, child.id, D1, _now_stamp(), window="morning")
         await events.append(
-            instance.id, child.id, "completed", "panel", _now_stamp(), True
+            instance.id, child.id, "completed", "panel", _now_stamp(), True,
+                actor_child_id=child.id
         )
         await events.append(
             instance.id, child.id, "uncompleted", "user", _now_stamp(), True,
             actor_user_id="user-1",
         )
         await events.append(
-            instance.id, child.id, "completed", "panel", _now_stamp(), False
+            instance.id, child.id, "completed", "panel", _now_stamp(), False,
+                actor_child_id=child.id
         )
         history = await events.list_by_instance(instance.id)
         assert [e.event_type for e in history] == [
@@ -855,7 +872,8 @@ def test_get_latest_returns_uncompleted_when_reversed(tmp_path) -> None:
         instance = await instances.upsert(
             definition.id, child.id, D1, _now_stamp(), window="morning")
         await events.append(
-            instance.id, child.id, "completed", "panel", _now_stamp(), True
+            instance.id, child.id, "completed", "panel", _now_stamp(), True,
+                actor_child_id=child.id
         )
         await events.append(
             instance.id, child.id, "uncompleted", "user", _now_stamp(), True,
@@ -878,17 +896,20 @@ def test_list_by_child_and_date_range_scopes_by_due_date(tmp_path) -> None:
         late = await instances.upsert(
             definition.id, child.id, D20, _now_stamp(), window="morning")
         await events.append(
-            early.id, child.id, "completed", "panel", _now_stamp(), True
+            early.id, child.id, "completed", "panel", _now_stamp(), True,
+                actor_child_id=child.id
         )
         await events.append(
-            inside.id, child.id, "completed", "panel", _now_stamp(), False
+            inside.id, child.id, "completed", "panel", _now_stamp(), False,
+                actor_child_id=child.id
         )
         await events.append(
             inside.id, child.id, "uncompleted", "user", _now_stamp(), True,
             actor_user_id="user-1",
         )
         await events.append(
-            late.id, child.id, "completed", "panel", _now_stamp(), True
+            late.id, child.id, "completed", "panel", _now_stamp(), True,
+                actor_child_id=child.id
         )
         found = await events.list_by_child_and_date_range(
             child.id, D2, D2
@@ -922,7 +943,7 @@ def test_list_events_occurred_at_scope_variant(tmp_path) -> None:
         # queried on today's date finds it too.
         event = await events.append(
             late_due.id, child.id, "completed", "panel",
-            _now_stamp(), False,
+            _now_stamp(), False, actor_child_id=child.id,
         )
         by_due = await events.list_by_child_and_date_range(
             child.id, D20, D20
@@ -1010,7 +1031,12 @@ def test_no_mutation_sql_for_completion_events_anywhere() -> None:
     # UPDATE/DELETE/non-DAO-INSERT paths hit the pattern.
     insert_exempt = {
         "custom_components/nestquest/dao_instances.py",
+        "custom_components/nestquest/migrations.py",  # the rebuild
+        # migrations re-create the table via INSERT..SELECT (append-
+        # order preserved); UPDATE/DELETE stays forbidden everywhere
         "tests/test_schema.py",
+        "tests/test_migrations.py",  # seeds frozen legacy shapes to
+        # exercise the rebuild migrations
         "tests/test_dao_instances.py",  # this guard file; scanned by
         # its own guard's regex spans below instead
     }

@@ -25,11 +25,12 @@ pre-D-008 databases to the multi-assignee model: it creates
 ``quest_definition_assignees`` and, when ``quest_definitions`` still
 carries a single ``child_id`` column, rebuilds the table without it,
 copying each definition's assignee across.  Migration 4 adds the
-windows table and migration 5 rebuilds ``quest_instances`` onto the
-widened (definition_id, child_id, due_date, window) key.  Each callable
-migration runs inside its own transaction together with its version
-stamp, so a crash mid-step rolls the statements and the stamp back
-together.
+windows table, migration 5 rebuilds ``quest_instances`` onto the
+widened (definition_id, child_id, due_date, window) key, and migration
+6 rebuilds ``completion_events`` with the D-008 ``actor_child_id``
+column.  Each callable migration runs inside its own transaction
+together with its version stamp, so a crash mid-step rolls the
+statements and the stamp back together.
 
 Migration entries are either an ordered sequence of SQL statements or
 an async callable taking ``(database, target_version)``.  Callables
@@ -73,6 +74,7 @@ from typing import Union
 
 from .db import NestQuestDatabase
 from .schema import (
+    COMPLETION_EVENTS_TABLE_SQL,
     QUEST_DEFINITIONS_TABLE_SQL,
     QUEST_INSTANCES_TABLE_SQL,
     SCHEMA_V1_STATEMENTS,
@@ -326,6 +328,74 @@ async def _widen_instance_key(
         await database.execute("PRAGMA foreign_keys = ON")
 
 
+async def _add_actor_child_id(
+    database: NestQuestDatabase, target_version: int
+) -> None:
+    """Bring ``completion_events`` to the D-008 actor-child shape.
+
+    The ``actor_child_id`` column records which panel profile was
+    tapped; it cannot be added with ``ALTER TABLE ADD COLUMN`` alone
+    because the canonical shape also carries an actor-pair coherence
+    CHECK (panel events require it, user events forbid it), and CHECK
+    constraints cannot be added to an existing table.  Databases with
+    the legacy shape are therefore rebuilt via SQLite's canonical
+    procedure, backfilling each legacy panel row's ``actor_child_id``
+    to ``child_id`` — pre-D-008 panel completions were always recorded
+    against the tapped child themselves — while admin rows stay NULL.
+    Row ids are preserved so ``quest_instances`` references and the
+    append-only history stay intact.  Fresh databases already match
+    the canonical shape and only stamp.
+
+    The rebuild runs with ``foreign_keys = OFF`` and verifies
+    ``PRAGMA foreign_key_check`` inside the transaction before the
+    stamp.  The copy is an INSERT..SELECT, not an UPDATE: the
+    completion_events table keeps its append-only guarantee.
+    """
+    legacy_shape = not await _table_has_column(
+        database, "completion_events", "actor_child_id"
+    )
+    await database.execute("PRAGMA foreign_keys = OFF")
+    try:
+        async with database.transaction():
+            if legacy_shape:
+                await database.execute(
+                    "CREATE TABLE completion_events_rebuilt "
+                    f"{COMPLETION_EVENTS_TABLE_SQL}"
+                )
+                await database.execute(
+                    "INSERT INTO completion_events_rebuilt "
+                    "(id, instance_id, child_id, event_type, actor_source, "
+                    "actor_user_id, actor_child_id, occurred_at, "
+                    "was_on_time) "
+                    "SELECT id, instance_id, child_id, event_type, "
+                    "actor_source, actor_user_id, "
+                    "CASE WHEN actor_source = 'panel' THEN child_id "
+                    "ELSE NULL END, "
+                    "occurred_at, was_on_time "
+                    "FROM completion_events ORDER BY id"
+                )
+                await database.execute("DROP TABLE completion_events")
+                await database.execute(
+                    "ALTER TABLE completion_events_rebuilt "
+                    "RENAME TO completion_events"
+                )
+                violations = await database.fetch_all(
+                    "PRAGMA foreign_key_check"
+                )
+                if violations:
+                    raise RuntimeError(
+                        "completion_events rebuild produced foreign-key "
+                        f"violations: {violations!r}"
+                    )
+                LOGGER.info(
+                    "Added actor_child_id to completion_events; legacy "
+                    "panel rows backfilled to their own child_id"
+                )
+            await stamp_schema_version(database, target_version)
+    finally:
+        await database.execute("PRAGMA foreign_keys = ON")
+
+
 #: The ordered migration list.  Append-only: never edit an applied
 #: entry, add the next one instead.  (Migration 1's content was
 #: rewritten pre-release per D-007 — no version 1 database shipped.)
@@ -340,6 +410,10 @@ MIGRATIONS: Sequence[MigrationStep] = [
     # Migration 5 (D-008): rebuild quest_instances onto the widened
     # (definition_id, child_id, due_date, window) key.
     _widen_instance_key,
+    # Migration 6 (D-008): rebuild completion_events with the
+    # actor_child_id column and its actor-pair coherence CHECK,
+    # backfilling legacy panel rows to their own child_id.
+    _add_actor_child_id,
 ]
 
 
