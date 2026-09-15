@@ -155,3 +155,24 @@ def test_no_hardcoded_domain_or_db_filename_in_new_modules() -> None:
                 assert node.value != "nestquest.db", (
                     f"Found hard-coded database filename in {py_file.name}:{node.lineno}"
                 )
+
+async def test_flow_persists_flow_user_as_initial_admin(hass, make_flow) -> None:
+    """The HA user completing the flow lands in entry data as the
+    initial admin copy: entry.context is not persisted by real HA, so
+    the durable record must carry the owner."""
+    from custom_components.nestquest.const import CONF_ADMIN_USER_IDS
+
+    flow = make_flow(hass)
+    flow.context = {"user_id": "ha-owner"}
+    result = await flow.async_step_user({})
+    assert result["type"] == "create_entry"
+    assert result["data"] == {CONF_ADMIN_USER_IDS: ["ha-owner"]}
+
+
+async def test_flow_without_context_user_keeps_data_untouched(
+    hass, make_flow
+) -> None:
+    flow = make_flow(hass)
+    result = await flow.async_step_user({"horizon_days": 7})
+    assert result["type"] == "create_entry"
+    assert result["data"] == {"horizon_days": 7}

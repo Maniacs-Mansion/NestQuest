@@ -42,6 +42,8 @@ _HA_MODULES = (
     "homeassistant.config_entries",
     "homeassistant.data_entry_flow",
     "homeassistant.exceptions",
+    "homeassistant.helpers",
+    "homeassistant.helpers.config_validation",
 )
 
 def _find_spec(name: str):
@@ -79,6 +81,8 @@ for _parent, _child in (
     ("homeassistant", "data_entry_flow"),
     ("homeassistant", "core"),
     ("homeassistant", "exceptions"),
+    ("homeassistant", "helpers"),
+    ("homeassistant.helpers", "config_validation"),
 ):
     setattr(sys.modules[_parent], _child, sys.modules[f"{_parent}.{_child}"])
 
@@ -180,6 +184,30 @@ class ConfigEntryNotReady(Exception):
 
 
 _exceptions_mock.ConfigEntryNotReady = ConfigEntryNotReady
+
+import voluptuous as vol
+
+
+def _multi_select(choices: dict):
+    """Mirror homeassistant.helpers.config_validation.multi_select.
+
+    The options flow's admin picker uses HA's supported multi-select
+    validator (schema-serializable by HA's frontend); the mock provides
+    the same contract: a list whose members are keys of ``choices``.
+    """
+
+    def _validate(selected):
+        if not isinstance(selected, list):
+            raise vol.Invalid("Not a list")
+        for value in selected:
+            if value not in choices:
+                raise vol.Invalid(f"{value} is not a valid option")
+        return selected
+
+    return _validate
+
+
+_ha_mock("homeassistant.helpers.config_validation").multi_select = _multi_select
 
 
 # ---------------------------------------------------------------------------

@@ -278,3 +278,27 @@ async def test_setup_does_not_reseed_narrowed_allowlist(
     finally:
         await database.close()
     assert await async_unload_entry(hass, entry_reloaded) is True
+
+
+async def test_setup_seed_prefers_options_over_entry_data(
+    hass, make_entry
+) -> None:
+    """Seed precedence on a fresh database: the options flow's saved
+    list (the current one) beats the config flow's original copy."""
+    from custom_components.nestquest.const import CONF_ADMIN_USER_IDS
+
+    entry = await _setup_entry(
+        hass,
+        make_entry(
+            options={CONF_ADMIN_USER_IDS: ["user-current"]},
+            data={CONF_ADMIN_USER_IDS: ["ha-owner"]},
+            context={"user_id": "ha-owner"},
+        ),
+        hass.registry,
+    )
+    database = entry.runtime_data.database
+    try:
+        assert await list_admin_ids(database) == ["user-current"]
+    finally:
+        await database.close()
+    assert await async_unload_entry(hass, entry) is True

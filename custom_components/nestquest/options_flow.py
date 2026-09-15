@@ -7,6 +7,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers import config_validation as cv
 
 from .const import (
     CONF_ADMIN_USER_IDS,
@@ -29,29 +30,6 @@ _TIME_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 def _parse_time(value: str) -> bool:
     """Return True when value is a valid 24-hour HH:MM string."""
     return _TIME_PATTERN.fullmatch(value) is not None
-
-
-def _multi_select(choices: dict[str, str]):
-    """A voluptuous validator for a multi-select of ``choices``.
-
-    The mock-only test harness cannot import HA's config-validation
-    helpers (they pull in real HA), so this mirrors the shape of
-    ``homeassistant.helpers.config_validation.multi_select``: accepts a
-    list of keys from ``choices``, returns the list unchanged, rejects
-    anything else (None becomes the empty selection).
-    """
-
-    def _validate(value):
-        if value is None:
-            return []
-        if not isinstance(value, list):
-            raise vol.Invalid("expected a list of selections")
-        for item in value:
-            if item not in choices:
-                raise vol.Invalid(f"{item!r} is not a valid choice")
-        return list(value)
-
-    return _validate
 
 
 def _async_validate(user_input: dict[str, Any]) -> dict[str, str]:
@@ -106,11 +84,13 @@ def _build_schema(
         ): int,
     }
     if admin_choices is not None:
+        # HA's supported multi-select validator: the frontend can
+        # serialize the field as a real picker of the given choices.
         fields[
             vol.Optional(
                 CONF_ADMIN_USER_IDS, default=list(admin_default or [])
             )
-        ] = _multi_select(admin_choices)
+        ] = cv.multi_select(admin_choices)
     return vol.Schema(fields)
 
 

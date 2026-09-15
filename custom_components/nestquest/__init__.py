@@ -242,9 +242,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # record without a live connection (a previous setup's
             # close-on-failure, or a hand-replaced file) must get the
             # missing/valid/corrupt classification too, never a raw
-            # sqlite3 error and never skipped migrations.
+            # sqlite3 error and never skipped migrations — and the
+            # same allowlist seeding, so a reopened fresh file is
+            # never ownerless.
             db = await _async_open_database(
                 hass, await async_get_db_path(hass)
+            )
+            stored_admin_ids = (
+                entry.options.get(CONF_ADMIN_USER_IDS)
+                or entry.data.get(CONF_ADMIN_USER_IDS)
             )
             context = getattr(entry, "context", None)
             context_user_id = (
@@ -254,7 +260,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             await seed_setup_admin(
                 db,
-                stored_admin_ids=entry.data.get(CONF_ADMIN_USER_IDS),
+                stored_admin_ids=stored_admin_ids,
                 context_user_id=context_user_id,
             )
             existing.database = db
@@ -270,10 +276,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     database = await _async_open_database(hass, await async_get_db_path(hass))
     try:
         # Seed the admin allowlist on first setup so the owner is never
-        # locked out: an empty database takes the config entry's stored
-        # admin copy (disaster recovery), else the HA user who
-        # completed the config flow.  Non-empty allowlists are never
-        # touched (fail-closed narrowing is deliberate).
+        # locked out: an empty database takes the persisted admin copy
+        # — the options flow's saved list first (it is the current
+        # one), else the config flow's user from entry data — and only
+        # then the HA user still present on the entry context.  No-op
+        # on a non-empty list (fail-closed narrowing is deliberate).
+        stored_admin_ids = (
+            entry.options.get(CONF_ADMIN_USER_IDS)
+            or entry.data.get(CONF_ADMIN_USER_IDS)
+        )
         context = getattr(entry, "context", None)
         context_user_id = (
             context.get("user_id")
@@ -282,7 +293,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         await seed_setup_admin(
             database,
-            stored_admin_ids=entry.data.get(CONF_ADMIN_USER_IDS),
+            stored_admin_ids=stored_admin_ids,
             context_user_id=context_user_id,
         )
         remove_update_listener = entry.add_update_listener(_async_update_listener)
