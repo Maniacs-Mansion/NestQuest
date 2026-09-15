@@ -319,6 +319,13 @@ def cycle_week_index(
     return (days // 7) % schedule.cycle_length_weeks
 
 
+#: Search cap for :meth:`PresenceEngine.next_present_dates`: two full
+#: years of daily checks.  A child absent every day (an all-absent
+#: pattern with a blocking override) would otherwise loop forever; the
+#: cap bounds the scan and surfaces the situation as an error instead.
+MAX_PREVIEW_SCAN_DAYS = 366 * 2
+
+
 class PresenceEngine:
     """Answers "is this child at this house on this date?".
 
@@ -423,6 +430,45 @@ class PresenceEngine:
             return True
         week = cycle_week_index(schedule, target)
         return target.weekday() in schedule.pattern[week]
+
+    def next_present_dates(
+        self,
+        child_id: object,
+        start_date: object,
+        count: int,
+    ) -> list[datetime.date]:
+        """Return the next ``count`` dates the child is present.
+
+        Walks forward from ``start_date`` (INCLUSIVE — a parent
+        previewing "starting Monday" expects Monday itself when the
+        child is present) checking :meth:`is_present` for every day,
+        so overrides and the pattern are honoured identically.  The
+        admin Schedule tab renders this preview so a parent can confirm
+        a custody pattern is right before saving it.
+
+        A child absent every scanned day raises ValueError after the
+        two-year search cap — an always-absent child would otherwise
+        loop forever.  ``count`` must be a positive integer.
+        """
+        _validate_child_id(child_id)
+        start = _parse_date(start_date, "start_date")
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise ValueError(f"count must be an integer, got {count!r}")
+        if count < 1:
+            raise ValueError(f"count must be at least 1, got {count}")
+        found: list[datetime.date] = []
+        day = start
+        for _ in range(MAX_PREVIEW_SCAN_DAYS):
+            if self.is_present(child_id, day):
+                found.append(day)
+                if len(found) == count:
+                    return found
+            day += datetime.timedelta(days=1)
+        raise ValueError(
+            f"child {child_id} is not present on any of the "
+            f"{MAX_PREVIEW_SCAN_DAYS} days from {start.isoformat()}; "
+            f"{count} present day(s) cannot be previewed"
+        )
 
     def __setattr__(self, name: object, value: object) -> None:
         raise AttributeError(
