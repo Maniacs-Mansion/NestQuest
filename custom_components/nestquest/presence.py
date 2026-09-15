@@ -298,3 +298,22 @@ class PresenceOverride:
     def covers(self, date: datetime.date) -> bool:
         """Return True when the override applies to ``date``."""
         return self.start_date <= date <= self.end_date
+
+
+def cycle_week_index(
+    schedule: PresenceSchedule, target_date: object
+) -> int:
+    """Return the cycle week index ``target_date`` falls in.
+
+    Anchor-date arithmetic ONLY (D-004): ``((target_date -
+    anchor_date).days // 7) % cycle_length_weeks``.  Python's floor
+    division makes dates BEFORE the anchor behave correctly — they
+    walk the cycle backwards (day -1 is the last week of the cycle,
+    day -8 wraps one further) instead of inverting, which is exactly
+    what ISO week parity does wrong in 53-week years.  The modulo of
+    a negative in Python is non-negative, so the index is always a
+    valid week index.
+    """
+    target = _parse_date(target_date, "target_date")
+    days = (target - schedule.anchor_date).days
+    return (days // 7) % schedule.cycle_length_weeks

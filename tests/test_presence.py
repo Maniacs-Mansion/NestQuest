@@ -9,6 +9,7 @@ from custom_components.nestquest.presence import (
     MAX_CYCLE_LENGTH_WEEKS,
     PresenceOverride,
     PresenceSchedule,
+    cycle_week_index,
 )
 
 
@@ -260,3 +261,113 @@ def test_schedule_pattern_is_immutable_after_construction() -> None:
     # The validated contents are still readable and encode correctly.
     assert schedule.pattern[0] == frozenset({0, 2})
     assert schedule.encode() == "0,2|1"
+
+
+# ---------------------------------------------------------------------------
+# Cycle arithmetic: anchor-date only, never ISO week parity
+# ---------------------------------------------------------------------------
+
+
+def test_cycle_week_index_follows_the_anchor_formula() -> None:
+    schedule = PresenceSchedule(1, 2, ANCHOR, {0: {0}, 1: {1}})
+    # The anchor day starts week 0; each whole 7 days steps the cycle.
+    offsets = {0: 0, 1: 0, 6: 0, 7: 1, 8: 1, 13: 1, 14: 0, 15: 0, 22: 1}
+    for offset, expected in offsets.items():
+        assert (
+            cycle_week_index(
+                schedule, ANCHOR + datetime.timedelta(days=offset)
+            )
+            == expected
+        ), f"offset {offset}"
+
+
+def test_cycle_week_index_before_the_anchor_walks_backwards() -> None:
+    """Python floor division: day -1 is the LAST week of the cycle,
+    wrapping backwards — never inverting."""
+    schedule = PresenceSchedule(1, 2, ANCHOR, {0: {0}, 1: {1}})
+    assert cycle_week_index(schedule, ANCHOR - datetime.timedelta(days=1)) == 1
+    assert cycle_week_index(schedule, ANCHOR - datetime.timedelta(days=7)) == 1
+    assert cycle_week_index(schedule, ANCHOR - datetime.timedelta(days=8)) == 0
+
+
+def test_cycle_week_index_three_week_pattern() -> None:
+    schedule = PresenceSchedule(
+        1, 3, ANCHOR, {0: {0}, 1: {1}, 2: {2}}
+    )
+    offsets = [0, 7, 14, 21, 28]
+    assert [cycle_week_index(schedule, ANCHOR + datetime.timedelta(days=o)) for o in offsets] == [
+        0, 1, 2, 0, 1
+    ]
+
+
+def test_cycle_week_index_stable_across_three_year_boundaries() -> None:
+    """The regression this exists for: walking day by day through a
+    December 31st -> January 1st boundary, the cycle index steps by 0
+    or +1 (mod cycle length) and NEVER resets or inverts — including
+    2020, a 53-ISO-week year, where ISO week parity flips and would
+    invert a two-week custody schedule on January 1st."""
+    schedule = PresenceSchedule(
+        1, 2, datetime.date(2019, 1, 6), {0: {0, 2, 4}, 1: {1, 3}}
+    )
+    # Independently derived expectations (anchor 2019-01-06, index =
+    # floor(days-since-anchor / 7) % 2, hand-verified) — hardcoded so
+    # even an implementation that resets or inverts at January 1st
+    # cannot pass by coincidence:
+    expected = {
+        # 2019 -> 2020 boundary
+        datetime.date(2019, 12, 26): 0,
+        datetime.date(2019, 12, 27): 0,
+        datetime.date(2019, 12, 28): 0,
+        datetime.date(2019, 12, 29): 1,
+        datetime.date(2019, 12, 30): 1,
+        datetime.date(2019, 12, 31): 1,
+        datetime.date(2020, 1, 1): 1,
+        datetime.date(2020, 1, 2): 1,
+        datetime.date(2020, 1, 3): 1,
+        datetime.date(2020, 1, 4): 1,
+        datetime.date(2020, 1, 5): 0,
+        datetime.date(2020, 1, 6): 0,
+        datetime.date(2020, 1, 7): 0,
+        # 2020 (53 ISO weeks) -> 2021 boundary
+        datetime.date(2020, 12, 27): 1,
+        datetime.date(2020, 12, 28): 1,
+        datetime.date(2020, 12, 29): 1,
+        datetime.date(2020, 12, 30): 1,
+        datetime.date(2020, 12, 31): 1,
+        datetime.date(2021, 1, 1): 1,
+        datetime.date(2021, 1, 2): 1,
+        datetime.date(2021, 1, 3): 0,
+        datetime.date(2021, 1, 4): 0,
+        datetime.date(2021, 1, 5): 0,
+        datetime.date(2021, 1, 6): 0,
+        datetime.date(2021, 1, 7): 0,
+        # 2021 -> 2022 boundary
+        datetime.date(2021, 12, 27): 1,
+        datetime.date(2021, 12, 28): 1,
+        datetime.date(2021, 12, 29): 1,
+        datetime.date(2021, 12, 30): 1,
+        datetime.date(2021, 12, 31): 1,
+        datetime.date(2022, 1, 1): 1,
+        datetime.date(2022, 1, 2): 0,
+        datetime.date(2022, 1, 3): 0,
+        datetime.date(2022, 1, 4): 0,
+        datetime.date(2022, 1, 5): 0,
+        datetime.date(2022, 1, 6): 0,
+        datetime.date(2022, 1, 7): 0,
+    }
+    for day, wanted in expected.items():
+        got = cycle_week_index(schedule, day)
+        assert got == wanted, f"{day}: expected week {wanted}, got {got}"
+    # And 2020 really is the 53-ISO-week year this guards against.
+    assert datetime.date(2020, 12, 31).isocalendar()[1] == 53
+
+
+def test_module_uses_no_iso_week_functions() -> None:
+    """D-004 guardrail: cycle math never reads ISO week numbers."""
+    from pathlib import Path
+
+    source = Path(
+        __import__("custom_components.nestquest.presence", fromlist=["__file__"]).__file__
+    ).read_text()
+    assert "isocalendar" not in source
+    assert "isoweek" not in source
