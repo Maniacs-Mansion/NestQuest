@@ -302,3 +302,73 @@ async def test_setup_seed_prefers_options_over_entry_data(
     finally:
         await database.close()
     assert await async_unload_entry(hass, entry) is True
+
+
+async def test_setup_owner_fallback_seeds_owner_accounts(
+    hass, make_entry
+) -> None:
+    """Last-resort seed: with no persisted copy and no flow-context
+    user, HA owner accounts are seeded so first setup is never
+    ownerless (the real flow may lose the context; owners can already
+    do everything in HA)."""
+    from unittest.mock import AsyncMock
+
+    hass.auth.async_get_users = AsyncMock(
+        return_value=[
+            SimpleNamespace(id="owner-1", is_owner=True),
+            SimpleNamespace(id="member-1", is_owner=False),
+            SimpleNamespace(id="owner-2", is_owner=True),
+        ]
+    )
+    entry = await _setup_entry(hass, make_entry(), hass.registry)
+    database = entry.runtime_data.database
+    try:
+        assert sorted(await list_admin_ids(database)) == ["owner-1", "owner-2"]
+    finally:
+        await database.close()
+    assert await async_unload_entry(hass, entry) is True
+
+
+async def test_setup_owner_fallback_not_used_when_context_present(
+    hass, make_entry
+) -> None:
+    """The context user (flow caller) wins over the owner fallback:
+    a non-owner parent configuring the integration becomes the admin."""
+    from unittest.mock import AsyncMock
+
+    hass.auth.async_get_users = AsyncMock(
+        return_value=[SimpleNamespace(id="owner-1", is_owner=True)]
+    )
+    entry = await _setup_entry(
+        hass,
+        make_entry(context={"user_id": "parent-configured"}),
+        hass.registry,
+    )
+    database = entry.runtime_data.database
+    try:
+        assert await list_admin_ids(database) == ["parent-configured"]
+    finally:
+        await database.close()
+    assert await async_unload_entry(hass, entry) is True
+
+
+def test_seed_owner_ids_argument(tmp_path) -> None:
+    async def _body(database):
+        seeded = await seed_setup_admin(
+            database,
+            stored_admin_ids=None,
+            context_user_id=None,
+            owner_ids=["owner-1"],
+        )
+        assert seeded == ["owner-1"]
+        # Malformed owner lists are rejected like any other candidate.
+        with pytest.raises(ValueError):
+            await seed_setup_admin(
+                database,
+                stored_admin_ids=None,
+                context_user_id=None,
+                owner_ids=[7],
+            )
+        return seeded
+
+    _with_db(tmp_path, "seed-owner-arg.db")(_body)

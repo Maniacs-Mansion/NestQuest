@@ -96,15 +96,20 @@ async def seed_setup_admin(
     *,
     stored_admin_ids: list[str] | None = None,
     context_user_id: str | None = None,
+    owner_ids: list[str] | None = None,
 ) -> list[str]:
     """Seed an empty allowlist so the owner is never locked out.
 
     Only acts when the allowlist is EMPTY.  Preference order: the
-    stored entry-data copy of the list (disaster recovery for a lost
-    database), then the HA user who completed the config flow
-    (``context_user_id``).  Returns the allowlist after seeding.
-    Non-empty allowlists are returned untouched — re-running setup
-    must never resurrect a deliberately narrowed list.
+    stored persisted copy of the list (the options flow's current
+    selection, then the config flow's original — disaster recovery for
+    a lost database), then the HA user who completed the config flow
+    (``context_user_id``), then — when no caller identity survived at
+    all — every Home Assistant OWNER account (``owner_ids``), so a
+    first setup whose flow context lost the user id still seeds a
+    working admin.  Returns the allowlist after seeding.  Non-empty
+    allowlists are returned untouched — re-running setup must never
+    resurrect a deliberately narrowed list.
     """
     dao = AdminUsersDao(database)
     async with _connection_lock(database):
@@ -120,6 +125,12 @@ async def seed_setup_admin(
             candidates = [_validate_user_id(value) for value in stored_admin_ids]
         elif context_user_id is not None:
             candidates = [_validate_user_id(context_user_id)]
+        elif owner_ids:
+            if not isinstance(owner_ids, list):
+                raise ValueError(
+                    "owner_ids must be a list of HA user id strings"
+                )
+            candidates = [_validate_user_id(value) for value in owner_ids]
         for user_id in candidates:
             await dao.add(user_id, _now_stamp())
         return [row.ha_user_id for row in await dao.list()]

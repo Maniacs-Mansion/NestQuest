@@ -226,6 +226,28 @@ class NestQuestRuntimeData:
     remove_update_listener: Callable[[], Any]
 
 
+async def _async_owner_user_ids(hass: HomeAssistant) -> list[str]:
+    """Return every Home Assistant owner-account user id.
+
+    The last-resort admin seed: when no persisted allowlist copy and no
+    flow-context user survive to first setup, the HA owner accounts are
+    seeded so the household is never left with zero admins (an empty
+    allowlist fails closed, which would lock the household out of its
+    own integration).  Owner accounts can already do everything in HA,
+    so granting NestQuest admin is not a privilege escalation.
+    """
+    auth = getattr(hass, "auth", None)
+    if auth is None:
+        return []
+    users = await auth.async_get_users()
+    owners = [
+        user.id
+        for user in users
+        if getattr(user, "is_owner", False) and getattr(user, "id", None)
+    ]
+    return owners
+
+
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the NestQuest integration. YAML configuration is not used, returns True."""
     return True
@@ -262,6 +284,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 db,
                 stored_admin_ids=stored_admin_ids,
                 context_user_id=context_user_id,
+                owner_ids=await _async_owner_user_ids(hass),
             )
             existing.database = db
         entry.runtime_data = existing
@@ -291,10 +314,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if isinstance(context, dict)
             else None
         )
+        owner_ids = await _async_owner_user_ids(hass)
         await seed_setup_admin(
             database,
             stored_admin_ids=stored_admin_ids,
             context_user_id=context_user_id,
+            owner_ids=owner_ids,
         )
         remove_update_listener = entry.add_update_listener(_async_update_listener)
     except BaseException:

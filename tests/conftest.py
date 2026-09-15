@@ -29,7 +29,7 @@ import tempfile
 import weakref
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -281,6 +281,10 @@ def make_hass() -> tuple:
         config=MagicMock(),
         config_entries=SimpleNamespace(async_reload=None),
     )
+    # hass.auth mirrors the real surface the integration reads: an
+    # async_get_users list the tests can repoint at will (the setup
+    # path resolves HA owner accounts as the last-resort admin seed).
+    hass.auth = SimpleNamespace(async_get_users=AsyncMock(return_value=[]))
 
     def _cleanup_config_dir():
         import shutil
