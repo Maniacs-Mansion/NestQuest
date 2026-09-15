@@ -28,7 +28,7 @@ from __future__ import annotations
 import datetime
 import logging
 
-from .dao_children import ChildRecord, ChildrenDao
+from .dao_children import ChildRecord, ChildrenDao, _connection_lock
 from .db import NestQuestDatabase
 
 LOGGER = logging.getLogger(__name__)
@@ -155,38 +155,49 @@ async def edit_child(
     being edited, so a case-only edit colliding with another child's
     normalised name still warns.  Raises ValueError when the child does
     not exist.
+
+    Atomicity: the existence check, the duplicate scan, the UPDATE and
+    the readback all run inside the connection-scoped lock shared with
+    the DAOs, so another edit cannot slip between this call's UPDATE
+    and its readback — the returned record is exactly the one this
+    edit produced, not a later writer's.
     """
-    dao = ChildrenDao(database)
-    existing = await dao.get(child_id)
-    if existing is None:
-        raise ValueError(f"child {child_id} does not exist")
-    updates: dict[str, object] = {}
-    if display_name is not _UNSET:
-        name = _validate_text(display_name, "display_name", required=True)
-        assert name is not None
-        await _warn_on_duplicate_name(database, name, exclude_child_id=child_id)
-        updates["display_name"] = name
-    if colour is not _UNSET:
-        value = _validate_text(colour, "colour")
-        if value is None:
-            raise ValueError(
-                "clearing colour is not supported; pass a replacement "
-                "value or omit the field"
+    async with _connection_lock(database):
+        dao = ChildrenDao(database)
+        existing = await dao.get(child_id)
+        if existing is None:
+            raise ValueError(f"child {child_id} does not exist")
+        updates: dict[str, object] = {}
+        if display_name is not _UNSET:
+            name = _validate_text(
+                display_name, "display_name", required=True
             )
-        updates["colour"] = value
-    if avatar_ref is not _UNSET:
-        value = _validate_text(avatar_ref, "avatar_ref")
-        if value is None:
-            raise ValueError(
-                "clearing avatar_ref is not supported; pass a "
-                "replacement value or omit the field"
+            assert name is not None
+            await _warn_on_duplicate_name(
+                database, name, exclude_child_id=child_id
             )
-        updates["avatar_ref"] = value
-    if sort_order is not _UNSET:
-        updates["sort_order"] = _validate_sort_order(sort_order)
-    if updates:
-        await dao.update(child_id, **updates)
-    edited = await dao.get(child_id)
+            updates["display_name"] = name
+        if colour is not _UNSET:
+            value = _validate_text(colour, "colour")
+            if value is None:
+                raise ValueError(
+                    "clearing colour is not supported; pass a replacement "
+                    "value or omit the field"
+                )
+            updates["colour"] = value
+        if avatar_ref is not _UNSET:
+            value = _validate_text(avatar_ref, "avatar_ref")
+            if value is None:
+                raise ValueError(
+                    "clearing avatar_ref is not supported; pass a "
+                    "replacement value or omit the field"
+                )
+            updates["avatar_ref"] = value
+        if sort_order is not _UNSET:
+            updates["sort_order"] = _validate_sort_order(sort_order)
+        if updates:
+            await dao.update(child_id, **updates)
+        edited = await dao.get(child_id)
     assert edited is not None
     return edited
 
@@ -199,12 +210,17 @@ async def set_child_active(
     Deactivation hides the child from the panel without deleting their
     history (feature guardrail); this is the only removal path.
     Raises ValueError when the child does not exist.
+
+    Atomicity: existence check, UPDATE and readback run inside the
+    connection-scoped lock, so a concurrent opposite transition cannot
+    make this call report the other caller's value.
     """
-    dao = ChildrenDao(database)
-    if await dao.get(child_id) is None:
-        raise ValueError(f"child {child_id} does not exist")
-    await dao.set_active(child_id, is_active)
-    updated = await dao.get(child_id)
+    async with _connection_lock(database):
+        dao = ChildrenDao(database)
+        if await dao.get(child_id) is None:
+            raise ValueError(f"child {child_id} does not exist")
+        await dao.set_active(child_id, is_active)
+        updated = await dao.get(child_id)
     assert updated is not None
     return updated
 

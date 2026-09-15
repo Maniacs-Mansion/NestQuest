@@ -379,6 +379,131 @@ def test_set_child_active_missing_raises(tmp_path) -> None:
     _with_db(tmp_path, "set-active-missing.db")(_body)
 
 
+# ---------------------------------------------------------------------------
+# Concurrency: edit/set_active are atomic under the connection lock
+# ---------------------------------------------------------------------------
+
+
+def _gated_hass(armed: dict, gate_open: asyncio.Event, a_started: asyncio.Event):
+    """A hass mock whose executor gates the FIRST `_execute` job after
+    arming — the mutate statement of whichever business call starts
+    first — proving the caller holds the connection lock at that
+    moment and the second caller must queue behind it."""
+    from unittest.mock import MagicMock
+
+    hass = MagicMock()
+
+    async def _gated_executor(fn, *args):
+        if armed["active"]:
+            if getattr(fn, "__name__", "") == "_execute" and not armed["gated"]:
+                armed["gated"] = True
+                a_started.set()
+                await gate_open.wait()
+        return fn(*args)
+
+    hass.async_add_executor_job = _gated_executor
+    return hass
+
+
+def test_edit_child_concurrent_opposite_edits_return_own_values(
+    tmp_path,
+) -> None:
+    """Two racing edits cannot cross-contaminate each other's readback.
+
+    Deterministic gate: task A is paused at its UPDATE (it provably
+    holds the connection lock), task B is then created and must queue;
+    A's readback runs before B's edit, so A returns A's value and B
+    returns B's.  Without the lock, A's readback would see B's write.
+    """
+    async def _main():
+        armed = {"active": False, "gated": False}
+        gate_open = asyncio.Event()
+        a_started = asyncio.Event()
+        hass = _gated_hass(armed, gate_open, a_started)
+        database = NestQuestDatabase(hass)
+        await database.open(tmp_path / "edit-race.db")
+        try:
+            await apply_migrations(database)
+            child = await create_child(
+                database, "Ada", colour="#111111", sort_order=0
+            )
+
+            armed["active"] = True
+            task_a = asyncio.ensure_future(
+                edit_child(database, child.id, colour="#AAAAAA", sort_order=1)
+            )
+            await a_started.wait()
+            armed["active"] = False
+            task_b = asyncio.ensure_future(
+                edit_child(
+                    database, child.id, colour="#BBBBBB", sort_order=2
+                )
+            )
+            await asyncio.sleep(0)
+            gate_open.set()
+            record_a, record_b = await asyncio.gather(task_a, task_b)
+
+            # Each caller gets back exactly what it wrote.
+            assert record_a.colour == "#AAAAAA"
+            assert record_a.sort_order == 1
+            assert record_b.colour == "#BBBBBB"
+            assert record_b.sort_order == 2
+            # B landed last: the stored row is B's.
+            row = await database.fetch_one(
+                "SELECT colour, sort_order FROM children WHERE id = ?",
+                (child.id,),
+            )
+            assert row == ("#BBBBBB", 2)
+        finally:
+            await database.close()
+
+    _run(_main())
+
+
+def test_set_child_active_concurrent_opposite_transitions_return_own(
+    tmp_path,
+) -> None:
+    """Racing activate/deactivate calls each report their own request.
+
+    Same deterministic gate on task A's UPDATE; task B queues behind
+    the connection lock and lands the opposite transition after A.
+    """
+    async def _main():
+        armed = {"active": False, "gated": False}
+        gate_open = asyncio.Event()
+        a_started = asyncio.Event()
+        hass = _gated_hass(armed, gate_open, a_started)
+        database = NestQuestDatabase(hass)
+        await database.open(tmp_path / "active-race.db")
+        try:
+            await apply_migrations(database)
+            child = await create_child(database, "Ada")
+
+            armed["active"] = True
+            task_a = asyncio.ensure_future(
+                set_child_active(database, child.id, False)
+            )
+            await a_started.wait()
+            armed["active"] = False
+            task_b = asyncio.ensure_future(
+                set_child_active(database, child.id, True)
+            )
+            await asyncio.sleep(0)
+            gate_open.set()
+            record_a, record_b = await asyncio.gather(task_a, task_b)
+
+            assert record_a.is_active is False
+            assert record_b.is_active is True
+            row = await database.fetch_one(
+                "SELECT is_active FROM children WHERE id = ?", (child.id,)
+            )
+            assert row == (1,)
+        finally:
+            await database.close()
+
+    _run(_main())
+
+
 def test_list_children_orders_by_sort_order_then_id(tmp_path) -> None:
     async def _body(database):
         second = await create_child(database, "Bo", sort_order=1)
