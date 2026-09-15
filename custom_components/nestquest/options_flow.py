@@ -184,6 +184,11 @@ class NestQuestOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             # backs the raw-input path up so an unknown id can never
             # reach the allowlist.
             errors[CONF_ADMIN_USER_IDS] = "invalid_admin"
+        elif admin_ids_present and len(set(admin_ids)) != len(admin_ids):
+            # set_admin_ids refuses duplicates with ValueError; a flow
+            # submission must surface that as a field error instead of
+            # an unhandled crash.
+            errors[CONF_ADMIN_USER_IDS] = "invalid_admin"
         if errors:
             return self.async_show_form(
                 step_id="init",

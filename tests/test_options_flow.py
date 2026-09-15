@@ -576,3 +576,32 @@ def test_options_flow_submit_without_admin_key_keeps_allowlist(tmp_path) -> None
         assert await_gather(list_admin_ids(database)) == ["u1"]
     finally:
         _run(database.close())
+
+
+def test_options_flow_duplicate_selection_refused(tmp_path) -> None:
+    """Duplicate ids surface as a field error, not an unhandled
+    ValueError from the business layer."""
+    database = _open_allowlist_db(tmp_path, "picker-dupe.db")
+    try:
+        from custom_components.nestquest.admin_allowlist import (
+            list_admin_ids,
+            set_admin_ids,
+        )
+
+        _run(set_admin_ids(database, ["u1"]))
+        entry = _make_entry()
+        flow = _make_flow(
+            entry,
+            users=[_user("u1", "Joshua"), _user("u2", "Sam")],
+            database=database,
+        )
+        result = _run(
+            flow.async_step_init(
+                {**VALID_INPUT, CONF_ADMIN_USER_IDS: ["u2", "u2"]}
+            )
+        )
+        assert result["type"] == "form"
+        assert result["errors"] == {CONF_ADMIN_USER_IDS: "invalid_admin"}
+        assert await_gather(list_admin_ids(database)) == ["u1"]
+    finally:
+        _run(database.close())
