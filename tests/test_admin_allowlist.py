@@ -354,14 +354,9 @@ async def test_setup_owner_fallback_not_used_when_context_present(
 
 def test_seed_owner_ids_argument(tmp_path) -> None:
     async def _body(database):
-        seeded = await seed_setup_admin(
-            database,
-            stored_admin_ids=None,
-            context_user_id=None,
-            owner_ids=["owner-1"],
-        )
-        assert seeded == ["owner-1"]
-        # Malformed owner lists are rejected like any other candidate.
+        # Malformed owner lists are rejected like any other candidate —
+        # while the allowlist is still empty, so the seed proceeds far
+        # enough to validate.
         with pytest.raises(ValueError):
             await seed_setup_admin(
                 database,
@@ -369,6 +364,14 @@ def test_seed_owner_ids_argument(tmp_path) -> None:
                 context_user_id=None,
                 owner_ids=[7],
             )
+        assert await list_admin_ids(database) == []
+        seeded = await seed_setup_admin(
+            database,
+            stored_admin_ids=None,
+            context_user_id=None,
+            owner_ids=["owner-1"],
+        )
+        assert seeded == ["owner-1"]
         return seeded
 
     _with_db(tmp_path, "seed-owner-arg.db")(_body)
