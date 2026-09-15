@@ -586,7 +586,9 @@ def test_engine_override_lists_are_frozen() -> None:
     entries.append(PresenceOverride(1, "2026-01-07", "2026-01-07", False))
     # The late append must NOT change the engine's answers...
     assert engine.is_present(1, datetime.date(2026, 1, 7)) is True
-    with pytest.raises(TypeError):
+    # Tuples have no append at all (AttributeError), and the mapping
+    # itself refuses reassignment.
+    with pytest.raises(AttributeError):
         engine._overrides[1].append(entry)
     with pytest.raises(AttributeError, match="immutable snapshot"):
         engine._overrides = {}
