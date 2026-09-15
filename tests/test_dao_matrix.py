@@ -27,7 +27,7 @@ from custom_components.nestquest.dao_children import (
 )
 from custom_components.nestquest.dao_instances import (
     CompletionEventsDao,
-    TaskInstancesDao,
+    QuestInstancesDao,
 )
 from custom_components.nestquest.dao_presence import (
     PresenceOverridesDao,
@@ -35,7 +35,7 @@ from custom_components.nestquest.dao_presence import (
 )
 from custom_components.nestquest.dao_rules import (
     ScheduleRulesDao,
-    TaskDefinitionsDao,
+    QuestDefinitionsDao,
 )
 from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.migrations import apply_migrations
@@ -70,10 +70,11 @@ ALL_TABLES = (
     "children",
     "admin_users",
     "schedule_rules",
-    "task_definitions",
+    "quest_definitions",
+    "quest_definition_assignees",
     "presence_schedules",
     "presence_overrides",
-    "task_instances",
+    "quest_instances",
     "completion_events",
 )
 
@@ -86,10 +87,10 @@ class World:
         self.children = ChildrenDao(database)
         self.admins = AdminUsersDao(database)
         self.rules = ScheduleRulesDao(database)
-        self.definitions = TaskDefinitionsDao(database)
+        self.definitions = QuestDefinitionsDao(database)
         self.schedules = PresenceSchedulesDao(database)
         self.overrides = PresenceOverridesDao(database)
-        self.instances = TaskInstancesDao(database)
+        self.instances = QuestInstancesDao(database)
         self.events = CompletionEventsDao(database)
 
     async def seed(self) -> None:
@@ -99,7 +100,10 @@ class World:
         assert await self.admins.add("user-1", _stamp()) is True
         self.rule = await self.rules.create("daily", D1)
         self.definition = await self.definitions.create(
-            "Brush teeth", self.child.id, self.rule.id, _stamp()
+            "Brush teeth",
+            self.rule.id,
+            _stamp(),
+            assignee_child_ids=[self.child.id],
         )
         self.schedule = await self.schedules.upsert_by_child(
             self.child.id, 2, D1, "0,2,4|1,3"
@@ -108,7 +112,8 @@ class World:
             self.child.id, D1, D2, True, note="test"
         )
         self.instance = await self.instances.upsert(
-            self.definition.id, self.child.id, D1, _stamp()
+            self.definition.id, self.child.id, D1, _stamp(),
+            window="morning",
         )
 
 
@@ -201,11 +206,14 @@ def test_matrix_schedule_rules_crud_and_constraints(tmp_path) -> None:
     assert _with_world(tmp_path / "m-rules.db")(_body) is True
 
 
-def test_matrix_task_definitions_crud_and_constraints(tmp_path) -> None:
+def test_matrix_quest_definitions_crud_and_constraints(tmp_path) -> None:
     async def _body(w: World):
         # insert (seeded) + read
         fetched = await w.definitions.get(w.definition.id)
         assert fetched.title == "Brush teeth"
+        assert [c.id for c in await w.definitions.list_assignees(
+            w.definition.id
+        )] == [w.child.id]
         # update
         await w.definitions.update(w.definition.id, title="Brush TEETH")
         assert (await w.definitions.get(w.definition.id)).title == (
@@ -213,11 +221,21 @@ def test_matrix_task_definitions_crud_and_constraints(tmp_path) -> None:
         )
         # constraint: FK to a nonexistent child rejected with ValueError
         with pytest.raises(ValueError, match="does not exist"):
-            await w.definitions.create("X", 999, w.rule.id, _stamp())
-        # constraint: inactive child rejected
+            await w.definitions.create(
+                "X", w.rule.id, _stamp(), assignee_child_ids=[999]
+            )
+        # constraint: inactive child rejected on assignment
         await w.children.set_active(w.child2.id, False)
         with pytest.raises(ValueError, match="inactive"):
-            await w.definitions.set_assignee(w.definition.id, w.child2.id)
+            await w.definitions.add_assignee(w.definition.id, w.child2.id)
+        # assignee removal + re-adding the active child
+        assert await w.definitions.remove_assignee(
+            w.definition.id, w.child.id
+        ) is True
+        assert await w.definitions.remove_assignee(
+            w.definition.id, w.child.id
+        ) is False
+        await w.definitions.add_assignee(w.definition.id, w.child.id)
         # set_active: deactivate, never delete
         assert await w.definitions.set_active(w.definition.id, False) == 1
         assert (await w.definitions.get(w.definition.id)).is_active is False
@@ -271,15 +289,18 @@ def test_matrix_presence_overrides_crud_and_constraints(tmp_path) -> None:
     assert _with_world(tmp_path / "m-overrides.db")(_body) is True
 
 
-def test_matrix_task_instances_crud_and_constraints(tmp_path) -> None:
+def test_matrix_quest_instances_crud_and_constraints(tmp_path) -> None:
     async def _body(w: World):
         # insert (seeded) + read
-        fetched = await w.instances.get(w.definition.id, D1)
+        fetched = await w.instances.get(
+            w.definition.id, w.child.id, D1, "morning"
+        )
         assert fetched == w.instance
         # update path: conflict refresh on the OPEN instance — same row
         # id, snapshot columns (due_time) actually rewritten.
         refreshed = await w.instances.upsert(
-            w.definition.id, w.child.id, D1, _stamp(), due_time="17:00"
+            w.definition.id, w.child.id, D1, _stamp(),
+            window="morning", due_time="17:00",
         )
         assert refreshed.id == fetched.id, (
             "the conflict path must refresh the existing row in place"
@@ -292,22 +313,22 @@ def test_matrix_task_instances_crud_and_constraints(tmp_path) -> None:
     assert _with_world(tmp_path / "m-instances.db")(_body) is True
 
 
-def test_matrix_task_instances_constraints(tmp_path) -> None:
+def test_matrix_quest_instances_constraints(tmp_path) -> None:
     async def _body(w: World):
         # D20 has no instance yet: a raw insert succeeds, then an
         # identical second insert must fail on the UNIQUE constraint —
         # proving the schema backs the DAO's idempotency.
         await w.database.execute(
-            "INSERT INTO task_instances (definition_id, child_id, "
-            "due_date, due_time, generated_at) "
-            "VALUES (?, ?, ?, NULL, ?)",
+            "INSERT INTO quest_instances (definition_id, child_id, "
+            "window, due_date, due_time, generated_at) "
+            "VALUES (?, ?, 'morning', ?, NULL, ?)",
             (w.definition.id, w.child.id, D20, _stamp()),
         )
         with pytest.raises(sqlite3.IntegrityError):
             await w.database.execute(
-                "INSERT INTO task_instances (definition_id, child_id, "
-                "due_date, due_time, generated_at) "
-                "VALUES (?, ?, ?, NULL, ?)",
+                "INSERT INTO quest_instances (definition_id, child_id, "
+                "window, due_date, due_time, generated_at) "
+                "VALUES (?, ?, 'morning', ?, NULL, ?)",
                 (w.definition.id, w.child.id, D20, _stamp()),
             )
         # delete future uncompleted removes D20's open instance
@@ -320,17 +341,18 @@ def test_matrix_task_instances_constraints(tmp_path) -> None:
     assert _with_world(tmp_path / "m-instances-constraints.db")(_body) is True
 
 
-def test_matrix_task_instances_upsert_idempotency(tmp_path) -> None:
+def test_matrix_quest_instances_upsert_idempotency(tmp_path) -> None:
     async def _body(w: World):
         first = await w.instances.upsert(
-            w.definition.id, w.child.id, D2, _stamp()
+            w.definition.id, w.child.id, D2, _stamp(), window="morning"
         )
         second = await w.instances.upsert(
-            w.definition.id, w.child.id, D2, _stamp(), due_time="17:00"
+            w.definition.id, w.child.id, D2, _stamp(),
+            window="morning", due_time="17:00",
         )
         assert second.id == first.id
         count = await w.database.fetch_one(
-            "SELECT COUNT(*) FROM task_instances"
+            "SELECT COUNT(*) FROM quest_instances"
         )
         # Seed created one (D1) plus this one (D2) — no duplicate.
         assert count == (2,)
@@ -350,14 +372,16 @@ def test_matrix_completion_events_append_read_and_no_mutation(
     async def _body(w: World):
         # insert: append a completion then a reversal, then re-complete
         await w.events.append(
-            w.instance.id, w.child.id, "completed", "panel", _stamp(), True
+            w.instance.id, w.child.id, "completed", "panel", _stamp(), True,
+            actor_child_id=w.child.id,
         )
         await w.events.append(
             w.instance.id, w.child.id, "uncompleted", "user", _stamp(), None,
             actor_user_id="user-1",
         )
         await w.events.append(
-            w.instance.id, w.child.id, "completed", "panel", _stamp(), False
+            w.instance.id, w.child.id, "completed", "panel", _stamp(), False,
+            actor_child_id=w.child.id,
         )
         # read: full ordered history + latest
         history = await w.events.list_by_instance(w.instance.id)

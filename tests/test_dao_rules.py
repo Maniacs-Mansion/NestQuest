@@ -1,4 +1,4 @@
-"""Tests for dao_rules.py: typed DAO for schedule_rules and task_definitions."""
+"""Tests for dao_rules.py: typed DAO for schedule_rules and quest_definitions."""
 from __future__ import annotations
 
 import asyncio
@@ -10,8 +10,9 @@ from custom_components.nestquest.dao_children import ChildrenDao
 from custom_components.nestquest.dao_rules import (
     ScheduleRuleRecord,
     ScheduleRulesDao,
-    TaskDefinitionRecord,
-    TaskDefinitionsDao,
+    QuestDefinitionRecord,
+    QuestDefinitionWindowRecord,
+    QuestDefinitionsDao,
 )
 from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.migrations import apply_migrations
@@ -37,7 +38,7 @@ async def _prepare(path) -> tuple:
     await database.open(path)
     await apply_migrations(database)
     rules = ScheduleRulesDao(database)
-    definitions = TaskDefinitionsDao(database)
+    definitions = QuestDefinitionsDao(database)
     children = ChildrenDao(database)
     child = await children.create("Ada", NOW)
     return database, rules, definitions, children, child
@@ -266,7 +267,7 @@ def test_rule_delete_unreferenced_succeeds(tmp_path) -> None:
 def test_rule_delete_referenced_is_rejected(tmp_path) -> None:
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
-        await definitions.create("Brush teeth", child.id, rule.id, NOW)
+        await definitions.create("Brush teeth", rule.id, NOW)
         assert await rules.delete_if_unreferenced(rule.id) is False
         fetched = await rules.get(rule.id)
         assert fetched is not None, (
@@ -288,7 +289,7 @@ def test_rule_delete_after_last_reference_removed_succeeds(tmp_path) -> None:
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
         definition = await definitions.create(
-            "Brush teeth", child.id, rule.id, NOW
+            "Brush teeth", rule.id, NOW
         )
         assert await rules.delete_if_unreferenced(rule.id) is False
         await definitions.set_active(definition.id, False)
@@ -322,7 +323,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
             await apply_migrations(database)
             children = ChildrenDao(database)
             rules = ScheduleRulesDao(database)
-            definitions = TaskDefinitionsDao(database)
+            definitions = QuestDefinitionsDao(database)
             child = await children.create("Ada", NOW)
             rule_a = await rules.create("daily", "2026-09-14")
 
@@ -335,12 +336,12 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
                 import custom_components.nestquest.dao_rules as dao_rules
 
                 original_validate = (
-                    dao_rules.TaskDefinitionsDao._validate_assignable
+                    dao_rules.QuestDefinitionsDao._validate_rule_exists
                 )
                 release = asyncio.Event()
                 started = asyncio.Event()
 
-                async def _pausing_validate(self, child_id, rule_id):
+                async def _pausing_validate(self, rule_id):
                     # Run the real validation FIRST (this is the
                     # time-of-check), THEN pause: the delete task gets
                     # scheduled while the create sits between its
@@ -348,19 +349,17 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
                     # transaction must keep the delete queued until the
                     # insert commits, so the create must win the race
                     # and the delete must be rejected as referenced.
-                    await original_validate(self, child_id, rule_id)
+                    await original_validate(self, rule_id)
                     if rule_id == rule_a.id and not started.is_set():
                         started.set()
                         await release.wait()
 
-                dao_rules.TaskDefinitionsDao._validate_assignable = (
+                dao_rules.QuestDefinitionsDao._validate_rule_exists = (
                     _pausing_validate
                 )
                 try:
                     create_task = asyncio.ensure_future(
-                        definitions.create(
-                            "Brush teeth", child.id, rule_a.id, NOW
-                        )
+                        definitions.create("Brush teeth", rule_a.id, NOW)
                     )
                     await started.wait()
                     delete_task = asyncio.ensure_future(
@@ -373,7 +372,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
                         delete_task, create_task, return_exceptions=True
                     )
                 finally:
-                    dao_rules.TaskDefinitionsDao._validate_assignable = (
+                    dao_rules.QuestDefinitionsDao._validate_assignable = (
                         original_validate
                     )
             else:
@@ -382,7 +381,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
 
                 async def _create():
                     return await definitions.create(
-                        "Brush teeth", child.id, rule_a.id, NOW
+                        "Brush teeth", rule_a.id, NOW
                     )
 
                 delete_task = asyncio.ensure_future(_delete())
@@ -405,7 +404,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
                 assert rule_row is None
             else:
                 # Create won: the delete was rejected, both rows exist.
-                assert isinstance(creation, TaskDefinitionRecord), (
+                assert isinstance(creation, QuestDefinitionRecord), (
                     f"create must succeed, got {creation!r}"
                 )
                 assert rule_row is not None
@@ -425,7 +424,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
 
 
 # ---------------------------------------------------------------------------
-# task_definitions: create / get
+# quest_definitions: create / get
 # ---------------------------------------------------------------------------
 
 
@@ -434,20 +433,24 @@ def test_definition_create_returns_typed_record(tmp_path) -> None:
         rule = await rules.create("weekly", "2026-09-14", weekday_set="0,2")
         definition = await definitions.create(
             "Brush teeth",
-            child.id,
             rule.id,
             NOW,
             description="Morning and night",
             icon="mdi:tooth",
             due_time="08:00",
+            assignee_child_ids=[child.id],
         )
-        assert isinstance(definition, TaskDefinitionRecord)
+        assert isinstance(definition, QuestDefinitionRecord)
         assert definition.title == "Brush teeth"
-        assert definition.child_id == child.id
         assert definition.schedule_rule_id == rule.id
         assert definition.due_time == "08:00"
         assert definition.is_active is True
         assert definition.created_at == NOW
+        assert not hasattr(definition, "child_id"), (
+            "D-008: assignment lives in quest_definition_assignees"
+        )
+        assignees = await definitions.list_assignees(definition.id)
+        assert [c.id for c in assignees] == [child.id]
         return definition
 
     _with_db(tmp_path, "definition-create.db")(_body)
@@ -460,26 +463,30 @@ def test_definition_get_missing_returns_none(tmp_path) -> None:
     assert _with_db(tmp_path, "definition-get-missing.db")(_body) is None
 
 
-def test_definition_create_unknown_child_raises_value_error(
+def test_definition_create_unknown_assignee_raises_value_error(
     tmp_path,
 ) -> None:
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
         with pytest.raises(ValueError, match="does not exist"):
-            await definitions.create("X", 999, rule.id, NOW)
+            await definitions.create(
+                "X", rule.id, NOW, assignee_child_ids=[999]
+            )
         return None
 
     _with_db(tmp_path, "definition-bad-child.db")(_body)
 
 
-def test_definition_create_inactive_child_raises_value_error(
+def test_definition_create_inactive_assignee_raises_value_error(
     tmp_path,
 ) -> None:
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
         await children.set_active(child.id, False)
         with pytest.raises(ValueError, match="inactive"):
-            await definitions.create("X", child.id, rule.id, NOW)
+            await definitions.create(
+                "X", rule.id, NOW, assignee_child_ids=[child.id]
+            )
         return None
 
     _with_db(tmp_path, "definition-inactive-child.db")(_body)
@@ -490,14 +497,14 @@ def test_definition_create_unknown_rule_raises_value_error(
 ) -> None:
     async def _body(database, rules, definitions, children, child):
         with pytest.raises(ValueError, match="does not exist"):
-            await definitions.create("X", child.id, 999, NOW)
+            await definitions.create("X", 999, NOW)
         return None
 
     _with_db(tmp_path, "definition-bad-rule.db")(_body)
 
 
 # ---------------------------------------------------------------------------
-# task_definitions: list by child / list active
+# quest_definitions: list by child / list active
 # ---------------------------------------------------------------------------
 
 
@@ -505,9 +512,11 @@ def test_definition_list_by_child_filters_and_orders(tmp_path) -> None:
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
         other_child = await children.create("Bo", NOW)
-        await definitions.create("A", child.id, rule.id, NOW)
-        await definitions.create("B", child.id, rule.id, NOW)
-        await definitions.create("C", other_child.id, rule.id, NOW)
+        await definitions.create("A", rule.id, NOW, assignee_child_ids=[child.id])
+        await definitions.create("B", rule.id, NOW, assignee_child_ids=[child.id])
+        await definitions.create(
+            "C", rule.id, NOW, assignee_child_ids=[other_child.id]
+        )
         mine = await definitions.list_by_child(child.id)
         assert [d.title for d in mine] == ["B", "A"]
         return mine
@@ -527,8 +536,8 @@ def test_definition_list_by_child_missing_child_returns_empty(
 def test_definition_list_active_excludes_inactive(tmp_path) -> None:
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
-        first = await definitions.create("A", child.id, rule.id, NOW)
-        await definitions.create("B", child.id, rule.id, NOW)
+        first = await definitions.create("A", rule.id, NOW)
+        await definitions.create("B", rule.id, NOW)
         await definitions.set_active(first.id, False)
         active = await definitions.list_active()
         assert [d.title for d in active] == ["B"]
@@ -539,7 +548,7 @@ def test_definition_list_active_excludes_inactive(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# task_definitions: update / set_active / set_assignee
+# quest_definitions: update / set_active / set_assignee
 # ---------------------------------------------------------------------------
 
 
@@ -547,7 +556,7 @@ def test_definition_update_fields_round_trip(tmp_path) -> None:
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
         definition = await definitions.create(
-            "A", child.id, rule.id, NOW, due_time="08:00"
+            "A", rule.id, NOW, due_time="08:00"
         )
         assert await definitions.update(
             definition.id,
@@ -572,9 +581,11 @@ def test_definition_update_cannot_change_assignee_or_active(
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
         other = await children.create("Bo", NOW)
-        definition = await definitions.create("A", child.id, rule.id, NOW)
+        definition = await definitions.create(
+            "A", rule.id, NOW, assignee_child_ids=[child.id]
+        )
         # title= / child_id= / is_active= are NOT update() parameters;
-        # this asserts the API shape: reassignment and activation have
+        # this asserts the API shape: assignment and activation have
         # their own explicit methods.
         import inspect
 
@@ -590,7 +601,10 @@ def test_definition_update_cannot_change_assignee_or_active(
             definition.id, title="A2"
         ) == 1
         fetched = await definitions.get(definition.id)
-        assert fetched.child_id == child.id
+        assert [c.id for c in await definitions.list_assignees(definition.id)] == [
+            child.id
+        ]
+        assert other.id not in [c.id for c in await definitions.list_assignees(definition.id)]
         assert fetched.is_active is True
         return fetched
 
@@ -600,7 +614,7 @@ def test_definition_update_cannot_change_assignee_or_active(
 def test_definition_update_no_fields_returns_zero(tmp_path) -> None:
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
-        definition = await definitions.create("A", child.id, rule.id, NOW)
+        definition = await definitions.create("A", rule.id, NOW)
         return await definitions.update(definition.id)
 
     assert _with_db(tmp_path, "definition-update-empty.db")(_body) == 0
@@ -612,7 +626,6 @@ def test_definition_update_can_clear_optional_fields(tmp_path) -> None:
         rule = await rules.create("daily", "2026-09-14")
         definition = await definitions.create(
             "A",
-            child.id,
             rule.id,
             NOW,
             description="d",
@@ -646,7 +659,7 @@ def test_definition_update_missing_returns_zero(tmp_path) -> None:
 def test_definition_set_active_round_trip(tmp_path) -> None:
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
-        definition = await definitions.create("A", child.id, rule.id, NOW)
+        definition = await definitions.create("A", rule.id, NOW)
         assert await definitions.set_active(definition.id, False) == 1
         fetched = await definitions.get(definition.id)
         assert fetched.is_active is False
@@ -673,7 +686,7 @@ def test_definition_no_delete_method_exists(tmp_path) -> None:
         methods = {
             name
             for name, _ in inspect.getmembers(
-                TaskDefinitionsDao, inspect.isfunction
+                QuestDefinitionsDao, inspect.isfunction
             )
         }
         assert "delete" not in methods
@@ -683,78 +696,244 @@ def test_definition_no_delete_method_exists(tmp_path) -> None:
     _with_db(tmp_path, "definition-no-delete.db")(_body)
 
 
-def test_definition_set_assignee_round_trip(tmp_path) -> None:
+def test_definition_add_assignee_round_trip(tmp_path) -> None:
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
         other = await children.create("Bo", NOW)
-        definition = await definitions.create("A", child.id, rule.id, NOW)
-        assert await definitions.set_assignee(definition.id, other.id) == 1
-        fetched = await definitions.get(definition.id)
-        assert fetched.child_id == other.id
-        return fetched
+        definition = await definitions.create(
+            "A", rule.id, NOW, assignee_child_ids=[child.id]
+        )
+        await definitions.add_assignee(definition.id, other.id)
+        assignees = await definitions.list_assignees(definition.id)
+        assert sorted(c.id for c in assignees) == sorted([child.id, other.id])
+        # Idempotent: re-adding an existing assignee stays a no-op.
+        await definitions.add_assignee(definition.id, other.id)
+        assignees = await definitions.list_assignees(definition.id)
+        assert sorted(c.id for c in assignees) == sorted([child.id, other.id])
+        return assignees
 
-    _with_db(tmp_path, "definition-set-assignee.db")(_body)
+    _with_db(tmp_path, "definition-add-assignee.db")(_body)
 
 
-def test_definition_set_assignee_inactive_child_raises(tmp_path) -> None:
+def test_definition_add_assignee_inactive_child_raises(tmp_path) -> None:
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
         other = await children.create("Bo", NOW)
-        definition = await definitions.create("A", child.id, rule.id, NOW)
+        definition = await definitions.create(
+            "A", rule.id, NOW, assignee_child_ids=[child.id]
+        )
         await children.set_active(other.id, False)
         with pytest.raises(ValueError, match="inactive"):
-            await definitions.set_assignee(definition.id, other.id)
-        fetched = await definitions.get(definition.id)
-        assert fetched.child_id == child.id, (
-            "failed reassignment must leave the current assignee intact"
+            await definitions.add_assignee(definition.id, other.id)
+        assignees = await definitions.list_assignees(definition.id)
+        assert [c.id for c in assignees] == [child.id], (
+            "failed assignment must leave the current assignees intact"
         )
-        return fetched
+        return assignees
 
     _with_db(tmp_path, "definition-assignee-inactive.db")(_body)
 
 
-def test_definition_set_assignee_unknown_child_raises(tmp_path) -> None:
+def test_definition_add_assignee_unknown_child_raises(tmp_path) -> None:
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
-        definition = await definitions.create("A", child.id, rule.id, NOW)
+        definition = await definitions.create(
+            "A", rule.id, NOW, assignee_child_ids=[child.id]
+        )
         with pytest.raises(ValueError, match="does not exist"):
-            await definitions.set_assignee(definition.id, 999)
+            await definitions.add_assignee(definition.id, 999)
         return None
 
     _with_db(tmp_path, "definition-assignee-unknown.db")(_body)
 
 
-def test_definition_set_assignee_missing_definition_returns_zero(
+def test_definition_add_assignee_missing_definition_raises(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        with pytest.raises(ValueError, match="does not exist"):
+            await definitions.add_assignee(999, child.id)
+        return None
+
+    _with_db(tmp_path, "definition-assignee-missing.db")(_body)
+
+
+def test_definition_remove_assignee_round_trip(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        other = await children.create("Bo", NOW)
+        definition = await definitions.create(
+            "A", rule.id, NOW, assignee_child_ids=[child.id, other.id]
+        )
+        assert await definitions.remove_assignee(definition.id, other.id) is True
+        assignees = await definitions.list_assignees(definition.id)
+        assert [c.id for c in assignees] == [child.id]
+        # Removing a non-assignee reports False.
+        assert await definitions.remove_assignee(definition.id, other.id) is False
+        return assignees
+
+    _with_db(tmp_path, "definition-remove-assignee.db")(_body)
+
+
+def test_definition_list_assignees_orders_by_child_sort_order(
     tmp_path,
 ) -> None:
     async def _body(database, rules, definitions, children, child):
-        other = await children.create("Bo", NOW)
-        return await definitions.set_assignee(999, other.id)
+        rule = await rules.create("daily", "2026-09-14")
+        second = await children.create("Bo", NOW)
+        third = await children.create("Cleo", NOW)
+        await children.reorder([third.id, child.id, second.id])
+        definition = await definitions.create(
+            "A", rule.id, NOW, assignee_child_ids=[second.id, child.id, third.id]
+        )
+        assignees = await definitions.list_assignees(definition.id)
+        assert [c.id for c in assignees] == [third.id, child.id, second.id]
+        return assignees
 
-    assert _with_db(tmp_path, "definition-assignee-missing.db")(_body) == 0
+    _with_db(tmp_path, "definition-assignees-order.db")(_body)
 
 
-def test_definition_set_assignee_leaves_history_rows_alone(
+def test_definition_upsert_window_round_trip(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        definition = await definitions.create("A", rule.id, NOW)
+        window = await definitions.upsert_window(
+            definition.id, "morning", due_time="09:00"
+        )
+        assert window == QuestDefinitionWindowRecord(
+            definition.id, "morning", "09:00"
+        )
+        # Upsert: re-declaring the same window updates in place, never
+        # duplicates (one row per definition+window).
+        updated = await definitions.upsert_window(
+            definition.id, "morning", due_time="09:30"
+        )
+        assert updated.due_time == "09:30"
+        rows = await definitions.list_windows(definition.id)
+        assert [w.window for w in rows] == ["morning"]
+        # All three windows list in const order regardless of insertion.
+        await definitions.upsert_window(definition.id, "evening")
+        await definitions.upsert_window(definition.id, "afternoon")
+        rows = await definitions.list_windows(definition.id)
+        assert [w.window for w in rows] == [
+            "morning",
+            "afternoon",
+            "evening",
+        ]
+        assert rows[1].due_time is None
+        return rows
+
+    _with_db(tmp_path, "definition-window-roundtrip.db")(_body)
+
+
+def test_definition_window_unknown_name_raises(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        definition = await definitions.create("A", rule.id, NOW)
+        with pytest.raises(ValueError, match="window must be one of"):
+            await definitions.upsert_window(definition.id, "noon")
+        with pytest.raises(ValueError, match="window must be one of"):
+            await definitions.remove_window(definition.id, "MORNING")
+        return None
+
+    _with_db(tmp_path, "definition-window-bad-name.db")(_body)
+
+
+def test_definition_window_bad_due_time_raises(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        definition = await definitions.create("A", rule.id, NOW)
+        with pytest.raises(ValueError, match="HH:MM"):
+            await definitions.upsert_window(
+                definition.id, "morning", due_time="9:30"
+            )
+        with pytest.raises(ValueError, match="HH:MM"):
+            await definitions.upsert_window(
+                definition.id, "morning", due_time="25:00"
+            )
+        return None
+
+    _with_db(tmp_path, "definition-window-bad-time.db")(_body)
+
+
+def test_definition_window_missing_definition_raises(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        with pytest.raises(ValueError, match="does not exist"):
+            await definitions.upsert_window(999, "morning")
+        return None
+
+    _with_db(tmp_path, "definition-window-missing.db")(_body)
+
+
+def test_definition_remove_window_round_trip(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        definition = await definitions.create("A", rule.id, NOW)
+        await definitions.upsert_window(definition.id, "morning")
+        assert await definitions.remove_window(
+            definition.id, "morning"
+        ) is True
+        assert await definitions.list_windows(definition.id) == []
+        # Removing an absent window reports False.
+        assert await definitions.remove_window(
+            definition.id, "morning"
+        ) is False
+        return None
+
+    _with_db(tmp_path, "definition-window-remove.db")(_body)
+
+
+def test_definition_unassigned_has_no_assignees(tmp_path) -> None:
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        definition = await definitions.create("A", rule.id, NOW)
+        assert await definitions.list_assignees(definition.id) == []
+        return None
+
+    _with_db(tmp_path, "definition-no-assignees.db")(_body)
+
+
+def test_definition_shared_by_multiple_children_via_list_by_child(
     tmp_path,
 ) -> None:
-    """Reassignment writes the definition row only: any instances that
-    already exist keep their generation-time child_id (Feature 06
+    """D-008: one definition covering several children appears for
+    every assignee through list_by_child, once each."""
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        second = await children.create("Bo", NOW)
+        definition = await definitions.create(
+            "A", rule.id, NOW, assignee_child_ids=[child.id, second.id]
+        )
+        for assignee in (child, second):
+            mine = await definitions.list_by_child(assignee.id)
+            assert [d.id for d in mine] == [definition.id]
+        return definition
+
+    _with_db(tmp_path, "definition-shared.db")(_body)
+
+
+def test_definition_assignment_leaves_history_rows_alone(
+    tmp_path,
+) -> None:
+    """Assignment edits write the assignees table only: any instances
+    that already exist keep their generation-time child_id (Feature 06
     guardrail 'changes future instances only').
     """
     async def _body(database, rules, definitions, children, child):
         rule = await rules.create("daily", "2026-09-14")
         other = await children.create("Bo", NOW)
-        definition = await definitions.create("A", child.id, rule.id, NOW)
+        definition = await definitions.create(
+            "A", rule.id, NOW, assignee_child_ids=[child.id]
+        )
         # Simulate an already-generated instance (materialization owns
-        # this table, but its row shape proves reassignment isolation).
+        # this table, but its row shape proves assignment isolation).
         await database.execute(
-            "INSERT INTO task_instances (definition_id, child_id, "
-            "due_date, generated_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO quest_instances (definition_id, child_id, "
+            "window, due_date, generated_at) VALUES (?, ?, 'morning', ?, ?)",
             (definition.id, child.id, "2026-09-15", NOW),
         )
-        await definitions.set_assignee(definition.id, other.id)
+        await definitions.add_assignee(definition.id, other.id)
+        await definitions.remove_assignee(definition.id, child.id)
         row = await database.fetch_one(
-            "SELECT child_id FROM task_instances WHERE definition_id = ?",
+            "SELECT child_id FROM quest_instances WHERE definition_id = ?",
             (definition.id,),
         )
         assert row == (child.id,)
@@ -769,7 +948,7 @@ def test_definition_set_assignee_leaves_history_rows_alone(
 
 
 def test_rules_and_definitions_sql_lives_only_in_dao_module() -> None:
-    """Guardrail: schedule_rules/task_definitions SQL may appear only
+    """Guardrail: schedule_rules/quest_definitions SQL may appear only
     in the DAO modules (and the schema DDL declarations).  RECURSIVE
     scan of package and tests, FROM/INTO/UPDATE/DELETE FROM/JOIN
     pattern, with exact repo-relative exclusions justified by role:
@@ -801,7 +980,7 @@ def test_rules_and_definitions_sql_lives_only_in_dao_module() -> None:
     }
     sql_pattern = re.compile(
         r"(FROM|INTO|UPDATE|DELETE\s+FROM|JOIN)\s+[`'\"]*(\[)?"
-        r"(schedule_rules|task_definitions)\b",
+        r"(schedule_rules|quest_definitions|quest_definition_assignees|quest_definition_windows)\b",
         re.IGNORECASE,
     )
     offenders: list[str] = []
@@ -813,16 +992,16 @@ def test_rules_and_definitions_sql_lives_only_in_dao_module() -> None:
             if sql_pattern.search(py.read_text()):
                 offenders.append(relative)
     assert offenders == [], (
-        f"SQL touching schedule_rules/task_definitions leaked into: "
+        f"SQL touching schedule_rules/quest_definitions/assignees leaked: "
         f"{offenders}"
     )
 
 
 def test_dao_instances_test_file_uses_dao_not_raw_rules_sql() -> None:
     """Compensating self-scan for the test_dao_instances.py exemption:
-    that file may query task_instances/completion_events raw (its own
+    that file may query quest_instances/completion_events raw (its own
     guard's scope) but must go through the DAO for schedule_rules and
-    task_definitions, except its single sanctioned definition-create
+    quest_definitions, except its single sanctioned definition-create
     helper usage and guard spans.
     """
     import ast
@@ -853,12 +1032,12 @@ def test_dao_instances_test_file_uses_dao_not_raw_rules_sql() -> None:
     )
     sql_pattern = re.compile(
         r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM|"
-        r"FROM|JOIN)\s+[`'\"]*(\[)?(schedule_rules|task_definitions)\b",
+        r"FROM|JOIN)\s+[`'\"]*(\[)?(schedule_rules|quest_definitions|quest_definition_assignees|quest_definition_windows)\b",
         re.IGNORECASE,
     )
     assert sql_pattern.search(remaining) is None, (
         "test_dao_instances.py must go through the DAO, not raw SQL, "
-        "for schedule_rules/task_definitions"
+        "for schedule_rules/quest_definitions"
     )
 
 
@@ -866,7 +1045,7 @@ def test_dao_rules_test_file_uses_dao_not_raw_table_sql() -> None:
     """This test module must exercise the DAO, not raw SQL, for these
     tables.  Exceptions: the guard functions' own spans (their regexes
     mention the names), and the reassignment-isolation test, which
-    legitimately touches task_instances — a table this DAO does not
+    legitimately touches quest_instances — a table this DAO does not
     own — to prove the guardrail that reassignment leaves it alone.
     """
     import ast
@@ -898,7 +1077,7 @@ def test_dao_rules_test_file_uses_dao_not_raw_table_sql() -> None:
     )
     sql_pattern = re.compile(
         r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM|"
-        r"FROM|JOIN)\s+[`'\"]*(\[)?(schedule_rules|task_definitions)\b",
+        r"FROM|JOIN)\s+[`'\"]*(\[)?(schedule_rules|quest_definitions|quest_definition_assignees|quest_definition_windows)\b",
         re.IGNORECASE,
     )
     assert sql_pattern.search(remaining) is None, (

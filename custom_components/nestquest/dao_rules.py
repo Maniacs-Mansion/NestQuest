@@ -1,37 +1,44 @@
-"""Typed DAO layer for the schedule_rules and task_definitions tables.
+"""Typed DAO layer for the schedule_rules, quest_definitions and
+quest_definition_assignees tables.
 
-All SQL for ``schedule_rules`` and ``task_definitions`` lives in this
-module per the feature guardrails: callers get typed dataclasses back
-and never see raw rows or SQL.  Every method is async and runs through
+All SQL for ``schedule_rules``, ``quest_definitions`` and
+``quest_definition_assignees`` lives in this module per the feature
+guardrails: callers get typed dataclasses back and never see raw rows
+or SQL.  Every method is async and runs through
 :class:`~.db.NestQuestDatabase`, so each statement executes on the HA
 executor and the event loop never blocks.
 
 Guardrail mapping:
 
 - ``schedule_rules`` deletion is delete-if-unreferenced: a rule still
-  referenced by any task definition is rejected (the done-condition),
+  referenced by any quest definition is rejected (the done-condition),
   not cascaded.
-- ``task_definitions`` has no delete path at all: definitions are
+- ``quest_definitions`` has no delete path at all: definitions are
   deactivated, never hard-deleted, and history must survive.
-- ``set_assignee`` changes future instances only — the DAO writes the
-  definition row and nothing else; reassignment never rewrites
+- Assignment is multi-assignee (D-008): :meth:`add_assignee` and
+  :meth:`remove_assignee` change future instances only — the DAO writes
+  the assignee table and nothing else; assignment edits never rewrite
   existing instances or completion history (Feature 06 guardrail).
 - Validation of rule well-formedness and child activeness lives partly
   in the schema CHECKs (rule-type coherence) and partly in
-  :meth:`TaskDefinitionsDao.create` (active child, rule existence);
-  no permission checks here, that is the Feature 09 gate's job.
+  :meth:`QuestDefinitionsDao.create` (rule existence) and
+  :meth:`QuestDefinitionsDao.add_assignee` (active child); no
+  permission checks here, that is the Feature 09 gate's job.
 
-Concurrency: ``delete_rule_if_unreferenced`` performs its reference
-check and DELETE inside one transaction under the connection-scoped
-lock shared with :mod:`.dao_children`, so a definition referencing the
-rule cannot appear between check and delete on this connection.
+Concurrency: ``delete_rule_if_unreferenced`` and the assignee
+mutations perform their checks and writes inside one transaction under
+the connection-scoped lock shared with :mod:`.dao_children`, so a
+definition referencing the rule (or an assignee appearing) cannot slip
+in between check and write on this connection.
 """
 from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
 
-from .dao_children import _connection_lock
+from .const import QUEST_WINDOWS
+from .dao_children import ChildRecord, _child_from_row, _connection_lock
+from .dao_children import _CHILD_COLUMNS
 from .db import NestQuestDatabase
 
 #: Sentinel distinguishing "argument omitted" from "explicit SQL NULL"
@@ -65,6 +72,38 @@ def _validate_date(value: str, field: str) -> None:
         )
 
 
+_TIME_FORMAT = "%H:%M"
+
+
+def _validate_time(value: str, field: str) -> None:
+    """Raise ValueError unless ``value`` is a strict 24-hour HH:MM.
+
+    Same strictness policy as _validate_date: parse with the exact
+    format, then round-trip so '9:30' (non-padded) is rejected.  Time
+    shapes are caller-side policy (the schema stores TEXT): windows'
+    optional ``due_time`` and definition ``due_time`` both use this.
+    """
+    try:
+        parsed = datetime.datetime.strptime(value, _TIME_FORMAT).time()
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{field} must be a 24-hour HH:MM time, got {value!r}"
+        ) from None
+    if parsed.strftime(_TIME_FORMAT) != value:
+        raise ValueError(
+            f"{field} must be a strict HH:MM time, got {value!r}"
+        )
+
+
+def _validate_window(window: str) -> None:
+    """Raise ValueError unless ``window`` is a ``const`` window name."""
+    if window not in QUEST_WINDOWS:
+        raise ValueError(
+            f"window must be one of {', '.join(QUEST_WINDOWS)}, "
+            f"got {window!r}"
+        )
+
+
 @dataclass(frozen=True)
 class ScheduleRuleRecord:
     """One row of ``schedule_rules``."""
@@ -81,18 +120,26 @@ class ScheduleRuleRecord:
 
 
 @dataclass(frozen=True)
-class TaskDefinitionRecord:
-    """One row of ``task_definitions``."""
+class QuestDefinitionRecord:
+    """One row of ``quest_definitions`` (without its assignees)."""
 
     id: int
     title: str
     description: str | None
     icon: str | None
-    child_id: int
     schedule_rule_id: int
     due_time: str | None
     is_active: bool
     created_at: str
+
+
+@dataclass(frozen=True)
+class QuestDefinitionWindowRecord:
+    """One row of ``quest_definition_windows``."""
+
+    definition_id: int
+    window: str
+    due_time: str | None
 
 
 _RULE_COLUMNS = (
@@ -100,9 +147,10 @@ _RULE_COLUMNS = (
     "month, start_date, end_date"
 )
 _DEFINITION_COLUMNS = (
-    "id, title, description, icon, child_id, schedule_rule_id, due_time, "
+    "id, title, description, icon, schedule_rule_id, due_time, "
     "is_active, created_at"
 )
+_WINDOW_COLUMNS = "definition_id, window, due_time"
 
 
 def _rule_from_row(row: tuple) -> ScheduleRuleRecord:
@@ -119,17 +167,24 @@ def _rule_from_row(row: tuple) -> ScheduleRuleRecord:
     )
 
 
-def _definition_from_row(row: tuple) -> TaskDefinitionRecord:
-    return TaskDefinitionRecord(
+def _definition_from_row(row: tuple) -> QuestDefinitionRecord:
+    return QuestDefinitionRecord(
         id=row[0],
         title=row[1],
         description=row[2],
         icon=row[3],
-        child_id=row[4],
-        schedule_rule_id=row[5],
-        due_time=row[6],
-        is_active=bool(row[7]),
-        created_at=row[8],
+        schedule_rule_id=row[4],
+        due_time=row[5],
+        is_active=bool(row[6]),
+        created_at=row[7],
+    )
+
+
+def _window_from_row(row: tuple) -> QuestDefinitionWindowRecord:
+    return QuestDefinitionWindowRecord(
+        definition_id=row[0],
+        window=row[1],
+        due_time=row[2],
     )
 
 
@@ -258,7 +313,7 @@ class ScheduleRulesDao:
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 row = await self._database.fetch_one(
-                    "SELECT 1 FROM task_definitions "
+                    "SELECT 1 FROM quest_definitions "
                     "WHERE schedule_rule_id = ? LIMIT 1",
                     (rule_id,),
                 )
@@ -271,12 +326,15 @@ class ScheduleRulesDao:
                 return result.rowcount > 0
 
 
-class TaskDefinitionsDao:
-    """Typed async access to the ``task_definitions`` table.
+class QuestDefinitionsDao:
+    """Typed async access to ``quest_definitions`` and its assignees.
 
     No delete method exists: definitions are deactivated via
     :meth:`set_active`, never hard-deleted, so completion history keeps
-    its references (feature guardrail).
+    its references (feature guardrail).  Assignment is multi-assignee
+    (D-008): the definition row carries no child; assignees live in
+    ``quest_definition_assignees`` and are managed explicitly so the
+    operations stay separately loggable and permission-gateable.
     """
 
     def __init__(self, database: NestQuestDatabase) -> None:
@@ -285,7 +343,6 @@ class TaskDefinitionsDao:
     async def create(
         self,
         title: str,
-        child_id: int,
         schedule_rule_id: int,
         created_at: str,
         *,
@@ -293,53 +350,55 @@ class TaskDefinitionsDao:
         icon: str | None = None,
         due_time: str | None = None,
         is_active: bool = True,
-    ) -> TaskDefinitionRecord:
+        assignee_child_ids: list[int] | None = None,
+    ) -> QuestDefinitionRecord:
         """Insert one definition and return the record as stored.
 
-        Validates the assignment target as part of the same serialized
-        transaction as the insert: the child must exist and be active,
-        and the rule must exist, AT INSERT TIME — a child deactivated
-        or a rule deleted concurrently cannot slip between the checks
-        and the INSERT, which would otherwise create an invalid
-        assignment or surface as a raw FK IntegrityError instead of
-        the documented ValueError.  An INACTIVE child would pass the
-        schema foreign keys, which is why the activeness check lives
-        here.
+        Validates the schedule rule as part of the same serialized
+        transaction as the insert: the rule must exist AT INSERT TIME —
+        a rule deleted concurrently cannot slip between the check and
+        the INSERT.  ``assignee_child_ids`` (each child must exist and
+        be active) is applied in the same transaction, so a definition
+        can never be observed with a stale or missing assignee set; an
+        empty list or None creates an unassigned definition, which
+        callers may fill via :meth:`add_assignee`.
         """
         async with _connection_lock(self._database):
             async with self._database.transaction():
-                await self._validate_assignable(
-                    child_id, schedule_rule_id
-                )
+                await self._validate_rule_exists(schedule_rule_id)
+                for child_id in assignee_child_ids or []:
+                    await self._validate_assignable_child(child_id)
                 result = await self._database.execute(
-                    "INSERT INTO task_definitions (title, description, "
-                    "icon, child_id, schedule_rule_id, due_time, "
-                    "is_active, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO quest_definitions (title, description, "
+                    "icon, schedule_rule_id, due_time, is_active, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         title,
                         description,
                         icon,
-                        child_id,
                         schedule_rule_id,
                         due_time,
                         int(is_active),
                         created_at,
                     ),
                 )
-                definition = await self.get(result.lastrowid)
+                definition_id = result.lastrowid
+                for child_id in assignee_child_ids or []:
+                    await self._database.execute(
+                        "INSERT INTO quest_definition_assignees "
+                        "(definition_id, child_id) VALUES (?, ?)",
+                        (definition_id, child_id),
+                    )
+                definition = await self.get(definition_id)
         assert definition is not None
         return definition
 
-    async def _validate_assignable(
-        self, child_id: int, schedule_rule_id: int
-    ) -> None:
-        """Raise ValueError unless child (active) and rule both exist.
+    async def _validate_rule_exists(self, schedule_rule_id: int) -> None:
+        """Raise ValueError unless the rule exists.
 
         MUST be called inside the connection lock so the verdict cannot
         go stale before the caller's INSERT commits.
         """
-        await self._validate_assignable_child(child_id)
         rule = await self._database.fetch_one(
             "SELECT 1 FROM schedule_rules WHERE id = ?",
             (schedule_rule_id,),
@@ -349,28 +408,35 @@ class TaskDefinitionsDao:
                 f"schedule rule {schedule_rule_id} does not exist"
             )
 
-    async def get(self, definition_id: int) -> TaskDefinitionRecord | None:
+    async def get(self, definition_id: int) -> QuestDefinitionRecord | None:
         """Return the definition with ``definition_id``, or None."""
         row = await self._database.fetch_one(
-            f"SELECT {_DEFINITION_COLUMNS} FROM task_definitions "
+            f"SELECT {_DEFINITION_COLUMNS} FROM quest_definitions "
             "WHERE id = ?",
             (definition_id,),
         )
         return _definition_from_row(row) if row is not None else None
 
-    async def list_by_child(self, child_id: int) -> list[TaskDefinitionRecord]:
-        """Return all definitions assigned to ``child_id``, newest first."""
+    async def list_by_child(self, child_id: int) -> list[QuestDefinitionRecord]:
+        """Return all definitions assigned to ``child_id``, newest first.
+
+        Assignment is read through ``quest_definition_assignees``
+        (D-008): a definition appears once per child regardless of how
+        many assignees share it.
+        """
         rows = await self._database.fetch_all(
-            f"SELECT {_DEFINITION_COLUMNS} FROM task_definitions "
-            "WHERE child_id = ? ORDER BY id DESC",
+            f"SELECT {_DEFINITION_COLUMNS} FROM quest_definitions "
+            "WHERE id IN (SELECT definition_id "
+            "FROM quest_definition_assignees WHERE child_id = ?) "
+            "ORDER BY id DESC",
             (child_id,),
         )
         return [_definition_from_row(row) for row in rows]
 
-    async def list_active(self) -> list[TaskDefinitionRecord]:
+    async def list_active(self) -> list[QuestDefinitionRecord]:
         """Return all active definitions, oldest first (stable order)."""
         rows = await self._database.fetch_all(
-            f"SELECT {_DEFINITION_COLUMNS} FROM task_definitions "
+            f"SELECT {_DEFINITION_COLUMNS} FROM quest_definitions "
             "WHERE is_active = 1 ORDER BY id"
         )
         return [_definition_from_row(row) for row in rows]
@@ -391,8 +457,9 @@ class TaskDefinitionsDao:
         SQL NULL, so callers can remove optional metadata
         (description, icon, due_time).  Assignment and activation are
         deliberately NOT settable here: they have their own explicit
-        operations (:meth:`set_assignee`, :meth:`set_active`) so they
-        stay separately loggable and permission-gateable.
+        operations (:meth:`add_assignee`, :meth:`remove_assignee`,
+        :meth:`set_active`) so they stay separately loggable and
+        permission-gateable.
         """
         assignments: list[str] = []
         parameters: list[object] = []
@@ -409,7 +476,7 @@ class TaskDefinitionsDao:
             return 0
         parameters.append(definition_id)
         result = await self._database.execute(
-            f"UPDATE task_definitions SET {', '.join(assignments)} "
+            f"UPDATE quest_definitions SET {', '.join(assignments)} "
             "WHERE id = ?",
             tuple(parameters),
         )
@@ -422,37 +489,166 @@ class TaskDefinitionsDao:
         existing instances and completion history untouched.
         """
         result = await self._database.execute(
-            "UPDATE task_definitions SET is_active = ? WHERE id = ?",
+            "UPDATE quest_definitions SET is_active = ? WHERE id = ?",
             (int(is_active), definition_id),
         )
         return result.rowcount
 
-    async def set_assignee(
+    async def add_assignee(
         self, definition_id: int, child_id: int
-    ) -> int:
-        """Reassign the definition to ``child_id``; rows updated (0 if absent).
+    ) -> None:
+        """Assign ``child_id`` to the definition (idempotent).
 
-        Validates the new assignee inside the same serialized
-        transaction as the UPDATE (existing and active AT ASSIGNMENT
-        TIME), so a child deactivated concurrently cannot become the
-        assignee.  Changes future instances only: already-generated
-        instances and completion history are never rewritten here.
+        Validates the assignee inside the same serialized transaction
+        as the INSERT (existing and active AT ASSIGNMENT TIME), so a
+        child deactivated concurrently cannot become an assignee.
+        Assigning an already-assigned child is a no-op, mirroring the
+        composite primary key's storage-level guarantee.  Changes
+        future instances only: already-generated instances and
+        completion history are never rewritten here.
         """
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 await self._validate_assignable_child(child_id)
-                result = await self._database.execute(
-                    "UPDATE task_definitions SET child_id = ? "
-                    "WHERE id = ?",
-                    (child_id, definition_id),
+                definition = await self._database.fetch_one(
+                    "SELECT 1 FROM quest_definitions WHERE id = ?",
+                    (definition_id,),
                 )
-        return result.rowcount
+                if definition is None:
+                    raise ValueError(
+                        f"quest definition {definition_id} does not exist"
+                    )
+                await self._database.execute(
+                    "INSERT INTO quest_definition_assignees "
+                    "(definition_id, child_id) VALUES (?, ?) "
+                    "ON CONFLICT (definition_id, child_id) DO NOTHING",
+                    (definition_id, child_id),
+                )
+
+    async def remove_assignee(
+        self, definition_id: int, child_id: int
+    ) -> bool:
+        """Remove the assignee link; True when a row was removed.
+
+        Future materialization stops for this (definition, child) pair;
+        existing instances and completion history are never touched
+        here (Feature 06 guardrail).
+        """
+        async with _connection_lock(self._database):
+            result = await self._database.execute(
+                "DELETE FROM quest_definition_assignees "
+                "WHERE definition_id = ? AND child_id = ?",
+                (definition_id, child_id),
+            )
+        return result.rowcount > 0
+
+    async def list_assignees(self, definition_id: int) -> list[ChildRecord]:
+        """Return the definition's assignees as child records.
+
+        Ordered by the children table's stable display order
+        (``sort_order``, then id) so callers render a deterministic
+        roster.  A definition with no assignees returns [].
+        """
+        rows = await self._database.fetch_all(
+            f"SELECT {_CHILD_COLUMNS} FROM children "
+            "WHERE id IN (SELECT child_id "
+            "FROM quest_definition_assignees WHERE definition_id = ?) "
+            "ORDER BY sort_order, id",
+            (definition_id,),
+        )
+        return [_child_from_row(row) for row in rows]
+
+    async def upsert_window(
+        self,
+        definition_id: int,
+        window: str,
+        *,
+        due_time: str | None = None,
+    ) -> QuestDefinitionWindowRecord:
+        """Declare (or re-declare) ``window`` on the definition.
+
+        The composite primary key makes the write idempotent per
+        (definition, window): re-declaring updates ``due_time`` in
+        place instead of duplicating.  The window name must be one of
+        ``const.QUEST_WINDOWS`` (the schema CHECK backs this up) and a
+        provided ``due_time`` must be strict 24-hour HH:MM.  The
+        definition must exist — validated under the connection lock so
+        the verdict cannot go stale before the write.
+        """
+        _validate_window(window)
+        if due_time is not None:
+            _validate_time(due_time, "due_time")
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                definition = await self._database.fetch_one(
+                    "SELECT 1 FROM quest_definitions WHERE id = ?",
+                    (definition_id,),
+                )
+                if definition is None:
+                    raise ValueError(
+                        f"quest definition {definition_id} does not exist"
+                    )
+                await self._database.execute(
+                    "INSERT INTO quest_definition_windows "
+                    "(definition_id, window, due_time) VALUES (?, ?, ?) "
+                    "ON CONFLICT (definition_id, window) DO UPDATE SET "
+                    "due_time = excluded.due_time",
+                    (definition_id, window, due_time),
+                )
+                row = await self._database.fetch_one(
+                    f"SELECT {_WINDOW_COLUMNS} "
+                    "FROM quest_definition_windows "
+                    "WHERE definition_id = ? AND window = ?",
+                    (definition_id, window),
+                )
+        assert row is not None
+        return _window_from_row(row)
+
+    async def list_windows(
+        self, definition_id: int
+    ) -> list[QuestDefinitionWindowRecord]:
+        """Return the definition's windows in ``const`` order.
+
+        Ordered by the canonical window sequence (morning, afternoon,
+        evening) rather than insertion order, so callers always render
+        the Quest Log's three columns consistently.  A definition with
+        no windows returns [].
+        """
+        rows = await self._database.fetch_all(
+            f"SELECT {_WINDOW_COLUMNS} FROM quest_definition_windows "
+            "WHERE definition_id = ?",
+            (definition_id,),
+        )
+        by_name = {row[1]: _window_from_row(row) for row in rows}
+        return [
+            by_name[name]
+            for name in QUEST_WINDOWS
+            if name in by_name
+        ]
+
+    async def remove_window(
+        self, definition_id: int, window: str
+    ) -> bool:
+        """Remove the window declaration; True when a row was removed.
+
+        Future materialization stops producing instances for this
+        (definition, window); existing instances and completion history
+        are never touched here (Feature 06 guardrail).
+        """
+        _validate_window(window)
+        async with _connection_lock(self._database):
+            result = await self._database.execute(
+                "DELETE FROM quest_definition_windows "
+                "WHERE definition_id = ? AND window = ?",
+                (definition_id, window),
+            )
+        return result.rowcount > 0
 
     async def _validate_assignable_child(self, child_id: int) -> None:
         """Raise ValueError unless the child exists and is active.
 
         MUST be called inside the connection lock so the verdict cannot
-        go stale before the caller's UPDATE commits.
+        go stale before the caller's INSERT commits.
         """
         child = await self._database.fetch_one(
             "SELECT is_active FROM children WHERE id = ?", (child_id,)
