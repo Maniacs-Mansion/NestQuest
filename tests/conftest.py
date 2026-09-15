@@ -29,7 +29,7 @@ import tempfile
 import weakref
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -42,6 +42,8 @@ _HA_MODULES = (
     "homeassistant.config_entries",
     "homeassistant.data_entry_flow",
     "homeassistant.exceptions",
+    "homeassistant.helpers",
+    "homeassistant.helpers.config_validation",
 )
 
 def _find_spec(name: str):
@@ -79,6 +81,8 @@ for _parent, _child in (
     ("homeassistant", "data_entry_flow"),
     ("homeassistant", "core"),
     ("homeassistant", "exceptions"),
+    ("homeassistant", "helpers"),
+    ("homeassistant.helpers", "config_validation"),
 ):
     setattr(sys.modules[_parent], _child, sys.modules[f"{_parent}.{_child}"])
 
@@ -181,6 +185,30 @@ class ConfigEntryNotReady(Exception):
 
 _exceptions_mock.ConfigEntryNotReady = ConfigEntryNotReady
 
+import voluptuous as vol
+
+
+def _multi_select(choices: dict):
+    """Mirror homeassistant.helpers.config_validation.multi_select.
+
+    The options flow's admin picker uses HA's supported multi-select
+    validator (schema-serializable by HA's frontend); the mock provides
+    the same contract: a list whose members are keys of ``choices``.
+    """
+
+    def _validate(selected):
+        if not isinstance(selected, list):
+            raise vol.Invalid("Not a list")
+        for value in selected:
+            if value not in choices:
+                raise vol.Invalid(f"{value} is not a valid option")
+        return selected
+
+    return _validate
+
+
+_ha_mock("homeassistant.helpers.config_validation").multi_select = _multi_select
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers for the behavior tests.
@@ -218,12 +246,18 @@ def make_config_entry(
     entry_id: str = "test_entry",
     options: dict | None = None,
     data: dict | None = None,
+    context: dict | None = None,
 ):
-    """Create a stub config entry shaped like HA's ConfigEntry for tests."""
+    """Create a stub config entry shaped like HA's ConfigEntry for tests.
+
+    ``context`` mirrors HA's entry context (the flow that created the
+    entry carries the acting HA user under ``context["user_id"]``).
+    """
     entry = SimpleNamespace(
         entry_id=entry_id,
         options=dict(options or {}),
         data=dict(data or {}),
+        context=dict(context or {}),
     )
     entry.add_update_listener = None
     return entry
@@ -247,6 +281,10 @@ def make_hass() -> tuple:
         config=MagicMock(),
         config_entries=SimpleNamespace(async_reload=None),
     )
+    # hass.auth mirrors the real surface the integration reads: an
+    # async_get_users list the tests can repoint at will (the setup
+    # path resolves HA owner accounts as the last-resort admin seed).
+    hass.auth = SimpleNamespace(async_get_users=AsyncMock(return_value=[]))
 
     def _cleanup_config_dir():
         import shutil
@@ -302,8 +340,15 @@ async def hass():
 def make_entry():
     """Provide the config-entry factory as a fixture."""
 
-    def _factory(entry_id: str = "test_entry", options: dict | None = None, data: dict | None = None):
-        return make_config_entry(entry_id=entry_id, options=options, data=data)
+    def _factory(
+        entry_id: str = "test_entry",
+        options: dict | None = None,
+        data: dict | None = None,
+        context: dict | None = None,
+    ):
+        return make_config_entry(
+            entry_id=entry_id, options=options, data=data, context=context
+        )
 
     return _factory
 
