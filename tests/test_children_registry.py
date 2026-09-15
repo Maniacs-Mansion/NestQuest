@@ -291,21 +291,63 @@ def test_edit_child_rename_to_duplicate_warns_but_different_name_not(
         # Renaming Bo onto Ada's name warns (different child's name).
         edited = await edit_child(database, bo.id, display_name="ada")
         assert edited.display_name == "ada"
-        assert any(
-            "duplicates existing child" in r.getMessage()
-            for r in caplog.records
-        )
+        warnings = [
+            r for r in caplog.records if "duplicates existing child" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+        assert "Ada" in warnings[0].getMessage()
+        return edited
+
+    _with_db(tmp_path, "edit-rename-duplicate.db")(_body)
+
+
+def test_edit_child_rename_to_own_name_casing_alone_warns_not(
+    tmp_path, caplog
+) -> None:
+    """Renaming a child to their own name (casing aside) is not a
+    duplicate when NO OTHER child carries the normalised name."""
+    async def _body(database):
+        ada = await create_child(database, "Ada")
         caplog.clear()
-        # Renaming a child to their own name (casing aside) is not a
-        # duplicate: no warning.
-        await edit_child(database, ada.id, display_name="ADA")
+        edited = await edit_child(database, ada.id, display_name="ADA")
+        assert edited.display_name == "ADA"
         assert not any(
             "duplicates existing child" in r.getMessage()
             for r in caplog.records
         )
+        return edited
+
+    _with_db(tmp_path, "edit-rename-self.db")(_body)
+
+
+def test_edit_child_case_only_edit_colliding_with_other_child_warns(
+    tmp_path, caplog
+) -> None:
+    """A case-only edit must not hide a real duplicate: with two Ada
+    profiles already present, editing either one's name to another
+    casing still warns (the scan excludes only the edited child)."""
+    async def _body(database):
+        first = await create_child(database, "Ada")
+        await create_child(database, "ada")
+        caplog.clear()
+        edited = await edit_child(database, first.id, display_name="ADA")
+        assert edited.display_name == "ADA"
+        warnings = [
+            r for r in caplog.records if "duplicates existing child" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+        # Editing the name to a value that STAYS duplicated (no change,
+        # other child still carries it) warns too: the scan is on the
+        # resulting state, not on whether the word moved.
+        caplog.clear()
+        await edit_child(database, first.id, display_name=" ada ")
+        warnings = [
+            r for r in caplog.records if "duplicates existing child" in r.getMessage()
+        ]
+        assert len(warnings) == 1
         return None
 
-    _with_db(tmp_path, "edit-rename-duplicate.db")(_body)
+    _with_db(tmp_path, "edit-case-only-duplicate.db")(_body)
 
 
 # ---------------------------------------------------------------------------

@@ -74,16 +74,25 @@ def _validate_sort_order(value: object) -> int:
 
 
 async def _warn_on_duplicate_name(
-    database: NestQuestDatabase, display_name: str
+    database: NestQuestDatabase,
+    display_name: str,
+    *,
+    exclude_child_id: int | None = None,
 ) -> None:
     """Log a warning when ``display_name`` duplicates an existing child.
 
     Case-insensitive and whitespace-normalised on both sides.  The
     duplicate is still allowed — this only makes it visible; the log
     line names both rows so an accidental double-add can be found.
+    ``exclude_child_id`` removes the child being edited from the scan,
+    so an edit only warns when the result collides with a DIFFERENT
+    child's name — including case-only edits, where the self-comparison
+    would otherwise hide a real duplicate.
     """
     lowered = display_name.casefold()
     for child in await ChildrenDao(database).list_all():
+        if exclude_child_id is not None and child.id == exclude_child_id:
+            continue
         if child.display_name.strip().casefold() == lowered:
             LOGGER.warning(
                 "Child display name %r duplicates existing child %d "
@@ -142,9 +151,10 @@ async def edit_child(
     field raises: the DAO's update writes only provided fields and
     cannot express NULL, so a silent no-op would mask the caller's
     intent (see the module docstring).  A provided display name is
-    validated like create's and, when it duplicates a DIFFERENT child,
-    still allowed with a warning.  Raises ValueError when the child
-    does not exist.
+    validated like create's; the duplicate scan excludes only the child
+    being edited, so a case-only edit colliding with another child's
+    normalised name still warns.  Raises ValueError when the child does
+    not exist.
     """
     dao = ChildrenDao(database)
     existing = await dao.get(child_id)
@@ -154,8 +164,7 @@ async def edit_child(
     if display_name is not _UNSET:
         name = _validate_text(display_name, "display_name", required=True)
         assert name is not None
-        if name.casefold() != existing.display_name.strip().casefold():
-            await _warn_on_duplicate_name(database, name)
+        await _warn_on_duplicate_name(database, name, exclude_child_id=child_id)
         updates["display_name"] = name
     if colour is not _UNSET:
         value = _validate_text(colour, "colour")
