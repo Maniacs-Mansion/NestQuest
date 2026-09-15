@@ -765,9 +765,16 @@ def test_custody_rotation_walks_full_years_without_inversion(
     # January 1st and breaks either the uniformity of a block or the
     # alternation between them — most visibly in the block spanning
     # December 31st -> January 1st of a 53-ISO-week year.
-    day = datetime.date(year, 1, 1)
+    # Walk the FULL year AND the first two weeks of the following
+    # January: the block spanning December 31st -> January 1st must
+    # stay uniform ACROSS the boundary, so an implementation that
+    # resets when the target year differs from the anchor's fails
+    # here (the post-boundary days of its final block disagree).
+    first_day = datetime.date(year, 1, 1)
+    last_day = datetime.date(year + 1, 1, 14)
     days_seen = 0
-    while day.year == year:
+    day = first_day
+    while day <= last_day:
         days_since_anchor = (day - anchor).days
         block = days_since_anchor // 7  # which 7-day block of the cycle
         block_start = anchor + datetime.timedelta(days=block * 7)
@@ -779,16 +786,22 @@ def test_custody_rotation_walks_full_years_without_inversion(
             f"{(day - block_start).days}): present="
             f"{engine.is_present(1, day)}, expected {expected}"
         )
-        # The block's OTHER days (even outside the year) must agree —
-        # this is what catches an inversion hidden at a year boundary.
+        # The block's OTHER days must agree — including the days on
+        # the far side of January 1st.
         for offset in range(7):
             block_day = block_start + datetime.timedelta(days=offset)
-            if block_day.year == year:
+            if first_day <= block_day <= last_day:
                 assert engine.is_present(1, block_day) is expected, (
                     f"{block_day} disagrees with its block {block}"
                 )
         days_seen += 1
         day += datetime.timedelta(days=1)
-    assert days_seen == length, (
-        f"walked {days_seen} days of {year}, expected {length}"
+    # The walked year itself contributed exactly its full length.
+    year_days = sum(
+        1
+        for offset in range((last_day - first_day).days + 1)
+        if (first_day + datetime.timedelta(days=offset)).year == year
+    )
+    assert year_days == length, (
+        f"walked {year_days} days of {year}, expected {length}"
     )
