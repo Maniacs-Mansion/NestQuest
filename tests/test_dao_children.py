@@ -227,24 +227,34 @@ def test_reorder_is_transactional_and_idempotent(tmp_path) -> None:
         _run(database.close())
 
 
-def test_reorder_empty_list_is_noop(tmp_path) -> None:
+def test_reorder_empty_list_is_rejected(tmp_path) -> None:
+    """An empty list is the maximally partial reorder: rejected while
+    any child exists (Feature 03 reorder contract)."""
+    import pytest as pytest_module
+
     database = _open_db(tmp_path / "reorder-empty.db")
     try:
         dao, _ = _daos(database)
         _make_child(dao, "Ada")
-        _run(dao.reorder([]))
+        with pytest_module.raises(ValueError, match="missing child ids"):
+            _run(dao.reorder([]))
         children = _run(dao.list_all())
         assert children[0].sort_order == 0
     finally:
         _run(database.close())
 
 
-def test_reorder_unknown_id_leaves_it_untouched(tmp_path) -> None:
+def test_reorder_unknown_id_is_rejected(tmp_path) -> None:
+    """An unknown id is rejected before any write; the order is
+    untouched (Feature 03 reorder contract)."""
+    import pytest as pytest_module
+
     database = _open_db(tmp_path / "reorder-unknown.db")
     try:
         dao, _ = _daos(database)
         a = _make_child(dao, "Ada")
-        _run(dao.reorder([a.id, 999]))
+        with pytest_module.raises(ValueError, match="unknown child ids"):
+            _run(dao.reorder([a.id, 999]))
         children = _run(dao.list_all())
         assert children[0].sort_order == 0
     finally:

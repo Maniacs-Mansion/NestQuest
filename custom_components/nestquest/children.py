@@ -73,6 +73,18 @@ def _validate_sort_order(value: object) -> int:
     return value
 
 
+def _validate_child_id(value: object) -> int:
+    """Reject non-int child ids (bools included) before any lookup.
+
+    SQLite binds Python bools as integers, so ``True`` would silently
+    address child 1 and a float would round — malformed service input
+    must never mutate the wrong profile.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"child_id must be an integer, got {value!r}")
+    return value
+
+
 async def _warn_on_duplicate_name(
     database: NestQuestDatabase,
     display_name: str,
@@ -166,6 +178,7 @@ async def edit_child(
     and its readback — the returned record is exactly the one this
     edit produced, not a later writer's.
     """
+    _validate_child_id(child_id)
     async with _connection_lock(database):
         dao = ChildrenDao(database)
         existing = await dao.get(child_id)
@@ -222,6 +235,7 @@ async def set_child_active(
     connection-scoped lock, so a concurrent opposite transition cannot
     make this call report the other caller's value.
     """
+    _validate_child_id(child_id)
     async with _connection_lock(database):
         dao = ChildrenDao(database)
         if await dao.get(child_id) is None:
@@ -234,6 +248,26 @@ async def set_child_active(
         updated = await dao.get(child_id)
     assert updated is not None
     return updated
+
+
+async def reorder_children(
+    database: NestQuestDatabase, ordered_ids: list[int]
+) -> None:
+    """Rewrite the children's panel display order in one transaction.
+
+    ``ordered_ids`` must be a complete permutation of the children
+    table — every child id exactly once.  A partial list (missing an
+    existing child), an unknown id, or a duplicate is rejected with
+    ValueError before any write, so the current order survives a
+    rejected call.  The DAO enforces this inside its own transaction
+    (check and write are     atomic under the connection lock); this
+    wrapper additionally rejects non-integer ids up front, since
+    ``bool`` and floats would silently compare against stored integer
+    ids at the SQL layer.
+    """
+    for child_id in ordered_ids:
+        _validate_child_id(child_id)
+    await ChildrenDao(database).reorder(ordered_ids)
 
 
 async def list_children(

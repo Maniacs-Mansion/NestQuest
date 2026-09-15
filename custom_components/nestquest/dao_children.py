@@ -191,13 +191,20 @@ class ChildrenDao:
     async def reorder(self, ordered_ids: list[int]) -> None:
         """Persist a new sort order: ``ordered_ids[i]`` gets sort_order i.
 
+        The list must be a COMPLETE permutation of the children table:
+        every existing child id appears exactly once.  Partial lists
+        (missing an existing child) and unknown ids (naming a child
+        that does not exist) are rejected with ValueError BEFORE any
+        write, leaving the current order untouched — a silent partial
+        reorder would leave unlisted children with stale positions and
+        hide a caller bug.  Duplicate ids are rejected up front: they
+        cannot all hold distinct positions, and silently assigning the
+        last occurrence's index would hide a caller bug.
+
         Runs inside one transaction; positions are staged at offset
         -len (all negative, so any permutation of the same ids never
         collides mid-reorder under the wrapper's single-connection
-        serialization), then finalized 0..n-1.  Duplicate ids are
-        rejected up front: they cannot all hold distinct positions, and
-        silently assigning the last occurrence's index would hide a
-        caller bug.
+        serialization), then finalized 0..n-1.
 
         Concurrent reorder() calls on one connection are serialized by
         a connection-scoped asyncio lock (shared across every ChildrenDao
@@ -205,10 +212,10 @@ class ChildrenDao:
         transaction() rejects a second concurrent transaction with
         RuntimeError, so racing callers would crash instead of
         queueing.  The lock makes the second call wait, then run
-        against the first call's final state.
+        against the first call's final state — which also keeps the
+        completeness check honest: the re-read of the table happens
+        inside the same lock and transaction as the writes.
         """
-        if not ordered_ids:
-            return
         if len(set(ordered_ids)) != len(ordered_ids):
             raise ValueError(
                 "reorder() received duplicate child ids; every id must "
@@ -216,6 +223,29 @@ class ChildrenDao:
             )
         async with _connection_lock(self._database):
             async with self._database.transaction():
+                rows = await self._database.fetch_all(
+                    f"SELECT id FROM children"
+                )
+                existing = {row[0] for row in rows}
+                listed = set(ordered_ids)
+                missing = sorted(existing - listed)
+                unknown = sorted(listed - existing)
+                if missing or unknown:
+                    details = []
+                    if missing:
+                        details.append(
+                            f"missing child ids {missing} (a partial "
+                            "reorder would leave them with stale "
+                            "positions)"
+                        )
+                    if unknown:
+                        details.append(
+                            f"unknown child ids {unknown}"
+                        )
+                    raise ValueError(
+                        "reorder() must list every child exactly once; "
+                        + "; ".join(details)
+                    )
                 offset = len(ordered_ids)
                 await self._database.execute_many(
                     "UPDATE children SET sort_order = ? WHERE id = ?",
