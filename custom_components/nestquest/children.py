@@ -236,6 +236,30 @@ async def set_child_active(
     return updated
 
 
+async def reorder_children(
+    database: NestQuestDatabase, ordered_ids: list[int]
+) -> None:
+    """Rewrite the children's panel display order in one transaction.
+
+    ``ordered_ids`` must be a complete permutation of the children
+    table — every child id exactly once.  A partial list (missing an
+    existing child), an unknown id, or a duplicate is rejected with
+    ValueError before any write, so the current order survives a
+    rejected call.  The DAO enforces this inside its own transaction
+    (check and write are atomic under the connection lock); this
+    wrapper additionally rejects non-integer ids up front, since
+    ``bool`` and floats would silently compare against stored integer
+    ids at the SQL layer.
+    """
+    for child_id in ordered_ids:
+        if isinstance(child_id, bool) or not isinstance(child_id, int):
+            raise ValueError(
+                f"ordered_ids must contain only integer child ids, got "
+                f"{child_id!r}"
+            )
+    await ChildrenDao(database).reorder(ordered_ids)
+
+
 async def list_children(
     database: NestQuestDatabase, *, active_only: bool = False
 ) -> list[ChildRecord]:

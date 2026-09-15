@@ -12,6 +12,7 @@ from custom_components.nestquest.children import (
     create_child,
     edit_child,
     list_children,
+    reorder_children,
     set_child_active,
 )
 from custom_components.nestquest.dao_children import ChildRecord, ChildrenDao
@@ -439,6 +440,114 @@ def test_set_child_active_missing_raises(tmp_path) -> None:
         return None
 
     _with_db(tmp_path, "set-active-missing.db")(_body)
+
+
+# ---------------------------------------------------------------------------
+# reorder_children: complete permutation or nothing changes
+# ---------------------------------------------------------------------------
+
+
+def test_reorder_children_persists_display_order(tmp_path) -> None:
+    async def _body(database):
+        first = await create_child(database, "Ada", sort_order=0)
+        second = await create_child(database, "Bo", sort_order=1)
+        third = await create_child(database, "Cleo", sort_order=2)
+        await reorder_children(database, [third.id, first.id, second.id])
+        # The active list returns children in the new sort order.
+        listed = await list_children(database, active_only=True)
+        assert [c.id for c in listed] == [third.id, first.id, second.id]
+        assert [c.sort_order for c in listed] == [0, 1, 2]
+        return listed
+
+    _with_db(tmp_path, "reorder-round-trip.db")(_body)
+
+
+def test_reorder_children_partial_list_rejected_order_unchanged(
+    tmp_path,
+) -> None:
+    async def _body(database):
+        first = await create_child(database, "Ada", sort_order=0)
+        second = await create_child(database, "Bo", sort_order=1)
+        third = await create_child(database, "Cleo", sort_order=2)
+        with pytest.raises(ValueError, match="missing child ids"):
+            await reorder_children(database, [third.id, first.id])
+        listed = await list_children(database)
+        # Nothing changed: rejection happens before any write.
+        assert [c.id for c in listed] == [first.id, second.id, third.id]
+        assert [c.sort_order for c in listed] == [0, 1, 2]
+        return listed
+
+    _with_db(tmp_path, "reorder-partial.db")(_body)
+
+
+def test_reorder_children_unknown_id_rejected_order_unchanged(
+    tmp_path,
+) -> None:
+    async def _body(database):
+        first = await create_child(database, "Ada", sort_order=0)
+        second = await create_child(database, "Bo", sort_order=1)
+        with pytest.raises(ValueError, match="unknown child ids"):
+            await reorder_children(database, [second.id, first.id, 999])
+        listed = await list_children(database)
+        assert [c.id for c in listed] == [first.id, second.id]
+        assert [c.sort_order for c in listed] == [0, 1]
+        return listed
+
+    _with_db(tmp_path, "reorder-unknown.db")(_body)
+
+
+def test_reorder_children_empty_list_rejected_when_children_exist(
+    tmp_path,
+) -> None:
+    """An empty list is the maximally partial reorder: rejected while
+    any child exists (against an empty table it is a complete
+    permutation and stays a harmless no-op)."""
+    async def _body(database):
+        first = await create_child(database, "Ada", sort_order=0)
+        with pytest.raises(ValueError, match="missing child ids"):
+            await reorder_children(database, [])
+        assert [c.sort_order for c in await list_children(database)] == [0]
+        return None
+
+    _with_db(tmp_path, "reorder-empty.db")(_body)
+
+
+def test_reorder_children_duplicate_and_non_int_rejected(tmp_path) -> None:
+    async def _body(database):
+        first = await create_child(database, "Ada", sort_order=0)
+        second = await create_child(database, "Bo", sort_order=1)
+        with pytest.raises(ValueError, match="duplicate child ids"):
+            await reorder_children(database, [first.id, first.id, second.id])
+        with pytest.raises(ValueError, match="only integer child ids"):
+            await reorder_children(database, [first.id, second.id, True])
+        with pytest.raises(ValueError, match="only integer child ids"):
+            await reorder_children(database, [first.id, second.id, "3"])
+        listed = await list_children(database)
+        assert [c.sort_order for c in listed] == [0, 1]
+        return listed
+
+    _with_db(tmp_path, "reorder-bad-inputs.db")(_body)
+
+
+def test_reorder_children_inactive_children_included(tmp_path) -> None:
+    """Inactive children keep their display position: the permutation
+    covers the whole table, not just the active list."""
+    async def _body(database):
+        first = await create_child(database, "Ada", sort_order=0)
+        second = await create_child(database, "Bo", sort_order=1)
+        await set_child_active(database, second.id, False)
+        # Both ids are required even though one is inactive.
+        await reorder_children(database, [second.id, first.id])
+        listed = await list_children(database)
+        assert [c.id for c in listed] == [second.id, first.id]
+        assert [c.sort_order for c in listed] == [0, 1]
+        # The active list skips the inactive child but keeps position.
+        assert [c.id for c in await list_children(database, active_only=True)] == [
+            first.id
+        ]
+        return listed
+
+    _with_db(tmp_path, "reorder-inactive.db")(_body)
 
 
 @pytest.mark.parametrize("bad", ["1", "0", 1, 0, 1.0, None, "true"])
