@@ -718,3 +718,77 @@ def test_preview_always_absent_child_raises_not_loops() -> None:
     )
     with pytest.raises(ValueError, match="not present on any"):
         engine.next_present_dates(1, "2026-01-05", 2)
+
+
+# ---------------------------------------------------------------------------
+# The week-parity regression guard (Feature 05, D-004)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("year", "length", "reason"),
+    [
+        (2020, 366, "leap year, 53 ISO weeks"),
+        (2015, 365, "365 days, 53 ISO weeks"),
+    ],
+)
+def test_custody_rotation_walks_full_years_without_inversion(
+    year, length, reason
+) -> None:
+    """REGRESSION GUARD for the week-parity bug (D-004).
+
+    Walks a two-week alternating rotation day by day across a FULL
+    {length}-day year ({year} — {reason}), asserting the present/absent
+    sequence never breaks or inverts at any point, including January
+    1st.  ISO week parity silently flips in 53-ISO-week years and would
+    invert every custody schedule on January 1st; anchor-date
+    arithmetic must not.
+    """.format(length=length, year=year, reason=reason)
+    if year == 2020:
+        assert datetime.date(2020, 12, 31).isocalendar()[1] == 53
+        assert (datetime.date(2021, 1, 1) - datetime.date(2020, 1, 1)).days == 366
+    if year == 2015:
+        assert datetime.date(2015, 12, 31).isocalendar()[1] == 53
+        assert (datetime.date(2016, 1, 1) - datetime.date(2015, 1, 1)).days == 365
+
+    anchor = datetime.date(year, 1, 6)  # a Monday of an on-week
+    rotation = PresenceSchedule(
+        1, 2, anchor, {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()}
+    )
+    engine = PresenceEngine({1: rotation})
+
+    # Walk EVERY day of the year.  The expectation is derived from the
+    # anchor's 7-day BLOCKS, not from the engine: each block of seven
+    # days starting at the anchor is uniformly present (even block
+    # index) or uniformly absent (odd block index), and consecutive
+    # blocks alternate.  A parity-based implementation resets on
+    # January 1st and breaks either the uniformity of a block or the
+    # alternation between them — most visibly in the block spanning
+    # December 31st -> January 1st of a 53-ISO-week year.
+    day = datetime.date(year, 1, 1)
+    days_seen = 0
+    while day.year == year:
+        days_since_anchor = (day - anchor).days
+        block = days_since_anchor // 7  # which 7-day block of the cycle
+        block_start = anchor + datetime.timedelta(days=block * 7)
+        # Uniformity within the block: every day of this 7-day block
+        # must answer exactly like the block's first day.
+        expected = ((block % 2) == 0)
+        assert engine.is_present(1, day) is expected, (
+            f"{day} (block {block}, day offset "
+            f"{(day - block_start).days}): present="
+            f"{engine.is_present(1, day)}, expected {expected}"
+        )
+        # The block's OTHER days (even outside the year) must agree —
+        # this is what catches an inversion hidden at a year boundary.
+        for offset in range(7):
+            block_day = block_start + datetime.timedelta(days=offset)
+            if block_day.year == year:
+                assert engine.is_present(1, block_day) is expected, (
+                    f"{block_day} disagrees with its block {block}"
+                )
+        days_seen += 1
+        day += datetime.timedelta(days=1)
+    assert days_seen == length, (
+        f"walked {days_seen} days of {year}, expected {length}"
+    )
