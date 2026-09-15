@@ -1,0 +1,76 @@
+/* ============================================================
+   NestQuest — Parent admin card tokens
+   Surface: phone, 390x844 reference. Plain CubeCraft styling,
+   no tabletop treatment, plain domain words in the UI.
+   Scope on the card host: nestquest-admin-card.
+   Derived from the approved mockups (admin screens 1d-1i).
+   Two densities were built; COMPACT is the default. Flip
+   --nq-a-density-* to the roomy values for the alternative.
+   ============================================================ */
+
+:host {
+  /* ── Brand + neutrals (CubeCraft tokens, verbatim) ─────── */
+  --nq-brand-blue:        #3B3AB8;
+  --nq-brand-purple:      #A035CC;
+  --nq-brand-gradient:    linear-gradient(135deg, var(--nq-brand-blue), var(--nq-brand-purple));
+  --nq-brand-gradient-h:  linear-gradient(90deg,  var(--nq-brand-blue), var(--nq-brand-purple));
+
+  --nq-a-page:            #F4F4F6;
+  --nq-a-surface:         #FFFFFF;
+  --nq-a-surface-subtle:  #FAFAFA;
+  --nq-a-selected:        #EBEBF8;   /* row being edited */
+  --nq-a-border:          #E4E4EA;
+  --nq-a-divider:         #EDEDF1;
+
+  --nq-a-ink:             #18181D;
+  --nq-a-ink-secondary:   #52525E;
+  --nq-a-ink-tertiary:    #70707E;   /* inactive rows, unselected nav icons */
+
+  --nq-a-success:         #15803D;
+  --nq-a-danger:          #DC2626;
+  --nq-a-danger-strong:   #B91C1C;
+  --nq-a-danger-bg:       #FEE2E2;
+  --nq-a-warning-ink:     #92400E;
+  --nq-a-warning-ink-2:   #78350F;
+  --nq-a-warning-bg:      #FEF3C7;
+  --nq-a-warning-border:  rgba(217,119,6,.35);
+  --nq-a-info-bg:         #DBEAFE;
+  --nq-a-info-ink:        #1E3A8A;
+  --nq-a-info-icon:       #1D4ED8;
+  --nq-a-reversal:        #7D28A0;   /* un-complete events in history */
+
+  /* ── Type ─────────────────────────────────────────────── */
+  --nq-a-font:            Nunito, system-ui, sans-serif;
+  --nq-a-size-screen:     24px;  /* 800, screen title */
+  --nq-a-size-hero:       32px;  /* 800, roomy "8 of 12 done" */
+  --nq-a-size-card-title: 19px;  /* 800, roomy child card */
+  --nq-a-size-stat:       22px;  /* 800, compact stat number */
+  --nq-a-size-row:        13.5px;/* 700, list row title */
+  --nq-a-size-meta:       11px;  /* 600, row meta */
+  --nq-a-size-label:      10px;  /* 700, uppercase field label */
+  --nq-a-track-label:     .10em;
+
+  /* ── Density: COMPACT (default) ───────────────────────── */
+  --nq-a-density-page-pad:   14px 16px 92px;  /* bottom clears the 70px tab bar */
+  --nq-a-density-gap:        10px;
+  --nq-a-density-card-pad:   13px;
+  --nq-a-density-row-pad:    11px 13px;
+  --nq-a-density-radius:     8px;
+  --nq-a-density-shadow:     none;
+  /* Density: ROOMY — page-pad 18px 20px 92px; gap 16px;
+     card-pad 18px; radius 12px; shadow 0 4px 12px rgba(0,0,0,.06) */
+
+  /* ── Metrics ──────────────────────────────────────────── */
+  --nq-a-tabbar-height:   70px;   /* + 12px safe-area padding */
+  --nq-a-tap-min:         44px;   /* every row/control clears this */
+  --nq-a-radius-pill:     9999px;
+  --nq-a-radius-sheet:    20px 20px 0 0;
+  --nq-a-sheet-shadow:    0 -8px 28px rgba(9,9,11,.18);
+  --nq-a-progress-height: 6px;    /* 8px roomy, 10px hero */
+
+  /* ── Motion ───────────────────────────────────────────── */
+  --nq-ease-out:          cubic-bezier(0, 0, .2, 1);
+  --nq-dur-micro:         120ms;
+  --nq-dur-base:          200ms;
+  --nq-dur-modal:         350ms;
+}
