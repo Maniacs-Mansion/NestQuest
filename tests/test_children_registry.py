@@ -441,6 +441,21 @@ def test_set_child_active_missing_raises(tmp_path) -> None:
     _with_db(tmp_path, "set-active-missing.db")(_body)
 
 
+@pytest.mark.parametrize("bad", ["1", "0", 1, 0, 1.0, None, "true"])
+def test_set_child_active_rejects_non_bool(tmp_path, bad) -> None:
+    """The DAO's int() would silently coerce "1"/0/1.0 into a state the
+    caller never asked for; the business layer refuses non-bools."""
+    async def _body(database):
+        child = await create_child(database, "Ada")
+        with pytest.raises(ValueError, match="is_active must be a real bool"):
+            await set_child_active(database, child.id, bad)
+        # The refused transition left the child untouched.
+        assert (await list_children(database))[0].is_active is True
+        return None
+
+    _with_db(tmp_path, "set-active-non-bool.db")(_body)
+
+
 # ---------------------------------------------------------------------------
 # Concurrency: edit/set_active are atomic under the connection lock
 # ---------------------------------------------------------------------------
@@ -575,3 +590,117 @@ def test_list_children_orders_by_sort_order_then_id(tmp_path) -> None:
         return listed
 
     _with_db(tmp_path, "list-order.db")(_body)
+
+
+# ---------------------------------------------------------------------------
+# Deactivation keeps every referencing row intact (Feature 03)
+# ---------------------------------------------------------------------------
+
+
+def test_deactivating_child_preserves_definitions_instances_events(
+    tmp_path,
+) -> None:
+    async def _body(database):
+        from datetime import date, timedelta
+
+        from custom_components.nestquest.dao_children import ChildrenDao
+        from custom_components.nestquest.dao_instances import (
+            CompletionEventsDao,
+            QuestInstancesDao,
+        )
+        from custom_components.nestquest.dao_rules import (
+            QuestDefinitionsDao,
+            ScheduleRulesDao,
+        )
+
+        children = ChildrenDao(database)
+        rules = ScheduleRulesDao(database)
+        definitions = QuestDefinitionsDao(database)
+        instances = QuestInstancesDao(database)
+        events = CompletionEventsDao(database)
+
+        child = await create_child(database, "Ada")
+        rule = await rules.create("daily", "2026-01-01")
+        definition = await definitions.create(
+            "Brush teeth",
+            rule.id,
+            "2026-09-15T12:00:00+00:00",
+            assignee_child_ids=[child.id],
+        )
+        due = (date.today() + timedelta(days=1)).isoformat()
+        stamp = f"{due}T08:00:00+00:00"
+        instance = await instances.upsert(
+            definition.id, child.id, due, stamp, window="morning"
+        )
+        event = await events.append(
+            instance.id,
+            child.id,
+            "completed",
+            "panel",
+            f"{due}T09:00:00+00:00",
+            True,
+            actor_child_id=child.id,
+        )
+
+        # Deactivate: the referencing rows must not move.
+        deactivated = await set_child_active(database, child.id, False)
+        assert deactivated.is_active is False
+        assert await children.get(child.id) == deactivated
+        assert (await definitions.get(definition.id)) == definition
+        assert (await instances.get_by_id(instance.id)) == instance
+        assert await events.list_by_instance(instance.id) == [event]
+        # Excluded from the active list, still present in the full list.
+        assert await list_children(database, active_only=True) == []
+        assert [c.id for c in await list_children(database)] == [child.id]
+
+        # Reactivate: fully restored.
+        reactivated = await set_child_active(database, child.id, True)
+        assert reactivated.is_active is True
+        assert [c.id for c in await list_children(database, active_only=True)] == [
+            child.id
+        ]
+        assert (await instances.get_by_id(instance.id)) == instance
+        return reactivated
+
+    _with_db(tmp_path, "deactivate-data-intact.db")(_body)
+
+
+def test_no_code_path_deletes_a_child_row() -> None:
+    """Structural guardrail: children are deactivated, never deleted.
+
+    The DAO exposes no delete method at all, and no module in the
+    package (nor any test outside the sanctioned DDL/migration layers,
+    which create the tables) carries a statement that removes child
+    rows — the leak guard in test_dao_children enforces the file
+    allowlist, this asserts the no-delete property itself across every
+    file that may legitimately name the table.
+    """
+    import re
+    from pathlib import Path
+
+    package = Path(
+        __import__(
+            "custom_components.nestquest", fromlist=["__file__"]
+        ).__file__
+    ).parent
+
+    delete_pattern = re.compile(
+        r"DELETE\s+(FROM\s+)?((main|temp)\s*\.\s*)?[`'\"]*(\[)?children\b",
+        re.IGNORECASE,
+    )
+    for py in sorted(package.rglob("*.py")):
+        assert delete_pattern.search(py.read_text()) is None, (
+            f"a code path in {py.name} deletes child rows"
+        )
+
+    import inspect
+
+    from custom_components.nestquest.dao_children import ChildrenDao
+
+    methods = {
+        name
+        for name, _ in inspect.getmembers(ChildrenDao, inspect.isfunction)
+    }
+    assert not any(
+        name.startswith("delete") or name == "remove" for name in methods
+    ), f"ChildrenDao exposed a delete-shaped method: {methods}"
