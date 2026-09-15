@@ -14,6 +14,7 @@ from conftest import make_config_entry, make_hass, options_flow_base as _options
 from custom_components.nestquest import config_flow
 from custom_components.nestquest import options_flow
 from custom_components.nestquest.const import (
+    CONF_ADMIN_USER_IDS,
     CONF_DAY_ROLLOVER_TIME,
     CONF_HORIZON_DAYS,
     CONF_PANEL_IDLE_TIMEOUT,
@@ -46,11 +47,46 @@ def _make_entry(entry_id: str = "test_entry", options: dict | None = None, data:
     return make_config_entry(entry_id=entry_id, options=options, data=data)
 
 
-def _make_flow(entry) -> options_flow.NestQuestOptionsFlow:
-    """Create an options flow instance bound to a stubbed config entry."""
+def _make_flow(entry, *, users=None, database=None) -> options_flow.NestQuestOptionsFlow:
+    """Create an options flow instance bound to a stubbed config entry.
+
+    ``users`` populates a stubbed hass.auth for the admin picker;
+    ``database`` wires the runtime record so the flow can read and
+    write the allowlist like real HA's options flow does.
+    """
+    from unittest.mock import AsyncMock
+
     flow = options_flow.NestQuestOptionsFlow(config_entry=entry)
     flow.hass = SimpleNamespace()
+    flow.hass.auth = SimpleNamespace(
+        async_get_users=AsyncMock(return_value=users or [])
+    )
+    if database is not None:
+        from custom_components.nestquest.const import DOMAIN
+
+        flow.hass.data = {
+            DOMAIN: {entry.entry_id: SimpleNamespace(database=database)}
+        }
     return flow
+
+
+def _user(user_id: str, name: str):
+    return SimpleNamespace(id=user_id, name=name)
+
+
+def _open_allowlist_db(tmp_path, name):
+    """A real migrated temp database for the flow to read and write."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from custom_components.nestquest.db import NestQuestDatabase
+    from custom_components.nestquest.migrations import apply_migrations
+
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=(lambda fn, *a: fn(*a)))
+    database = NestQuestDatabase(hass)
+    _run(database.open(tmp_path / name))
+    _run(apply_migrations(database))
+    return database
 
 
 def _schema_values(schema) -> dict:
@@ -161,7 +197,12 @@ def test_options_flow_falls_back_to_entry_data() -> None:
 
 
 def test_options_flow_schema_applies_stored_defaults() -> None:
-    """A real voluptuous validate({}) fills every field from the stored defaults."""
+    """A real voluptuous validate({}) fills every field from the stored defaults.
+
+    Without a runtime database (and no auth in the bare harness), the
+    admin picker's default is the empty selection and its choice set is
+    empty — the three legacy settings are unaffected.
+    """
     entry = _make_entry(
         options={
             CONF_HORIZON_DAYS: 21,
@@ -174,6 +215,7 @@ def test_options_flow_schema_applies_stored_defaults() -> None:
         CONF_HORIZON_DAYS: 21,
         CONF_DAY_ROLLOVER_TIME: "05:45",
         CONF_PANEL_IDLE_TIMEOUT: 120,
+        CONF_ADMIN_USER_IDS: [],
     }
 
 
@@ -374,3 +416,222 @@ def test_options_flow_no_hardcoded_domain_or_db_filename() -> None:
             assert node.value != "nestquest.db", (
                 f"Hard-coded database filename in {py_file.name}:{node.lineno}"
             )
+
+# ---------------------------------------------------------------------------
+# Admin allowlist picker (Feature 03)
+# ---------------------------------------------------------------------------
+
+
+def test_options_flow_picker_lists_existing_users(tmp_path) -> None:
+    """The picker offers EXISTING HA users (id -> name), never free text."""
+    import voluptuous as vol
+
+    database = _open_allowlist_db(tmp_path, "picker-users.db")
+    try:
+        from custom_components.nestquest.admin_allowlist import set_admin_ids
+
+        _run(set_admin_ids(database, ["u1"]))
+        entry = _make_entry()
+        flow = _make_flow(
+            entry,
+            users=[_user("u1", "Joshua"), _user("u2", "Sam")],
+            database=database,
+        )
+        result = _run(flow.async_step_init(None))
+        schema = result["data_schema"]
+        marker = next(
+            m for m in schema.schema
+            if getattr(m, "schema", None) == CONF_ADMIN_USER_IDS
+        )
+        # Default is the CURRENT database allowlist.
+        values = _schema_values(schema)
+        assert values[CONF_ADMIN_USER_IDS] == ["u1"]
+        # Both users are selectable; an unknown id is rejected by the
+        # schema itself (this is what real HA submits go through).
+        validated = schema(
+            {
+                CONF_HORIZON_DAYS: 7,
+                CONF_DAY_ROLLOVER_TIME: "03:30",
+                CONF_PANEL_IDLE_TIMEOUT: 60,
+                CONF_ADMIN_USER_IDS: ["u1", "u2"],
+            }
+        )
+        assert validated[CONF_ADMIN_USER_IDS] == ["u1", "u2"]
+        with pytest.raises(vol.Invalid):
+            schema(
+                {
+                    CONF_HORIZON_DAYS: 7,
+                    CONF_DAY_ROLLOVER_TIME: "03:30",
+                    CONF_PANEL_IDLE_TIMEOUT: 60,
+                    CONF_ADMIN_USER_IDS: ["impostor"],
+                }
+            )
+    finally:
+        _run(database.close())
+
+
+def test_options_flow_submit_applies_selection_to_database(tmp_path) -> None:
+    database = _open_allowlist_db(tmp_path, "picker-apply.db")
+    try:
+        from custom_components.nestquest.admin_allowlist import (
+            list_admin_ids,
+            set_admin_ids,
+        )
+
+        _run(set_admin_ids(database, ["u1"]))
+        entry = _make_entry()
+        flow = _make_flow(
+            entry,
+            users=[_user("u1", "Joshua"), _user("u2", "Sam")],
+            database=database,
+        )
+        result = _run(
+            flow.async_step_init({**VALID_INPUT, CONF_ADMIN_USER_IDS: ["u2"]})
+        )
+        assert result["type"] == "create_entry"
+        assert result["data"][CONF_ADMIN_USER_IDS] == ["u2"]
+        # The allowlist (and the entry's recovery copy) carry the pick.
+        assert await_gather(list_admin_ids(database)) == ["u2"]
+    finally:
+        _run(database.close())
+
+
+def await_gather(coro):
+    return _run(coro)
+
+
+def test_options_flow_empty_selection_refused(tmp_path) -> None:
+    """Saving zero admins is refused: an empty allowlist fails closed."""
+    database = _open_allowlist_db(tmp_path, "picker-empty.db")
+    try:
+        from custom_components.nestquest.admin_allowlist import (
+            list_admin_ids,
+            set_admin_ids,
+        )
+
+        _run(set_admin_ids(database, ["u1"]))
+        entry = _make_entry()
+        flow = _make_flow(
+            entry,
+            users=[_user("u1", "Joshua")],
+            database=database,
+        )
+        result = _run(
+            flow.async_step_init({**VALID_INPUT, CONF_ADMIN_USER_IDS: []})
+        )
+        assert result["type"] == "form"
+        assert result["errors"] == {CONF_ADMIN_USER_IDS: "no_admins"}
+        assert await_gather(list_admin_ids(database)) == ["u1"]
+    finally:
+        _run(database.close())
+
+
+def test_options_flow_unknown_selection_refused(tmp_path) -> None:
+    database = _open_allowlist_db(tmp_path, "picker-unknown.db")
+    try:
+        from custom_components.nestquest.admin_allowlist import (
+            list_admin_ids,
+            set_admin_ids,
+        )
+
+        _run(set_admin_ids(database, ["u1"]))
+        entry = _make_entry()
+        flow = _make_flow(
+            entry,
+            users=[_user("u1", "Joshua")],
+            database=database,
+        )
+        result = _run(
+            flow.async_step_init(
+                {**VALID_INPUT, CONF_ADMIN_USER_IDS: ["impostor"]}
+            )
+        )
+        assert result["type"] == "form"
+        assert result["errors"] == {CONF_ADMIN_USER_IDS: "invalid_admin"}
+        assert await_gather(list_admin_ids(database)) == ["u1"]
+    finally:
+        _run(database.close())
+
+
+def test_options_flow_submit_without_admin_key_keeps_allowlist(tmp_path) -> None:
+    """Raw callers omitting the key (pre-picker payloads) do not
+    touch the allowlist; the CURRENT allowlist is carried forward on
+    the options copy so no removed admin can be resurrected later."""
+    database = _open_allowlist_db(tmp_path, "picker-legacy.db")
+    try:
+        from custom_components.nestquest.admin_allowlist import (
+            list_admin_ids,
+            set_admin_ids,
+        )
+
+        _run(set_admin_ids(database, ["u1"]))
+        entry = _make_entry()
+        flow = _make_flow(
+            entry,
+            users=[_user("u1", "Joshua")],
+            database=database,
+        )
+        result = _run(flow.async_step_init(dict(VALID_INPUT)))
+        assert result["type"] == "create_entry"
+        assert result["data"][CONF_ADMIN_USER_IDS] == ["u1"]
+        assert await_gather(list_admin_ids(database)) == ["u1"]
+    finally:
+        _run(database.close())
+
+
+def test_options_flow_duplicate_selection_refused(tmp_path) -> None:
+    """Duplicate ids surface as a field error, not an unhandled
+    ValueError from the business layer."""
+    database = _open_allowlist_db(tmp_path, "picker-dupe.db")
+    try:
+        from custom_components.nestquest.admin_allowlist import (
+            list_admin_ids,
+            set_admin_ids,
+        )
+
+        _run(set_admin_ids(database, ["u1"]))
+        entry = _make_entry()
+        flow = _make_flow(
+            entry,
+            users=[_user("u1", "Joshua"), _user("u2", "Sam")],
+            database=database,
+        )
+        result = _run(
+            flow.async_step_init(
+                {**VALID_INPUT, CONF_ADMIN_USER_IDS: ["u2", "u2"]}
+            )
+        )
+        assert result["type"] == "form"
+        assert result["errors"] == {CONF_ADMIN_USER_IDS: "invalid_admin"}
+        assert await_gather(list_admin_ids(database)) == ["u1"]
+    finally:
+        _run(database.close())
+
+
+def test_options_flow_omitted_picker_carries_allowlist_forward(
+    tmp_path,
+) -> None:
+    """An omitted picker field must not drop the allowlist copy from
+    the returned options: HA replaces entry.options wholesale, and a
+    later database loss must not resurrect removed admins from the
+    stale config-flow copy in entry.data."""
+    database = _open_allowlist_db(tmp_path, "picker-carry.db")
+    try:
+        from custom_components.nestquest.admin_allowlist import (
+            set_admin_ids,
+        )
+
+        _run(set_admin_ids(database, ["u2"]))
+        entry = _make_entry()
+        flow = _make_flow(
+            entry,
+            users=[_user("u1", "Joshua"), _user("u2", "Sam")],
+            database=database,
+        )
+        result = _run(flow.async_step_init(dict(VALID_INPUT)))
+        assert result["type"] == "create_entry"
+        # The current allowlist rides along on the legacy three-key path.
+        assert result["data"][CONF_ADMIN_USER_IDS] == ["u2"]
+        assert result["data"][CONF_HORIZON_DAYS] == VALID_INPUT[CONF_HORIZON_DAYS]
+    finally:
+        _run(database.close())
