@@ -242,6 +242,33 @@ def test_edit_child_missing_raises(tmp_path) -> None:
     _with_db(tmp_path, "edit-missing.db")(_body)
 
 
+@pytest.mark.parametrize("bad", [True, False, 1.0, "1", None])
+def test_edit_child_non_int_id_rejected(tmp_path, bad) -> None:
+    """SQLite binds bools as integers: True must not address child 1,
+    and floats must not round onto a real profile."""
+    async def _body(database):
+        child = await create_child(database, "Ada")
+        with pytest.raises(ValueError, match="child_id must be an integer"):
+            await edit_child(database, bad, display_name="X")
+        # The refused edit left the profile untouched.
+        assert (await list_children(database))[0].display_name == "Ada"
+        return None
+
+    _with_db(tmp_path, "edit-bad-id.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [True, False, 1.0, "1", None])
+def test_set_child_active_non_int_id_rejected(tmp_path, bad) -> None:
+    async def _body(database):
+        child = await create_child(database, "Ada")
+        with pytest.raises(ValueError, match="child_id must be an integer"):
+            await set_child_active(database, bad, False)
+        assert (await list_children(database))[0].is_active is True
+        return None
+
+    _with_db(tmp_path, "set-active-bad-id.db")(_body)
+
+
 def test_edit_child_name_validation(tmp_path) -> None:
     async def _body(database):
         child = await create_child(database, "Ada")
@@ -518,9 +545,9 @@ def test_reorder_children_duplicate_and_non_int_rejected(tmp_path) -> None:
         second = await create_child(database, "Bo", sort_order=1)
         with pytest.raises(ValueError, match="duplicate child ids"):
             await reorder_children(database, [first.id, first.id, second.id])
-        with pytest.raises(ValueError, match="only integer child ids"):
+        with pytest.raises(ValueError, match="child_id must be an integer"):
             await reorder_children(database, [first.id, second.id, True])
-        with pytest.raises(ValueError, match="only integer child ids"):
+        with pytest.raises(ValueError, match="child_id must be an integer"):
             await reorder_children(database, [first.id, second.id, "3"])
         listed = await list_children(database)
         assert [c.sort_order for c in listed] == [0, 1]
