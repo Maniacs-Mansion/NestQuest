@@ -1,6 +1,6 @@
-"""Typed DAO layer for the schedule_rules and task_definitions tables.
+"""Typed DAO layer for the schedule_rules and quest_definitions tables.
 
-All SQL for ``schedule_rules`` and ``task_definitions`` lives in this
+All SQL for ``schedule_rules`` and ``quest_definitions`` lives in this
 module per the feature guardrails: callers get typed dataclasses back
 and never see raw rows or SQL.  Every method is async and runs through
 :class:`~.db.NestQuestDatabase`, so each statement executes on the HA
@@ -9,16 +9,16 @@ executor and the event loop never blocks.
 Guardrail mapping:
 
 - ``schedule_rules`` deletion is delete-if-unreferenced: a rule still
-  referenced by any task definition is rejected (the done-condition),
+  referenced by any quest definition is rejected (the done-condition),
   not cascaded.
-- ``task_definitions`` has no delete path at all: definitions are
+- ``quest_definitions`` has no delete path at all: definitions are
   deactivated, never hard-deleted, and history must survive.
 - ``set_assignee`` changes future instances only — the DAO writes the
   definition row and nothing else; reassignment never rewrites
   existing instances or completion history (Feature 06 guardrail).
 - Validation of rule well-formedness and child activeness lives partly
   in the schema CHECKs (rule-type coherence) and partly in
-  :meth:`TaskDefinitionsDao.create` (active child, rule existence);
+  :meth:`QuestDefinitionsDao.create` (active child, rule existence);
   no permission checks here, that is the Feature 09 gate's job.
 
 Concurrency: ``delete_rule_if_unreferenced`` performs its reference
@@ -81,8 +81,8 @@ class ScheduleRuleRecord:
 
 
 @dataclass(frozen=True)
-class TaskDefinitionRecord:
-    """One row of ``task_definitions``."""
+class QuestDefinitionRecord:
+    """One row of ``quest_definitions``."""
 
     id: int
     title: str
@@ -119,8 +119,8 @@ def _rule_from_row(row: tuple) -> ScheduleRuleRecord:
     )
 
 
-def _definition_from_row(row: tuple) -> TaskDefinitionRecord:
-    return TaskDefinitionRecord(
+def _definition_from_row(row: tuple) -> QuestDefinitionRecord:
+    return QuestDefinitionRecord(
         id=row[0],
         title=row[1],
         description=row[2],
@@ -258,7 +258,7 @@ class ScheduleRulesDao:
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 row = await self._database.fetch_one(
-                    "SELECT 1 FROM task_definitions "
+                    "SELECT 1 FROM quest_definitions "
                     "WHERE schedule_rule_id = ? LIMIT 1",
                     (rule_id,),
                 )
@@ -271,8 +271,8 @@ class ScheduleRulesDao:
                 return result.rowcount > 0
 
 
-class TaskDefinitionsDao:
-    """Typed async access to the ``task_definitions`` table.
+class QuestDefinitionsDao:
+    """Typed async access to the ``quest_definitions`` table.
 
     No delete method exists: definitions are deactivated via
     :meth:`set_active`, never hard-deleted, so completion history keeps
@@ -293,7 +293,7 @@ class TaskDefinitionsDao:
         icon: str | None = None,
         due_time: str | None = None,
         is_active: bool = True,
-    ) -> TaskDefinitionRecord:
+    ) -> QuestDefinitionRecord:
         """Insert one definition and return the record as stored.
 
         Validates the assignment target as part of the same serialized
@@ -312,7 +312,7 @@ class TaskDefinitionsDao:
                     child_id, schedule_rule_id
                 )
                 result = await self._database.execute(
-                    "INSERT INTO task_definitions (title, description, "
+                    "INSERT INTO quest_definitions (title, description, "
                     "icon, child_id, schedule_rule_id, due_time, "
                     "is_active, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -349,28 +349,28 @@ class TaskDefinitionsDao:
                 f"schedule rule {schedule_rule_id} does not exist"
             )
 
-    async def get(self, definition_id: int) -> TaskDefinitionRecord | None:
+    async def get(self, definition_id: int) -> QuestDefinitionRecord | None:
         """Return the definition with ``definition_id``, or None."""
         row = await self._database.fetch_one(
-            f"SELECT {_DEFINITION_COLUMNS} FROM task_definitions "
+            f"SELECT {_DEFINITION_COLUMNS} FROM quest_definitions "
             "WHERE id = ?",
             (definition_id,),
         )
         return _definition_from_row(row) if row is not None else None
 
-    async def list_by_child(self, child_id: int) -> list[TaskDefinitionRecord]:
+    async def list_by_child(self, child_id: int) -> list[QuestDefinitionRecord]:
         """Return all definitions assigned to ``child_id``, newest first."""
         rows = await self._database.fetch_all(
-            f"SELECT {_DEFINITION_COLUMNS} FROM task_definitions "
+            f"SELECT {_DEFINITION_COLUMNS} FROM quest_definitions "
             "WHERE child_id = ? ORDER BY id DESC",
             (child_id,),
         )
         return [_definition_from_row(row) for row in rows]
 
-    async def list_active(self) -> list[TaskDefinitionRecord]:
+    async def list_active(self) -> list[QuestDefinitionRecord]:
         """Return all active definitions, oldest first (stable order)."""
         rows = await self._database.fetch_all(
-            f"SELECT {_DEFINITION_COLUMNS} FROM task_definitions "
+            f"SELECT {_DEFINITION_COLUMNS} FROM quest_definitions "
             "WHERE is_active = 1 ORDER BY id"
         )
         return [_definition_from_row(row) for row in rows]
@@ -409,7 +409,7 @@ class TaskDefinitionsDao:
             return 0
         parameters.append(definition_id)
         result = await self._database.execute(
-            f"UPDATE task_definitions SET {', '.join(assignments)} "
+            f"UPDATE quest_definitions SET {', '.join(assignments)} "
             "WHERE id = ?",
             tuple(parameters),
         )
@@ -422,7 +422,7 @@ class TaskDefinitionsDao:
         existing instances and completion history untouched.
         """
         result = await self._database.execute(
-            "UPDATE task_definitions SET is_active = ? WHERE id = ?",
+            "UPDATE quest_definitions SET is_active = ? WHERE id = ?",
             (int(is_active), definition_id),
         )
         return result.rowcount
@@ -442,7 +442,7 @@ class TaskDefinitionsDao:
             async with self._database.transaction():
                 await self._validate_assignable_child(child_id)
                 result = await self._database.execute(
-                    "UPDATE task_definitions SET child_id = ? "
+                    "UPDATE quest_definitions SET child_id = ? "
                     "WHERE id = ?",
                     (child_id, definition_id),
                 )

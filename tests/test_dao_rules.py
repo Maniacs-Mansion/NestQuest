@@ -1,4 +1,4 @@
-"""Tests for dao_rules.py: typed DAO for schedule_rules and task_definitions."""
+"""Tests for dao_rules.py: typed DAO for schedule_rules and quest_definitions."""
 from __future__ import annotations
 
 import asyncio
@@ -10,8 +10,8 @@ from custom_components.nestquest.dao_children import ChildrenDao
 from custom_components.nestquest.dao_rules import (
     ScheduleRuleRecord,
     ScheduleRulesDao,
-    TaskDefinitionRecord,
-    TaskDefinitionsDao,
+    QuestDefinitionRecord,
+    QuestDefinitionsDao,
 )
 from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.migrations import apply_migrations
@@ -37,7 +37,7 @@ async def _prepare(path) -> tuple:
     await database.open(path)
     await apply_migrations(database)
     rules = ScheduleRulesDao(database)
-    definitions = TaskDefinitionsDao(database)
+    definitions = QuestDefinitionsDao(database)
     children = ChildrenDao(database)
     child = await children.create("Ada", NOW)
     return database, rules, definitions, children, child
@@ -322,7 +322,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
             await apply_migrations(database)
             children = ChildrenDao(database)
             rules = ScheduleRulesDao(database)
-            definitions = TaskDefinitionsDao(database)
+            definitions = QuestDefinitionsDao(database)
             child = await children.create("Ada", NOW)
             rule_a = await rules.create("daily", "2026-09-14")
 
@@ -335,7 +335,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
                 import custom_components.nestquest.dao_rules as dao_rules
 
                 original_validate = (
-                    dao_rules.TaskDefinitionsDao._validate_assignable
+                    dao_rules.QuestDefinitionsDao._validate_assignable
                 )
                 release = asyncio.Event()
                 started = asyncio.Event()
@@ -353,7 +353,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
                         started.set()
                         await release.wait()
 
-                dao_rules.TaskDefinitionsDao._validate_assignable = (
+                dao_rules.QuestDefinitionsDao._validate_assignable = (
                     _pausing_validate
                 )
                 try:
@@ -373,7 +373,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
                         delete_task, create_task, return_exceptions=True
                     )
                 finally:
-                    dao_rules.TaskDefinitionsDao._validate_assignable = (
+                    dao_rules.QuestDefinitionsDao._validate_assignable = (
                         original_validate
                     )
             else:
@@ -405,7 +405,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
                 assert rule_row is None
             else:
                 # Create won: the delete was rejected, both rows exist.
-                assert isinstance(creation, TaskDefinitionRecord), (
+                assert isinstance(creation, QuestDefinitionRecord), (
                     f"create must succeed, got {creation!r}"
                 )
                 assert rule_row is not None
@@ -425,7 +425,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
 
 
 # ---------------------------------------------------------------------------
-# task_definitions: create / get
+# quest_definitions: create / get
 # ---------------------------------------------------------------------------
 
 
@@ -441,7 +441,7 @@ def test_definition_create_returns_typed_record(tmp_path) -> None:
             icon="mdi:tooth",
             due_time="08:00",
         )
-        assert isinstance(definition, TaskDefinitionRecord)
+        assert isinstance(definition, QuestDefinitionRecord)
         assert definition.title == "Brush teeth"
         assert definition.child_id == child.id
         assert definition.schedule_rule_id == rule.id
@@ -497,7 +497,7 @@ def test_definition_create_unknown_rule_raises_value_error(
 
 
 # ---------------------------------------------------------------------------
-# task_definitions: list by child / list active
+# quest_definitions: list by child / list active
 # ---------------------------------------------------------------------------
 
 
@@ -539,7 +539,7 @@ def test_definition_list_active_excludes_inactive(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# task_definitions: update / set_active / set_assignee
+# quest_definitions: update / set_active / set_assignee
 # ---------------------------------------------------------------------------
 
 
@@ -673,7 +673,7 @@ def test_definition_no_delete_method_exists(tmp_path) -> None:
         methods = {
             name
             for name, _ in inspect.getmembers(
-                TaskDefinitionsDao, inspect.isfunction
+                QuestDefinitionsDao, inspect.isfunction
             )
         }
         assert "delete" not in methods
@@ -748,13 +748,13 @@ def test_definition_set_assignee_leaves_history_rows_alone(
         # Simulate an already-generated instance (materialization owns
         # this table, but its row shape proves reassignment isolation).
         await database.execute(
-            "INSERT INTO task_instances (definition_id, child_id, "
+            "INSERT INTO quest_instances (definition_id, child_id, "
             "due_date, generated_at) VALUES (?, ?, ?, ?)",
             (definition.id, child.id, "2026-09-15", NOW),
         )
         await definitions.set_assignee(definition.id, other.id)
         row = await database.fetch_one(
-            "SELECT child_id FROM task_instances WHERE definition_id = ?",
+            "SELECT child_id FROM quest_instances WHERE definition_id = ?",
             (definition.id,),
         )
         assert row == (child.id,)
@@ -769,7 +769,7 @@ def test_definition_set_assignee_leaves_history_rows_alone(
 
 
 def test_rules_and_definitions_sql_lives_only_in_dao_module() -> None:
-    """Guardrail: schedule_rules/task_definitions SQL may appear only
+    """Guardrail: schedule_rules/quest_definitions SQL may appear only
     in the DAO modules (and the schema DDL declarations).  RECURSIVE
     scan of package and tests, FROM/INTO/UPDATE/DELETE FROM/JOIN
     pattern, with exact repo-relative exclusions justified by role:
@@ -801,7 +801,7 @@ def test_rules_and_definitions_sql_lives_only_in_dao_module() -> None:
     }
     sql_pattern = re.compile(
         r"(FROM|INTO|UPDATE|DELETE\s+FROM|JOIN)\s+[`'\"]*(\[)?"
-        r"(schedule_rules|task_definitions)\b",
+        r"(schedule_rules|quest_definitions)\b",
         re.IGNORECASE,
     )
     offenders: list[str] = []
@@ -813,16 +813,16 @@ def test_rules_and_definitions_sql_lives_only_in_dao_module() -> None:
             if sql_pattern.search(py.read_text()):
                 offenders.append(relative)
     assert offenders == [], (
-        f"SQL touching schedule_rules/task_definitions leaked into: "
+        f"SQL touching schedule_rules/quest_definitions leaked into: "
         f"{offenders}"
     )
 
 
 def test_dao_instances_test_file_uses_dao_not_raw_rules_sql() -> None:
     """Compensating self-scan for the test_dao_instances.py exemption:
-    that file may query task_instances/completion_events raw (its own
+    that file may query quest_instances/completion_events raw (its own
     guard's scope) but must go through the DAO for schedule_rules and
-    task_definitions, except its single sanctioned definition-create
+    quest_definitions, except its single sanctioned definition-create
     helper usage and guard spans.
     """
     import ast
@@ -853,12 +853,12 @@ def test_dao_instances_test_file_uses_dao_not_raw_rules_sql() -> None:
     )
     sql_pattern = re.compile(
         r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM|"
-        r"FROM|JOIN)\s+[`'\"]*(\[)?(schedule_rules|task_definitions)\b",
+        r"FROM|JOIN)\s+[`'\"]*(\[)?(schedule_rules|quest_definitions)\b",
         re.IGNORECASE,
     )
     assert sql_pattern.search(remaining) is None, (
         "test_dao_instances.py must go through the DAO, not raw SQL, "
-        "for schedule_rules/task_definitions"
+        "for schedule_rules/quest_definitions"
     )
 
 
@@ -866,7 +866,7 @@ def test_dao_rules_test_file_uses_dao_not_raw_table_sql() -> None:
     """This test module must exercise the DAO, not raw SQL, for these
     tables.  Exceptions: the guard functions' own spans (their regexes
     mention the names), and the reassignment-isolation test, which
-    legitimately touches task_instances — a table this DAO does not
+    legitimately touches quest_instances — a table this DAO does not
     own — to prove the guardrail that reassignment leaves it alone.
     """
     import ast
@@ -898,7 +898,7 @@ def test_dao_rules_test_file_uses_dao_not_raw_table_sql() -> None:
     )
     sql_pattern = re.compile(
         r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM|"
-        r"FROM|JOIN)\s+[`'\"]*(\[)?(schedule_rules|task_definitions)\b",
+        r"FROM|JOIN)\s+[`'\"]*(\[)?(schedule_rules|quest_definitions)\b",
         re.IGNORECASE,
     )
     assert sql_pattern.search(remaining) is None, (

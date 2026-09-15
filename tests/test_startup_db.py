@@ -18,6 +18,7 @@ from custom_components.nestquest import (
 )
 from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.migrations import (
+    MIGRATIONS,
     VERSION_TABLE,
     apply_migrations,
 )
@@ -114,12 +115,13 @@ def test_missing_file_opens_fresh(tmp_path) -> None:
     assert not db_path.exists()
     database = _run(_async_open_database(_make_hass_mock(), db_path))
     try:
-        # The file was created fresh and migrations stamped version 1.
+        # The file was created fresh and migrations stamped the
+        # latest schema version.
         assert db_path.exists()
         row = _run(
             database.fetch_one(f"SELECT version FROM {VERSION_TABLE}")
         )
-        assert row == (1,)
+        assert row == (len(MIGRATIONS),)
     finally:
         _run(database.close())
 
@@ -151,7 +153,7 @@ def test_valid_file_opens_and_migrations_noop(tmp_path) -> None:
         row = _run(
             database.fetch_one(f"SELECT version FROM {VERSION_TABLE}")
         )
-        assert row == (1,)
+        assert row == (len(MIGRATIONS),)
     finally:
         _run(database.close())
     # Opening a valid file must not rewrite it (the no-op path).
@@ -401,7 +403,7 @@ async def test_setup_with_missing_file_creates_and_loads(
         row = await database.fetch_one(
             f"SELECT version FROM {VERSION_TABLE}"
         )
-        assert row == (1,)
+        assert row == (len(MIGRATIONS),)
     finally:
         await database.close()
     assert await async_unload_entry(hass, entry) is True

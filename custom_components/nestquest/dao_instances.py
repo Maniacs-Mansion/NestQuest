@@ -1,4 +1,4 @@
-"""Typed DAO layer for task_instances and the append-only completion_events.
+"""Typed DAO layer for quest_instances and the append-only completion_events.
 
 All SQL for these tables lives in this module per the feature
 guardrails: callers get typed dataclasses back and never see raw rows
@@ -14,7 +14,7 @@ separate reversal event, and instance state derives from the latest
 event.  A package-wide guard test (bottom of the test module) keeps
 mutation SQL for this table out of every other module.
 
-Upsert semantics: ``TaskInstancesDao.upsert`` is idempotent on
+Upsert semantics: ``QuestInstancesDao.upsert`` is idempotent on
 (definition_id, due_date) — re-running materialization for a date
 whose instance already exists updates nothing that matters
 (child_id/due_time are refreshed only in the degenerate re-generation
@@ -82,8 +82,8 @@ def _next_day_start(date_str: str) -> str:
 
 
 @dataclass(frozen=True)
-class TaskInstanceRecord:
-    """One row of ``task_instances``."""
+class QuestInstanceRecord:
+    """One row of ``quest_instances``."""
 
     id: int
     definition_id: int
@@ -121,8 +121,8 @@ EVENT_COMPLETED = "completed"
 EVENT_UNCOMPLETED = "uncompleted"
 
 
-def _instance_from_row(row: tuple) -> TaskInstanceRecord:
-    return TaskInstanceRecord(
+def _instance_from_row(row: tuple) -> QuestInstanceRecord:
+    return QuestInstanceRecord(
         id=row[0],
         definition_id=row[1],
         child_id=row[2],
@@ -145,8 +145,8 @@ def _event_from_row(row: tuple) -> CompletionEventRecord:
     )
 
 
-class TaskInstancesDao:
-    """Typed async access to the ``task_instances`` table."""
+class QuestInstancesDao:
+    """Typed async access to the ``quest_instances`` table."""
 
     def __init__(self, database: NestQuestDatabase) -> None:
         self._database = database
@@ -159,7 +159,7 @@ class TaskInstancesDao:
         generated_at: str,
         *,
         due_time: str | None = None,
-    ) -> TaskInstanceRecord:
+    ) -> QuestInstanceRecord:
         """Create the dated instance for (definition_id, due_date) idempotently.
 
         Running materialization twice for the same definition/date
@@ -207,16 +207,16 @@ class TaskInstancesDao:
                         f"{today!r}"
                     )
                 definition = await self._database.fetch_one(
-                    "SELECT child_id FROM task_definitions WHERE id = ?",
+                    "SELECT child_id FROM quest_definitions WHERE id = ?",
                     (definition_id,),
                 )
                 if definition is None:
                     raise ValueError(
-                        f"task definition {definition_id} does not exist"
+                        f"quest definition {definition_id} does not exist"
                     )
                 if definition[0] != child_id:
                     raise ValueError(
-                        f"task definition {definition_id} is assigned to "
+                        f"quest definition {definition_id} is assigned to "
                         f"child {definition[0]}, not {child_id}; instance "
                         "must carry the definition's assignee"
                     )
@@ -227,7 +227,7 @@ class TaskInstancesDao:
                     raise ValueError(f"child {child_id} does not exist")
                 existing = await self._database.fetch_one(
                     "SELECT 1 FROM completion_events "
-                    "WHERE instance_id = (SELECT id FROM task_instances "
+                    "WHERE instance_id = (SELECT id FROM quest_instances "
                     "WHERE definition_id = ? AND due_date = ?)",
                     (definition_id, due_date),
                 )
@@ -238,7 +238,7 @@ class TaskInstancesDao:
                         "event and is immutable; it cannot be regenerated"
                     )
                 await self._database.execute(
-                    "INSERT INTO task_instances (definition_id, child_id, "
+                    "INSERT INTO quest_instances (definition_id, child_id, "
                     "due_date, due_time, generated_at) "
                     "VALUES (?, ?, ?, ?, ?) "
                     "ON CONFLICT (definition_id, due_date) DO UPDATE SET "
@@ -259,30 +259,30 @@ class TaskInstancesDao:
 
     async def get(
         self, definition_id: int, due_date: str
-    ) -> TaskInstanceRecord | None:
+    ) -> QuestInstanceRecord | None:
         """Return the instance for (definition_id, due_date), or None."""
         row = await self._database.fetch_one(
-            f"SELECT {_INSTANCE_COLUMNS} FROM task_instances "
+            f"SELECT {_INSTANCE_COLUMNS} FROM quest_instances "
             "WHERE definition_id = ? AND due_date = ?",
             (definition_id, due_date),
         )
         return _instance_from_row(row) if row is not None else None
 
-    async def get_by_id(self, instance_id: int) -> TaskInstanceRecord | None:
+    async def get_by_id(self, instance_id: int) -> QuestInstanceRecord | None:
         """Return the instance with ``instance_id``, or None."""
         row = await self._database.fetch_one(
-            f"SELECT {_INSTANCE_COLUMNS} FROM task_instances WHERE id = ?",
+            f"SELECT {_INSTANCE_COLUMNS} FROM quest_instances WHERE id = ?",
             (instance_id,),
         )
         return _instance_from_row(row) if row is not None else None
 
     async def list_by_child_and_date(
         self, child_id: int, due_date: str
-    ) -> list[TaskInstanceRecord]:
+    ) -> list[QuestInstanceRecord]:
         """Return the child's instances due exactly on ``due_date``."""
         _validate_date(due_date, "due_date")
         rows = await self._database.fetch_all(
-            f"SELECT {_INSTANCE_COLUMNS} FROM task_instances "
+            f"SELECT {_INSTANCE_COLUMNS} FROM quest_instances "
             "WHERE child_id = ? AND due_date = ? ORDER BY id",
             (child_id, due_date),
         )
@@ -293,7 +293,7 @@ class TaskInstancesDao:
         child_id: int,
         range_start: str,
         range_end: str,
-    ) -> list[TaskInstanceRecord]:
+    ) -> list[QuestInstanceRecord]:
         """Return the child's instances with due_date in the closed range."""
         _validate_date(range_start, "range_start")
         _validate_date(range_end, "range_end")
@@ -303,7 +303,7 @@ class TaskInstancesDao:
                 f"{range_end!r} < {range_start!r}"
             )
         rows = await self._database.fetch_all(
-            f"SELECT {_INSTANCE_COLUMNS} FROM task_instances "
+            f"SELECT {_INSTANCE_COLUMNS} FROM quest_instances "
             "WHERE child_id = ? AND due_date >= ? AND due_date <= ? "
             "ORDER BY due_date, id",
             (child_id, range_start, range_end),
@@ -338,10 +338,10 @@ class TaskInstancesDao:
                 today = datetime.date.today().isoformat()
                 effective_cutoff = max(cutoff_date, today)
                 result = await self._database.execute(
-                    "DELETE FROM task_instances WHERE definition_id = ? "
+                    "DELETE FROM quest_instances WHERE definition_id = ? "
                     "AND due_date >= ? AND NOT EXISTS ("
                     "  SELECT 1 FROM completion_events "
-                    "  WHERE instance_id = task_instances.id"
+                    "  WHERE instance_id = quest_instances.id"
                     ")",
                     (definition_id, effective_cutoff),
                 )
@@ -418,16 +418,16 @@ class CompletionEventsDao:
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 instance = await self._database.fetch_one(
-                    "SELECT child_id FROM task_instances WHERE id = ?",
+                    "SELECT child_id FROM quest_instances WHERE id = ?",
                     (instance_id,),
                 )
                 if instance is None:
                     raise ValueError(
-                        f"task instance {instance_id} does not exist"
+                        f"quest instance {instance_id} does not exist"
                     )
                 if instance[0] != child_id:
                     raise ValueError(
-                        f"task instance {instance_id} belongs to child "
+                        f"quest instance {instance_id} belongs to child "
                         f"{instance[0]}, not {child_id}"
                     )
                 child = await self._database.fetch_one(
@@ -493,7 +493,7 @@ class CompletionEventsDao:
             )
         if due_date_scope:
             predicate = (
-                "SELECT id FROM task_instances WHERE child_id = ? "
+                "SELECT id FROM quest_instances WHERE child_id = ? "
                 "AND due_date >= ? AND due_date <= ?"
             )
             parameters: list[object] = [child_id, range_start, range_end]

@@ -247,12 +247,12 @@ async def test_setup_applies_all_v1_tables(hass, make_entry) -> None:
     rows = await database.fetch_all(
         "SELECT name FROM sqlite_master WHERE type = 'table' "
         "AND name IN ('children', 'admin_users', 'schedule_rules', "
-        "'task_definitions') ORDER BY name"
+        "'quest_definitions') ORDER BY name"
     )
     assert [row[0] for row in rows] == [
         "admin_users",
         "children",
+        "quest_definitions",
         "schedule_rules",
-        "task_definitions",
     ]
     await async_unload_entry(hass, entry)
