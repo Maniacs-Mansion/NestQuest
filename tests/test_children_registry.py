@@ -320,6 +320,68 @@ def test_edit_child_rename_to_own_name_casing_alone_warns_not(
     _with_db(tmp_path, "edit-rename-self.db")(_body)
 
 
+def test_create_child_concurrent_same_name_still_warns(tmp_path) -> None:
+    """Racing creates of the same normalised name cannot slip through
+    unlogged: the scan and INSERT are serialized on the connection
+    lock, so the second create sees the first's committed row and
+    warns.  Deterministic gate on task A's INSERT while task B queues
+    behind the lock.  Without the lock, B's scan would run before A's
+    INSERT commits and no warning would fire."""
+    async def _main():
+        armed = {"active": False, "gated": False}
+        gate_open = asyncio.Event()
+        a_started = asyncio.Event()
+        hass = _gated_hass(armed, gate_open, a_started)
+        database = NestQuestDatabase(hass)
+        await database.open(tmp_path / "create-race.db")
+        try:
+            await apply_migrations(database)
+            logger = logging.getLogger(
+                "custom_components.nestquest.children"
+            )
+            seen: list[logging.LogRecord] = []
+
+            class _Capture(logging.Handler):
+                def emit(self, record: logging.LogRecord) -> None:
+                    seen.append(record)
+
+            handler = _Capture()
+            logger.addHandler(handler)
+            try:
+                armed["active"] = True
+                task_a = asyncio.ensure_future(
+                    create_child(database, "Ada")
+                )
+                await a_started.wait()
+                armed["active"] = False
+                task_b = asyncio.ensure_future(
+                    create_child(database, " ada ")
+                )
+                await asyncio.sleep(0)
+                gate_open.set()
+                first, second = await asyncio.gather(task_a, task_b)
+            finally:
+                logger.removeHandler(handler)
+
+            # Both creates land; the duplicate is allowed.
+            assert first.display_name == "Ada"
+            assert second.display_name == "ada"
+            names = [c.display_name for c in await list_children(database)]
+            assert names == ["Ada", "ada"]
+            # Exactly one warning: B's scan saw A's committed row.
+            warnings = [
+                r for r in seen if "duplicates existing child" in r.getMessage()
+            ]
+            assert len(warnings) == 1, (
+                "the queued duplicate create must warn exactly once"
+            )
+            assert "Ada" in warnings[0].getMessage()
+        finally:
+            await database.close()
+
+    _run(_main())
+
+
 def test_edit_child_case_only_edit_colliding_with_other_child_warns(
     tmp_path, caplog
 ) -> None:

@@ -116,23 +116,27 @@ async def create_child(
 
     The display name is required, trimmed, and rejected when empty.
     A duplicate display name (case-insensitive) is allowed but logged
-    as a warning.  The duplicate scan and the INSERT are deliberately
-    not one transaction: the warning is advisory, so serialising
-    creates to protect it would buy nothing.
+    as a warning.  The scan and the INSERT run inside the
+    connection-scoped lock shared with the DAOs, so a concurrent
+    create of the same normalised name queues behind the first insert
+    and sees it — the duplicate still warns; it can never slip through
+    unlogged.
     """
     name = _validate_text(display_name, "display_name", required=True)
     assert name is not None
     colour_value = _validate_text(colour, "colour")
     avatar_value = _validate_text(avatar_ref, "avatar_ref")
     order = _validate_sort_order(sort_order)
-    await _warn_on_duplicate_name(database, name)
-    return await ChildrenDao(database).create(
-        name,
-        _now_stamp(),
-        colour=colour_value,
-        avatar_ref=avatar_value,
-        sort_order=order,
-    )
+    async with _connection_lock(database):
+        await _warn_on_duplicate_name(database, name)
+        created = await ChildrenDao(database).create(
+            name,
+            _now_stamp(),
+            colour=colour_value,
+            avatar_ref=avatar_value,
+            sort_order=order,
+        )
+    return created
 
 
 async def edit_child(
