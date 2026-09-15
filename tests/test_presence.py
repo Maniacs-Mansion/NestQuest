@@ -718,3 +718,97 @@ def test_preview_always_absent_child_raises_not_loops() -> None:
     )
     with pytest.raises(ValueError, match="not present on any"):
         engine.next_present_dates(1, "2026-01-05", 2)
+
+
+# ---------------------------------------------------------------------------
+# The week-parity regression guard (Feature 05, D-004)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("year", "length", "reason"),
+    [
+        (2020, 366, "leap year, 53 ISO weeks"),
+        (2015, 365, "365 days, 53 ISO weeks"),
+    ],
+)
+def test_custody_rotation_walks_full_years_without_inversion(
+    year, length, reason
+) -> None:
+    """REGRESSION GUARD for the week-parity bug (D-004).
+
+    Walks a two-week alternating rotation day by day across a FULL
+    {length}-day year ({year} — {reason}) plus the following January,
+    asserting the present/absent sequence never breaks or inverts at
+    any point, including January 1st.  ISO week parity silently flips
+    at the ISO-week rollover (the Monday on or after January 4th —
+    January 4th itself in both of these years, which end ISO week 53)
+    and would invert every custody schedule there; anchor-date
+    arithmetic must not.
+    """.format(length=length, year=year, reason=reason)
+    if year == 2020:
+        assert datetime.date(2020, 12, 31).isocalendar()[1] == 53
+        assert (datetime.date(2021, 1, 1) - datetime.date(2020, 1, 1)).days == 366
+    if year == 2015:
+        assert datetime.date(2015, 12, 31).isocalendar()[1] == 53
+        assert (datetime.date(2016, 1, 1) - datetime.date(2015, 1, 1)).days == 365
+
+    # The first Monday of January (2020: Jan 6; 2015: Jan 5) — an
+    # on-week anchor, whatever the year.
+    anchor = datetime.date(year, 1, 1) + datetime.timedelta(
+        days=(7 - datetime.date(year, 1, 1).weekday()) % 7
+    )
+    assert anchor.weekday() == 0
+    rotation = PresenceSchedule(
+        1, 2, anchor, {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()}
+    )
+    engine = PresenceEngine({1: rotation})
+
+    # Walk EVERY day of the year.  The expectation is derived from the
+    # anchor's 7-day BLOCKS, not from the engine: each block of seven
+    # days starting at the anchor is uniformly present (even block
+    # index) or uniformly absent (odd block index), and consecutive
+    # blocks alternate.  A parity-based implementation resets on
+    # January 1st and breaks either the uniformity of a block or the
+    # alternation between them — most visibly in the block spanning
+    # December 31st -> January 1st of a 53-ISO-week year.
+    # Walk the FULL year AND the first two weeks of the following
+    # January: the block spanning December 31st -> January 1st must
+    # stay uniform ACROSS the boundary, so an implementation that
+    # resets when the target year differs from the anchor's fails
+    # here (the post-boundary days of its final block disagree).
+    first_day = datetime.date(year, 1, 1)
+    last_day = datetime.date(year + 1, 1, 14)
+    days_seen = 0
+    day = first_day
+    while day <= last_day:
+        days_since_anchor = (day - anchor).days
+        block = days_since_anchor // 7  # which 7-day block of the cycle
+        block_start = anchor + datetime.timedelta(days=block * 7)
+        # Uniformity within the block: every day of this 7-day block
+        # must answer exactly like the block's first day.
+        expected = ((block % 2) == 0)
+        assert engine.is_present(1, day) is expected, (
+            f"{day} (block {block}, day offset "
+            f"{(day - block_start).days}): present="
+            f"{engine.is_present(1, day)}, expected {expected}"
+        )
+        # The block's OTHER days must agree — including the days on
+        # the far side of January 1st.
+        for offset in range(7):
+            block_day = block_start + datetime.timedelta(days=offset)
+            if first_day <= block_day <= last_day:
+                assert engine.is_present(1, block_day) is expected, (
+                    f"{block_day} disagrees with its block {block}"
+                )
+        days_seen += 1
+        day += datetime.timedelta(days=1)
+    # The walked year itself contributed exactly its full length.
+    year_days = sum(
+        1
+        for offset in range((last_day - first_day).days + 1)
+        if (first_day + datetime.timedelta(days=offset)).year == year
+    )
+    assert year_days == length, (
+        f"walked {year_days} days of {year}, expected {length}"
+    )
