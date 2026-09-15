@@ -640,13 +640,15 @@ def test_preview_returns_the_next_present_days_of_a_known_pattern() -> None:
         datetime.date(2026, 1, 9),
     ]
     preview = engine.next_present_dates(1, "2026-01-07", 6)
+    # Week 0 runs Mon Jan 5 .. Sun Jan 11 (all present); the away week
+    # (Jan 12-18) is skipped; week 2 resumes Jan 19.
     assert preview == [
         datetime.date(2026, 1, 7),
         datetime.date(2026, 1, 8),
         datetime.date(2026, 1, 9),
-        datetime.date(2026, 1, 14),
-        datetime.date(2026, 1, 15),
-        datetime.date(2026, 1, 16),
+        datetime.date(2026, 1, 10),
+        datetime.date(2026, 1, 11),
+        datetime.date(2026, 1, 19),
     ]
 
 
