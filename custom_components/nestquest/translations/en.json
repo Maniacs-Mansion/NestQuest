@@ -22,13 +22,16 @@
         "data": {
           "horizon_days": "Generation horizon (days)",
           "day_rollover_time": "Day rollover time (HH:MM)",
-          "panel_idle_timeout": "Panel idle timeout (seconds)"
+          "panel_idle_timeout": "Panel idle timeout (seconds)",
+          "admin_user_ids": "Admin users (parents)"
         }
       }
     },
     "errors": {
       "invalid": "Invalid value.",
-      "invalid_time": "Time must use 24-hour HH:MM format."
+      "invalid_time": "Time must use 24-hour HH:MM format.",
+      "no_admins": "Select at least one admin user; an empty allowlist would lock everyone out.",
+      "invalid_admin": "Invalid admin selection."
     }
   }
 }

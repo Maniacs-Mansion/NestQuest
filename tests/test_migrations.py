@@ -17,7 +17,10 @@ from custom_components.nestquest.migrations import (
     apply_migrations,
     read_schema_version,
 )
-from custom_components.nestquest.schema import SCHEMA_V1_STATEMENTS
+from custom_components.nestquest.schema import (
+    SCHEMA_V1_STATEMENTS,
+    SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL,
+)
 
 
 def _run(coro):
@@ -62,10 +65,12 @@ def _counts(database) -> dict[str, int]:
         "children",
         "admin_users",
         "schedule_rules",
-        "task_definitions",
+        "quest_definitions",
+        "quest_definition_assignees",
+        "quest_definition_windows",
         "presence_schedules",
         "presence_overrides",
-        "task_instances",
+        "quest_instances",
         "completion_events",
     )
     counts = {}
@@ -76,16 +81,16 @@ def _counts(database) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# Fresh file: version 0 -> version 1
+# Fresh file: version 0 -> latest version
 # ---------------------------------------------------------------------------
 
 
-def test_fresh_file_migrates_to_version_1(tmp_path) -> None:
+def test_fresh_file_migrates_to_latest_version(tmp_path) -> None:
     database = _open_db(tmp_path / "fresh.db")
     try:
         final = _migrate(database)
-        assert final == 1
-        assert _version(database) == 1
+        assert final == len(MIGRATIONS)
+        assert _version(database) == len(MIGRATIONS)
     finally:
         _run(database.close())
 
@@ -98,10 +103,12 @@ def test_fresh_file_migration_creates_all_v1_tables(tmp_path) -> None:
             "children",
             "admin_users",
             "schedule_rules",
-            "task_definitions",
+            "quest_definitions",
+            "quest_definition_assignees",
+            "quest_definition_windows",
             "presence_schedules",
             "presence_overrides",
-            "task_instances",
+            "quest_instances",
             "completion_events",
             VERSION_TABLE,
         }
@@ -135,9 +142,496 @@ def test_empty_version_table_reads_as_version_0(tmp_path) -> None:
         _run(database.close())
 
 
-def test_migration_1_is_the_full_v1_ddl() -> None:
+def test_migration_list_shape() -> None:
+    """Migration 1 is the v1 DDL; 2 and 3 are callable steps.
+
+    Nothing ever shipped, so migration 1 was rewritten pre-release
+    (D-007) to create the quest_* tables directly; migration 2 exists
+    for dev databases stamped version 1 by the pre-rename runner,
+    migration 3 brings pre-D-008 definitions to the multi-assignee
+    model, migration 4 adds the windows table, migration 5 rebuilds
+    quest_instances onto the widened (definition, child, date, window)
+    key, and migration 6 adds actor_child_id to completion_events.
+    """
     assert MIGRATIONS[0] == SCHEMA_V1_STATEMENTS
-    assert len(MIGRATIONS) == 1
+    assert callable(MIGRATIONS[1])
+    assert callable(MIGRATIONS[2])
+    assert MIGRATIONS[3] == SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL
+    assert callable(MIGRATIONS[4])
+    assert callable(MIGRATIONS[5])
+    assert len(MIGRATIONS) == 6
+
+
+# ---------------------------------------------------------------------------
+# Legacy dev database: task_* tables stamped version 1 -> quest_*
+# ---------------------------------------------------------------------------
+
+
+_LEGACY_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS children (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        display_name TEXT NOT NULL,
+        colour TEXT,
+        avatar_ref TEXT,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS admin_users (
+        ha_user_id TEXT PRIMARY KEY NOT NULL,
+        added_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS schedule_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rule_type TEXT NOT NULL,
+        interval INTEGER NOT NULL DEFAULT 1,
+        weekday_set TEXT,
+        day_of_month INTEGER,
+        nth_weekday INTEGER,
+        month INTEGER,
+        start_date TEXT NOT NULL,
+        end_date TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS task_definitions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        description TEXT,
+        icon TEXT,
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        schedule_rule_id INTEGER NOT NULL REFERENCES schedule_rules(id),
+        due_time TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS presence_schedules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        child_id INTEGER NOT NULL UNIQUE REFERENCES children(id),
+        cycle_length_weeks INTEGER NOT NULL,
+        anchor_date TEXT NOT NULL,
+        pattern TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS presence_overrides (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        is_present INTEGER NOT NULL,
+        note TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS task_instances (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        definition_id INTEGER NOT NULL REFERENCES task_definitions(id),
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        due_date TEXT NOT NULL,
+        due_time TEXT,
+        generated_at TEXT NOT NULL,
+        UNIQUE (definition_id, due_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS completion_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        instance_id INTEGER NOT NULL REFERENCES task_instances(id),
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        event_type TEXT NOT NULL,
+        actor_source TEXT NOT NULL,
+        actor_user_id TEXT,
+        occurred_at TEXT NOT NULL,
+        was_on_time INTEGER
+    )
+    """,
+]
+
+
+def _seed_legacy_database(database) -> None:
+    """Create a database indistinguishable from a pre-rename dev file.
+
+    Applies the legacy task_* DDL, seeds one row in every renamed
+    table, and stamps version 1 exactly the way the old runner did.
+    """
+    for sql in _LEGACY_DDL:
+        _run(database.execute(sql))
+    _run(database.execute(VERSION_TABLE_DDL))
+    _run(
+        database.execute(
+            f"INSERT INTO {VERSION_TABLE} (id, version) VALUES (1, 1)"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO children (display_name, created_at) "
+            "VALUES ('Ada', '2026-09-14T00:00:00+00:00')"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO schedule_rules (rule_type, start_date) "
+            "VALUES ('daily', '2026-09-14')"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO task_definitions (title, child_id, "
+            "schedule_rule_id, created_at) "
+            "VALUES ('Dishes', 1, 1, '2026-09-14T00:00:00+00:00')"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO task_instances (definition_id, child_id, "
+            "due_date, generated_at) "
+            "VALUES (1, 1, '2026-09-15', '2026-09-14T00:00:00+00:00')"
+        )
+    )
+
+
+def test_legacy_task_tables_are_renamed_and_keep_their_rows(tmp_path) -> None:
+    database = _open_db(tmp_path / "legacy.db")
+    try:
+        _seed_legacy_database(database)
+        final = _migrate(database)
+        assert final == len(MIGRATIONS)
+        assert _version(database) == len(MIGRATIONS)
+        tables = _tables(database)
+        assert "task_definitions" not in tables
+        assert "task_instances" not in tables
+        assert {"quest_definitions", "quest_instances"} <= tables
+        # Every seeded row survived the rename.
+        assert _run(database.fetch_one("SELECT COUNT(*) FROM children")) == (1,)
+        assert (
+            _run(
+                database.fetch_one(
+                    "SELECT title FROM quest_definitions WHERE id = 1"
+                )
+            )
+            == ("Dishes",)
+        )
+        assert (
+            _run(
+                database.fetch_one(
+                    "SELECT due_date FROM quest_instances WHERE id = 1"
+                )
+            )
+            == ("2026-09-15",)
+        )
+        # Migration 3 moved the legacy single-assignee column into the
+        # assignees table: the definition kept its child, the column is
+        # gone.
+        assignees = _run(
+            database.fetch_one(
+                "SELECT child_id FROM quest_definition_assignees "
+                "WHERE definition_id = 1"
+            )
+        )
+        assert assignees == (1,)
+        columns = _run(
+            database.fetch_all("PRAGMA table_info(quest_definitions)")
+        )
+        assert "child_id" not in {row[1] for row in columns}
+        # The untouched completion_events table still exists and is empty.
+        assert "completion_events" in tables
+        assert (
+            _run(database.fetch_one("SELECT COUNT(*) FROM completion_events"))
+            == (0,)
+        )
+    finally:
+        _run(database.close())
+
+
+def test_renamed_instances_foreign_key_follows_the_rename(tmp_path) -> None:
+    database = _open_db(tmp_path / "legacy-fk.db")
+    try:
+        _seed_legacy_database(database)
+        _migrate(database)
+        fks = _run(database.fetch_all("PRAGMA foreign_key_list(quest_instances)"))
+        referenced = {row[2] for row in fks}
+        assert "quest_definitions" in referenced
+        assert "task_definitions" not in referenced
+        # The renamed table is live: a new row validates its FKs.
+        _run(
+            database.execute(
+                "INSERT INTO children (display_name, created_at) "
+                "VALUES ('Ben', '2026-09-14T00:00:00+00:00')"
+            )
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            _run(
+                database.execute(
+                    "INSERT INTO quest_instances (definition_id, child_id, "
+                    "due_date, generated_at) "
+                    "VALUES (999, 2, '2026-09-16', "
+                    "'2026-09-14T00:00:00+00:00')"
+                )
+            )
+    finally:
+        _run(database.close())
+
+
+def test_legacy_rename_is_idempotent_across_restarts(tmp_path) -> None:
+    database = _open_db(tmp_path / "legacy-restart.db")
+    try:
+        _seed_legacy_database(database)
+        _migrate(database)
+        final = _migrate(database)
+        assert final == len(MIGRATIONS)
+        tables = _tables(database)
+        assert "quest_definitions" in tables
+        assert "task_definitions" not in tables
+        assert (
+            _run(database.fetch_one("SELECT COUNT(*) FROM quest_definitions"))
+            == (1,)
+        )
+    finally:
+        _run(database.close())
+
+
+def test_fresh_database_never_holds_legacy_table_names(tmp_path) -> None:
+    database = _open_db(tmp_path / "fresh-legacy.db")
+    try:
+        _migrate(database)
+        tables = _tables(database)
+        assert not any(name.startswith("task_") for name in tables)
+        assert _version(database) == len(MIGRATIONS)
+    finally:
+        _run(database.close())
+
+
+# ---------------------------------------------------------------------------
+# Pre-D-008 database: quest_definitions with child_id stamped version 2
+# ---------------------------------------------------------------------------
+
+_V2_DEFINITIONS_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS quest_definitions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        description TEXT,
+        icon TEXT,
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        schedule_rule_id INTEGER NOT NULL REFERENCES schedule_rules(id),
+        due_time TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+    )
+    """,
+]
+
+_V2_INSTANCES_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS quest_instances (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        definition_id INTEGER NOT NULL REFERENCES quest_definitions(id),
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        due_date TEXT NOT NULL,
+        due_time TEXT,
+        generated_at TEXT NOT NULL,
+        UNIQUE (definition_id, due_date)
+    )
+    """,
+]
+
+_V2_EVENTS_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS completion_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        instance_id INTEGER NOT NULL REFERENCES quest_instances(id),
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        event_type TEXT NOT NULL,
+        actor_source TEXT NOT NULL,
+        actor_user_id TEXT,
+        occurred_at TEXT NOT NULL,
+        was_on_time INTEGER
+    )
+    """,
+]
+
+
+def _seed_v2_multi_assignee_upgrade(database) -> None:
+    """Create a database shaped like a post-rename, pre-D-008 dev file.
+
+    Fresh quest_* tables — but quest_definitions still carries the
+    single child_id column and no assignees table exists — stamped at
+    version 2, with definition and instance rows that must survive.
+    """
+    # Freeze the version-2 shape: definitions carry child_id, the
+    # instance table has no window column, and the assignees/windows
+    # tables do not exist yet — everything else matches the current DDL.
+    _v2_replaced = (
+        "quest_definitions ",
+        "quest_definition_assignees ",
+        "quest_definition_windows ",
+        "quest_instances ",
+        "completion_events ",
+    )
+    for sql in SCHEMA_V1_STATEMENTS:
+        if any(name in sql for name in _v2_replaced):
+            continue
+        _run(database.execute(sql))
+    for sql in _V2_DEFINITIONS_DDL + _V2_INSTANCES_DDL + _V2_EVENTS_DDL:
+        _run(database.execute(sql))
+    _run(database.execute(VERSION_TABLE_DDL))
+    _run(
+        database.execute(
+            f"INSERT INTO {VERSION_TABLE} (id, version) VALUES (1, 2)"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO children (display_name, created_at) "
+            "VALUES ('Ada', '2026-09-14T00:00:00+00:00')"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO children (display_name, created_at) "
+            "VALUES ('Bo', '2026-09-14T00:00:00+00:00')"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO schedule_rules (rule_type, start_date) "
+            "VALUES ('daily', '2026-09-14')"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO quest_definitions (title, child_id, "
+            "schedule_rule_id, created_at) "
+            "VALUES ('Dishes', 2, 1, '2026-09-14T00:00:00+00:00')"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO quest_instances (definition_id, child_id, "
+            "due_date, generated_at) "
+            "VALUES (1, 2, '2026-09-15', '2026-09-14T00:00:00+00:00')"
+        )
+    )
+    # One legacy panel event and one legacy admin event: the panel one
+    # must backfill actor_child_id to its own child; the admin one must
+    # stay NULL.
+    _run(
+        database.execute(
+            "INSERT INTO completion_events (instance_id, child_id, "
+            "event_type, actor_source, occurred_at, was_on_time) "
+            "VALUES (1, 2, 'completed', 'panel', "
+            "'2026-09-15T10:00:00+00:00', 1)"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO completion_events (instance_id, child_id, "
+            "event_type, actor_source, actor_user_id, occurred_at, "
+            "was_on_time) "
+            "VALUES (1, 2, 'uncompleted', 'user', 'parent-1', "
+            "'2026-09-15T11:00:00+00:00', 1)"
+        )
+    )
+
+
+def test_v2_definitions_rebuilt_to_multi_assignee(tmp_path) -> None:
+    database = _open_db(tmp_path / "v2-upgrade.db")
+    try:
+        _seed_v2_multi_assignee_upgrade(database)
+        final = _migrate(database)
+        assert final == len(MIGRATIONS)
+        assert _version(database) == len(MIGRATIONS)
+        # The definition row survived and lost its child_id column.
+        row = _run(
+            database.fetch_one(
+                "SELECT title, schedule_rule_id, is_active "
+                "FROM quest_definitions WHERE id = 1"
+            )
+        )
+        assert row == ("Dishes", 1, 1)
+        columns = _run(
+            database.fetch_all("PRAGMA table_info(quest_definitions)")
+        )
+        assert "child_id" not in {c[1] for c in columns}
+        # The single assignee moved into the assignees table.
+        assignees = _run(
+            database.fetch_all(
+                "SELECT definition_id, child_id "
+                "FROM quest_definition_assignees ORDER BY child_id"
+            )
+        )
+        assert assignees == [(1, 2)]
+        # The instance survived the rebuild, pinned to the migrated
+        # window, still referencing the definition.
+        instance = _run(
+            database.fetch_one(
+                "SELECT definition_id, child_id, window, due_date "
+                "FROM quest_instances WHERE id = 1"
+            )
+        )
+        assert instance == (1, 2, "morning", "2026-09-15")
+        # The rebuilt instance table carries the widened unique key.
+        index_rows = _run(
+            database.fetch_all(
+                "PRAGMA index_list(quest_instances)"
+            )
+        )
+        unique_columns = []
+        for index_row in index_rows:
+            if index_row[2]:  # unique flag
+                info = _run(
+                    database.fetch_all(
+                        f"PRAGMA index_info('{index_row[1]}')"
+                    )
+                )
+                unique_columns.append([col[2] for col in info])
+        assert [
+            "definition_id", "child_id", "due_date", "window"
+        ] in unique_columns
+        # The completion events survived the actor_child_id rebuild:
+        # the panel row backfilled to its own child, the admin row
+        # stayed NULL, and ids are preserved.
+        events = _run(
+            database.fetch_all(
+                "SELECT id, event_type, actor_source, actor_child_id "
+                "FROM completion_events ORDER BY id"
+            )
+        )
+        assert events == [
+            (1, "completed", "panel", 2),
+            (2, "uncompleted", "user", None),
+        ]
+        columns = _run(
+            database.fetch_all("PRAGMA table_info(completion_events)")
+        )
+        assert "actor_child_id" in {c[1] for c in columns}
+        # No dangling references anywhere.
+        assert _run(database.fetch_all("PRAGMA foreign_key_check")) == []
+        # The rebuilt table is live for the new model: a definition
+        # insert carries no child column at all.
+        _run(
+            database.execute(
+                "INSERT INTO quest_definitions (title, schedule_rule_id, "
+                "created_at) VALUES ('Laundry', 1, "
+                "'2026-09-14T00:00:00+00:00')"
+            )
+        )
+        _run(
+            database.execute(
+                "INSERT INTO quest_definition_assignees "
+                "(definition_id, child_id) VALUES (2, 1)"
+            )
+        )
+    finally:
+        _run(database.close())
 
 
 # ---------------------------------------------------------------------------
@@ -162,8 +656,8 @@ def test_second_run_applies_nothing_and_keeps_rows(tmp_path) -> None:
             )
         )
         final = _migrate(database)
-        assert final == 1
-        assert _version(database) == 1
+        assert final == len(MIGRATIONS)
+        assert _version(database) == len(MIGRATIONS)
         assert _counts(database)["children"] == 1
         assert _counts(database)["admin_users"] == 1
     finally:
@@ -228,7 +722,7 @@ def test_noop_run_is_logged_at_debug_level(caplog, tmp_path) -> None:
         with caplog.at_level(logging.DEBUG, logger="custom_components.nestquest.migrations"):
             _migrate(database)
         assert any(
-            "already at version 1" in r.getMessage()
+            f"already at version {len(MIGRATIONS)}" in r.getMessage()
             for r in caplog.records
         )
     finally:
@@ -241,33 +735,47 @@ def test_noop_run_is_logged_at_debug_level(caplog, tmp_path) -> None:
 
 
 def _failing_migrations(prior_statements: list[str]) -> list[list[str]]:
-    """Two-migration list where migration 2 fails mid-application."""
-    return [
-        prior_statements,
+    """Migration list where the LAST entry fails mid-application.
+
+    Sized one entry longer than the real MIGRATIONS and padded with
+    harmless no-op fillers, so a fully-migrated database (already at
+    len(MIGRATIONS)) still has exactly one pending migration — the
+    failing one — to attempt.
+    """
+    steps: list[list[str]] = [prior_statements]
+    steps += [
+        [
+            f"CREATE TABLE IF NOT EXISTS filler_{index} "
+            "(id INTEGER PRIMARY KEY)"
+        ]
+        for index in range(len(MIGRATIONS) - 1)
+    ]
+    steps.append(
         [
             "CREATE TABLE IF NOT EXISTS later_table (id INTEGER PRIMARY KEY)",
             "CREATE TABLE broken (",
-        ],
-    ]
+        ]
+    )
+    return steps
 
 
 def test_failing_migration_rolls_back_to_prior_version(tmp_path) -> None:
     database = _open_db(tmp_path / "rollback.db")
     try:
-        # Manually simulate a database at version 1: apply migration 1's
-        # statements directly and stamp version 1 through the runner.
+        # Manually simulate a fully-migrated database: run the real
+        # migration list, which stamps the latest version.
         _migrate(database)
         version_row = _run(
             database.fetch_one(f"SELECT version FROM {VERSION_TABLE}")
         )
-        assert version_row == (1,)
+        assert version_row == (len(MIGRATIONS),)
 
         with pytest.raises(sqlite3.OperationalError):
             _migrate(database, _failing_migrations(SCHEMA_V1_STATEMENTS))
 
         # Version stamp unchanged, statements from the failed migration
         # absent, and the v1 tables untouched.
-        assert _version(database) == 1
+        assert _version(database) == len(MIGRATIONS)
         assert "later_table" not in _tables(database)
         assert _counts(database)["children"] == 0
         assert _counts(database)["completion_events"] == 0
@@ -275,21 +783,24 @@ def test_failing_migration_rolls_back_to_prior_version(tmp_path) -> None:
         _run(database.close())
 
 
-def test_failing_migration_on_fresh_file_leaves_version_0(tmp_path) -> None:
+def test_failing_migration_on_fresh_file_leaves_last_good_version(
+    tmp_path,
+) -> None:
     database = _open_db(tmp_path / "fresh-rollback.db")
     try:
-        # The fresh file still reaches migration 2 (the failing one):
-        # migration 1 commits, stamping version 1, before migration 2
-        # fails and rolls back.  The run aborts at version 1 — the last
-        # fully-applied migration — not at version 0.
+        # The fresh file reaches the failing migration (the last one):
+        # earlier migrations commit and stamp before it fails and rolls
+        # back.  The run aborts at the last fully-applied migration —
+        # not at version 0.
+        broken = _failing_migrations(SCHEMA_V1_STATEMENTS)
         with pytest.raises(sqlite3.OperationalError):
-            _migrate(database, _failing_migrations(SCHEMA_V1_STATEMENTS))
-        assert _version(database) == 1
-        # Migration 2's tables must not survive the failed attempt.
+            _migrate(database, broken)
+        assert _version(database) == len(broken) - 1
+        # The failing migration's tables must not survive the attempt.
         assert "later_table" not in _tables(database)
         # Migration 1's tables do: it committed before the failure.
         assert "children" in _tables(database)
-        assert "task_instances" in _tables(database)
+        assert "quest_instances" in _tables(database)
     finally:
         _run(database.close())
 
@@ -302,12 +813,12 @@ def test_failed_migration_can_be_retried_after_fix(tmp_path) -> None:
         with pytest.raises(sqlite3.OperationalError):
             _migrate(database, broken)
         # "Fix" the migration and retry: it now applies cleanly.
-        broken[1] = [
+        broken[-1] = [
             "CREATE TABLE IF NOT EXISTS later_table (id INTEGER PRIMARY KEY)"
         ]
         final = _migrate(database, broken)
-        assert final == 2
-        assert _version(database) == 2
+        assert final == len(broken)
+        assert _version(database) == len(broken)
         assert "later_table" in _tables(database)
     finally:
         _run(database.close())
@@ -575,7 +1086,7 @@ async def test_setup_entry_migrates_fresh_database(hass, make_entry) -> None:
 
     entry = await _setup_entry(hass, make_entry(), hass.registry)
     database = entry.runtime_data.database
-    assert await read_schema_version(database) == 1
+    assert await read_schema_version(database) == len(MIGRATIONS)
     # The v1 tables exist because the runner applied migration 1.
     names = {
         row[0]
@@ -626,7 +1137,7 @@ async def test_options_reload_reopens_and_rechecks_version(
     database_b = entry_reloaded.runtime_data.database
     assert database_b is not database_a
     try:
-        assert await read_schema_version(database_b) == 1
+        assert await read_schema_version(database_b) == len(MIGRATIONS)
         row = await database_b.fetch_one("SELECT COUNT(*) FROM children")
         assert row == (1,)
     finally:

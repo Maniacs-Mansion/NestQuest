@@ -186,6 +186,15 @@ class PresenceOverridesDao:
         The child must exist (validated atomically under the
         connection lock).  Date shape is validated strictly, and the
         schema CHECK rejects end < start.
+
+        Overlap policy (Feature 05): an override for a child may not
+        overlap another override of the SAME child — two different
+        present/absent answers for one date are unresolvable.  The
+        overlap check (inclusive boundaries) runs inside the same
+        transaction as the INSERT, so a racing create cannot slip a
+        conflicting override between the check and the write; a
+        conflict raises ValueError naming the conflicting override's
+        id and range.
         """
         _validate_date(start_date, "start_date")
         _validate_date(end_date, "end_date")
@@ -196,6 +205,29 @@ class PresenceOverridesDao:
                 )
                 if child is None:
                     raise ValueError(f"child {child_id} does not exist")
+                # Only a well-ordered range has overlap semantics:
+                # inverted ranges fall through to the INSERT and hit
+                # the schema's end>=start CHECK, preserving the
+                # IntegrityError contract the matrix tests rely on.
+                if end_date >= start_date:
+                    conflicting = await self._database.fetch_one(
+                        f"SELECT {_OVERRIDE_COLUMNS} "
+                        "FROM presence_overrides "
+                        "WHERE child_id = ? AND end_date >= ? "
+                        "AND start_date <= ? ORDER BY id LIMIT 1",
+                        (child_id, start_date, end_date),
+                    )
+                else:
+                    conflicting = None
+                if conflicting is not None:
+                    conflict = _override_from_row(conflicting)
+                    raise ValueError(
+                        f"override for child {child_id} "
+                        f"[{start_date}, {end_date}] overlaps existing "
+                        f"override {conflict.id} "
+                        f"[{conflict.start_date}, {conflict.end_date}] "
+                        f"(is_present={conflict.is_present})"
+                    )
                 result = await self._database.execute(
                     "INSERT INTO presence_overrides (child_id, "
                     "start_date, end_date, is_present, note) "

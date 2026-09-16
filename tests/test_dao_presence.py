@@ -620,3 +620,172 @@ def test_dao_presence_test_file_uses_dao_not_raw_table_sql() -> None:
     assert sql_pattern.search(remaining) is None, (
         "tests must go through the DAO, not raw SQL, for these tables"
     )
+
+# ---------------------------------------------------------------------------
+# Presence overrides: overlap rejection naming the conflict
+# ---------------------------------------------------------------------------
+
+
+def test_override_create_round_trip_single_and_range(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        single = await overrides.create(
+            child.id, "2026-07-20", "2026-07-20", False
+        )
+        assert (single.start_date, single.end_date) == ("2026-07-20",) * 2
+        span = await overrides.create(
+            child.id, "2026-08-01", "2026-08-05", True, note="traded week"
+        )
+        assert span.is_present is True
+        assert span.note == "traded week"
+        # Distinct, non-overlapping ranges coexist.
+        listed = await overrides.list_by_child_and_range(
+            child.id, "2026-01-01", "2026-12-31"
+        )
+        assert [row.id for row in listed] == [single.id, span.id]
+        return listed
+
+    _with_db(tmp_path, "override-round-trip.db")(_body)
+
+
+def test_override_overlap_rejected_and_names_the_conflict(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        existing = await overrides.create(
+            child.id, "2026-07-20", "2026-07-24", False, note="holiday"
+        )
+        for start, end in (
+            ("2026-07-24", "2026-07-26"),  # touches the existing end
+            ("2026-07-18", "2026-07-20"),  # touches the existing start
+            ("2026-07-21", "2026-07-22"),  # fully inside
+            ("2026-07-01", "2026-07-30"),  # fully covering
+        ):
+            with pytest.raises(ValueError, match="overlaps existing"):
+                await overrides.create(
+                    child.id, start, end, True, note="swap"
+                )
+        # The error NAMES the conflicting override (id + its range).
+        with pytest.raises(
+            ValueError,
+            match=(
+                rf"override {existing.id} "
+                rf"\[2026-07-20, 2026-07-24\].*is_present=False"
+            ),
+        ):
+            await overrides.create(child.id, "2026-07-22", "2026-07-22", True)
+        # Nothing was written by any rejected attempt.
+        listed = await overrides.list_by_child_and_range(
+            child.id, "2026-01-01", "2026-12-31"
+        )
+        assert [row.id for row in listed] == [existing.id]
+        return existing
+
+    _with_db(tmp_path, "override-overlap.db")(_body)
+
+
+def test_override_overlap_is_per_child(tmp_path) -> None:
+    """Different children's overrides may cover the same dates: the
+    conflict rule is per child."""
+    async def _body(database, schedules, overrides, children, child):
+        other = await children.create("Bo", NOW)
+        await overrides.create(child.id, "2026-07-20", "2026-07-24", False)
+        twin = await overrides.create(
+            other.id, "2026-07-20", "2026-07-24", True
+        )
+        assert twin.child_id == other.id
+        listed = await overrides.list_by_child_and_range(
+            other.id, "2026-01-01", "2026-12-31"
+        )
+        assert [row.id for row in listed] == [twin.id]
+        return twin
+
+    _with_db(tmp_path, "override-per-child.db")(_body)
+
+
+def test_override_remove_then_recreate_overlapping(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        first = await overrides.create(
+            child.id, "2026-07-20", "2026-07-24", False
+        )
+        assert await overrides.delete(first.id) is True
+        assert await overrides.delete(first.id) is False
+        replacement = await overrides.create(
+            child.id, "2026-07-20", "2026-07-24", True, note="swap back"
+        )
+        assert replacement.is_present is True
+        return replacement
+
+    _with_db(tmp_path, "override-recreate.db")(_body)
+
+
+def test_override_create_racing_conflicts_serialize(tmp_path) -> None:
+    """Two racing creates for the same child and dates: exactly one
+    lands, the other is rejected with the overlap error.  DETERMINISTIC
+    gate: task A is paused at its INSERT — inside its open transaction,
+    after its overlap probe — so task B is created while A provably
+    holds the connection lock and must queue; B then re-runs the probe
+    against A's committed row and is rejected."""
+    import asyncio as asyncio_module
+    from unittest.mock import MagicMock
+
+    async def _main():
+        from custom_components.nestquest.dao_children import ChildrenDao
+        from custom_components.nestquest.dao_presence import (
+            PresenceOverridesDao,
+        )
+        from custom_components.nestquest.db import NestQuestDatabase
+        from custom_components.nestquest.migrations import apply_migrations
+
+        armed = {"active": False, "gated": False}
+        gate_open = asyncio_module.Event()
+        a_started = asyncio_module.Event()
+
+        hass = MagicMock()
+
+        async def _gated_executor(fn, *args):
+            if armed["active"]:
+                # Gate the FIRST _execute after arming: task A's INSERT,
+                # which runs inside its open transaction (BEGIN already
+                # executed) after the overlap probe.
+                if getattr(fn, "__name__", "") == "_execute" and not armed["gated"]:
+                    armed["gated"] = True
+                    a_started.set()
+                    await gate_open.wait()
+            return fn(*args)
+
+        hass.async_add_executor_job = _gated_executor
+        database = NestQuestDatabase(hass)
+        await database.open(tmp_path / "override-race.db")
+        try:
+            await apply_migrations(database)
+            children = ChildrenDao(database)
+            overrides = PresenceOverridesDao(database)
+            child = await children.create("Ada", NOW)
+
+            armed["active"] = True
+            task_a = asyncio_module.ensure_future(
+                overrides.create(child.id, "2026-07-20", "2026-07-24", True)
+            )
+            await a_started.wait()
+            armed["active"] = False
+            task_b = asyncio_module.ensure_future(
+                overrides.create(child.id, "2026-07-22", "2026-07-26", False)
+            )
+            await asyncio_module.sleep(0)
+            gate_open.set()
+            record_a, error_b = await asyncio_module.gather(
+                task_a, task_b, return_exceptions=True
+            )
+            assert isinstance(record_a, object) and not isinstance(
+                record_a, BaseException
+            ), f"A must land: {record_a!r}"
+            assert isinstance(error_b, ValueError), (
+                f"B must be rejected with the overlap error: {error_b!r}"
+            )
+            assert "overlaps existing" in str(error_b)
+            listed = await overrides.list_by_child_and_range(
+                child.id, "2026-01-01", "2026-12-31"
+            )
+            assert [row.id for row in listed] == [record_a.id]
+        finally:
+            await database.close()
+
+    asyncio.new_event_loop().run_until_complete(_main())
