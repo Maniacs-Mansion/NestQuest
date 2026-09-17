@@ -248,7 +248,7 @@ async def _materialize_with_change(
     seen = {"n": 0}
 
     async def _gated(self, definition_id, child_id, due_date, generated_at,
-                     *, window):
+                     *, window, due_time=None):
         seen["n"] += 1
         if seen["n"] == 1:
             seen["first"] = (definition_id, child_id, window)
@@ -256,7 +256,7 @@ async def _materialize_with_change(
             await release.wait()
         return await original_upsert(
             self, definition_id, child_id, due_date, generated_at,
-            window=window,
+            window=window, due_time=due_time,
         )
 
     QuestInstancesDao.upsert_if_valid = _gated
@@ -450,6 +450,44 @@ def test_materialize_uses_single_presence_snapshot_mid_walk(tmp_path) -> None:
         return count
 
     _with_db(tmp_path, "materialize-presence-snapshot.db")(_body)
+
+
+def test_materialize_stores_snapshot_due_time_not_live(tmp_path) -> None:
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=2)).isoformat()
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            [("morning", "09:00")],
+        )
+
+        async def _edit_due_time():
+            await QuestDefinitionsDao(database).upsert_window(
+                created.definition.id, "morning", due_time="10:15"
+            )
+
+        # The window's due_time is edited to 10:15 between the input
+        # snapshot and the insert.  The walk must store the SNAPSHOT's
+        # 09:00, not the live 10:15 — the batch is governed entirely by
+        # the coherent snapshot it read.
+        count = await _materialize_with_change(
+            database, start_iso, end_iso, _edit_due_time
+        )
+        assert count == 3
+        records = await QuestInstancesDao(database).list_by_date_range(
+            child.id, start_iso, end_iso
+        )
+        assert len(records) == 3
+        assert {r.due_time for r in records} == {"09:00"}
+        return records
+
+    _with_db(tmp_path, "materialize-snapshot-due-time.db")(_body)
 
 
 def test_materialize_honours_overrides(tmp_path) -> None:

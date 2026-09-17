@@ -285,6 +285,7 @@ class QuestInstancesDao:
         generated_at: str,
         *,
         window: str,
+        due_time: str | None = None,
     ) -> QuestInstanceRecord | None:
         """Insert one dated instance iff its tuple is still materializable.
 
@@ -301,9 +302,14 @@ class QuestInstancesDao:
         - the (definition, child) assignment link still exists (a removed
           assignment is skipped);
         - the window is still declared on the definition (a removed window
-          is skipped), and its CURRENT ``due_time`` is read from the live
-          row so a due-time edit landing after the snapshot is honored,
-          never the stale snapshot value.
+          is skipped).
+
+        The live checks above ONLY decide whether the tuple is still
+        valid; they never read the window's ``due_time``.  The instance is
+        written with the caller-supplied ``due_time`` — the value snapshotted
+        from the coherent input read — so a window-time edit landing
+        mid-walk cannot leak a newer time into a batch that was already
+        snapshotted against older rule/presence/assignment decisions.
 
         Returns the stored instance, or ``None`` when a precondition
         failed — the tuple no longer materializable, which the walk SKIPS
@@ -330,8 +336,8 @@ class QuestInstancesDao:
                         f"instances are never generated in the past: "
                         f"due_date {due_date!r} is before today {today!r}"
                     )
-                valid = await self._database.fetch_one(
-                    "SELECT w.due_time FROM quest_definitions d "
+                still_valid = await self._database.fetch_one(
+                    "SELECT 1 FROM quest_definitions d "
                     "JOIN quest_definition_assignees a "
                     "ON a.definition_id = d.id "
                     "JOIN children c ON c.id = a.child_id "
@@ -341,11 +347,10 @@ class QuestInstancesDao:
                     "AND d.is_active = 1 AND c.is_active = 1 LIMIT 1",
                     (definition_id, child_id, window),
                 )
-                if valid is None:
+                if still_valid is None:
                     # A config change invalidated the tuple since the
                     # snapshot: skip it rather than abort the batch.
                     return None
-                due_time = valid[0]
                 existing = await self._database.fetch_one(
                     "SELECT 1 FROM completion_events "
                     "WHERE instance_id = (SELECT id FROM quest_instances "

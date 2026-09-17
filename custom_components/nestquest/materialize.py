@@ -159,6 +159,7 @@ async def materialize(
                         iso,
                         generated_at,
                         window=window.window,
+                        due_time=window.due_time,
                     )
                     if written is not None:
                         count += 1
