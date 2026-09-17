@@ -12,15 +12,25 @@ from custom_components.nestquest.dao_instances import (
     QuestInstancesDao,
 )
 from custom_components.nestquest.dao_presence import PresenceSchedulesDao
-from custom_components.nestquest.dao_rules import QuestDefinitionsDao
+from custom_components.nestquest.dao_rules import (
+    QuestDefinitionsDao,
+    schedule_rule_to_storage,
+)
 from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.materialize import materialize
+from custom_components.nestquest.materialize import (
+    materialize,
+    regenerate_for_definition,
+)
 from custom_components.nestquest.migrations import apply_migrations
 from custom_components.nestquest.quest_definitions import (
     create_quest_definition,
     edit_quest_definition,
 )
-from custom_components.nestquest.recurrence import RuleType, ScheduleRule
+from custom_components.nestquest.recurrence import (
+    RuleType,
+    ScheduleRule,
+    occurs_on,
+)
 
 
 def _run(coro):
@@ -643,3 +653,123 @@ def test_materialize_skips_inactive_definitions(tmp_path) -> None:
         return count
 
     _with_db(tmp_path, "materialize-inactive.db")(_body)
+
+
+def test_regenerate_for_definition_rebuilds_horizon_and_preserves_completed(
+    tmp_path,
+) -> None:
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+
+        today = datetime.date.today()
+        horizon_end = today + datetime.timedelta(days=14)
+        start_iso = today.isoformat()
+
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            [("morning", "09:00")],
+        )
+        definition_id = created.definition.id
+
+        dao = QuestInstancesDao(database)
+        await materialize(database, start_iso, horizon_end.isoformat())
+        baseline = await dao.list_by_date_range(
+            child.id, start_iso, horizon_end.isoformat()
+        )
+        assert len(baseline) == 15
+
+        # Park a completion on tomorrow.  The rule rewrite below gives the
+        # new weekly shape a weekday two days out, so tomorrow never fires
+        # under it — only the completion's immutability keeps the row.
+        completed_due = (today + datetime.timedelta(days=1)).isoformat()
+        completed = next(r for r in baseline if r.due_date == completed_due)
+        await CompletionEventsDao(database).append(
+            completed.id,
+            child.id,
+            "completed",
+            "user",
+            f"{completed_due}T08:00:00+00:00",
+            True,
+            actor_user_id="user-1",
+        )
+
+        # Rewrite the rule through the DAO (not the business layer) so
+        # this test drives ``regenerate_for_definition`` directly.
+        new_weekday = (today + datetime.timedelta(days=2)).weekday()
+        weekly = ScheduleRule(
+            rule_type=RuleType.WEEKLY,
+            weekday_set={new_weekday},
+            start_date=start_iso,
+        )
+        await QuestDefinitionsDao(database).edit_definition(
+            definition_id, rule=schedule_rule_to_storage(weekly)
+        )
+
+        await regenerate_for_definition(database, definition_id)
+
+        records = await dao.list_by_date_range(
+            child.id, start_iso, horizon_end.isoformat()
+        )
+        by_due = {r.due_date: r for r in records}
+
+        # The completed row survived untouched (same physical id).
+        assert by_due[completed_due].id == completed.id
+
+        # Every other horizon day matches the new weekly rule exactly.
+        for offset in range(15):
+            day = today + datetime.timedelta(days=offset)
+            iso = day.isoformat()
+            if iso == completed_due:
+                assert iso in by_due
+            else:
+                assert (iso in by_due) == occurs_on(weekly, day)
+        return None
+
+    _with_db(tmp_path, "regenerate.db")(_body)
+
+
+def test_edit_quest_definition_regenerates_future_instances(tmp_path) -> None:
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+
+        today = datetime.date.today()
+        horizon_end = today + datetime.timedelta(days=14)
+        start_iso = today.isoformat()
+
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            ["morning"],
+        )
+        definition_id = created.definition.id
+
+        dao = QuestInstancesDao(database)
+        await materialize(database, start_iso, horizon_end.isoformat())
+
+        # The business-layer edit wires regeneration: no explicit
+        # ``regenerate_for_definition`` call is made here.
+        new_weekday = (today + datetime.timedelta(days=2)).weekday()
+        weekly = ScheduleRule(
+            rule_type=RuleType.WEEKLY,
+            weekday_set={new_weekday},
+            start_date=start_iso,
+        )
+        await edit_quest_definition(database, definition_id, rule=weekly)
+
+        records = await dao.list_by_date_range(
+            child.id, start_iso, horizon_end.isoformat()
+        )
+        by_due = {r.due_date: r for r in records}
+        for offset in range(15):
+            day = today + datetime.timedelta(days=offset)
+            assert (day.isoformat() in by_due) == occurs_on(weekly, day)
+        return None
+
+    _with_db(tmp_path, "edit-regenerates.db")(_body)

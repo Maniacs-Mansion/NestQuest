@@ -58,6 +58,7 @@ from .dao_rules import (
     schedule_rule_to_storage,
 )
 from .db import NestQuestDatabase
+from .materialize import regenerate_for_definition
 from .recurrence import ScheduleRule, occurs_on
 
 
@@ -341,6 +342,8 @@ async def edit_quest_definition(
         schedule_rule_storage_from_record(snapshot.rule)
     )
 
+    await regenerate_for_definition(database, definition_id)
+
     return CreatedQuestDefinition(
         definition=snapshot.definition,
         rule=decoded_rule,
@@ -371,7 +374,7 @@ async def assign_child(
     _validate_child_id(child_id)
     dao = QuestDefinitionsDao(database)
     try:
-        return await dao.add_assignee(definition_id, child_id)
+        assignees = await dao.add_assignee(definition_id, child_id)
     except ValueError as error:
         # The DAO names only the child/definition; re-raise so the
         # public contract names the field the caller actually passed.
@@ -381,6 +384,8 @@ async def assign_child(
         if message.startswith("quest definition "):
             raise ValueError(f"definition_id: {message}") from error
         raise
+    await regenerate_for_definition(database, definition_id)
+    return assignees
 
 
 async def unassign_child(
@@ -405,7 +410,9 @@ async def unassign_child(
         raise ValueError(
             f"definition_id: quest definition {definition_id} does not exist"
         )
-    return await dao.remove_assignee(definition_id, child_id)
+    removed = await dao.remove_assignee(definition_id, child_id)
+    await regenerate_for_definition(database, definition_id)
+    return removed
 
 
 async def set_quest_definition_active(
@@ -457,6 +464,7 @@ async def set_quest_definition_active(
     rule = schedule_rule_from_storage(
         schedule_rule_storage_from_record(rule_record)
     )
+    await regenerate_for_definition(database, definition_id)
     return CreatedQuestDefinition(
         definition=updated,
         rule=rule,
