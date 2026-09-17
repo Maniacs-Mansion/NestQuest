@@ -84,6 +84,31 @@ def _now_stamp() -> str:
     )
 
 
+def _resolve_horizon_days(horizon_days: int | None) -> int:
+    """Validate a regeneration horizon and return the resolved day count.
+
+    ``None`` resolves to :data:`~.const.DEFAULT_HORIZON_DAYS`.  A bool
+    (SQLite would happily bind ``True``/``False`` onto an int), a non-int,
+    or a value below 1 raises ValueError naming the field — the validation
+    runs BEFORE any future-instance delete so a malformed horizon can never
+    delete rows it then fails to rebuild.  A negative horizon would
+    otherwise delete first and only then be rejected by
+    :func:`materialize`'s inverted-range check; ``0``/``False`` would
+    silently shrink the window to a single day.
+    """
+    if horizon_days is None:
+        return DEFAULT_HORIZON_DAYS
+    if (
+        isinstance(horizon_days, bool)
+        or not isinstance(horizon_days, int)
+        or horizon_days < 1
+    ):
+        raise ValueError(
+            f"horizon_days must be a positive integer, got {horizon_days!r}"
+        )
+    return horizon_days
+
+
 def _decode_rule(snapshot) -> ScheduleRule:
     """Decode a snapshot's rule record back into a ScheduleRule.
 
@@ -255,11 +280,12 @@ async def regenerate_for_definition(
     so a household time zone behind the host around midnight stays
     consistent.  ``horizon_days`` sizes the re-materialization window;
     when omitted it falls back to :data:`~.const.DEFAULT_HORIZON_DAYS`.
+    A bool, non-int, or sub-1 value raises ValueError BEFORE any delete.
     Returns the number of instances the re-materialization
     upserted across the whole snapshot (idempotent — other active
     definitions' tuples refresh in place, never duplicate).
     """
-    horizon = DEFAULT_HORIZON_DAYS if horizon_days is None else horizon_days
+    horizon = _resolve_horizon_days(horizon_days)
     today_date = _resolve_today(today)
     start_date = today_date.isoformat()
     end_date = (
@@ -323,14 +349,15 @@ async def regenerate_for_child(
     into the delete cutoff and the re-materialization for the same
     host-vs-HA time-zone consistency.  ``horizon_days`` sizes the
     re-materialization window; when omitted it falls back to
-    :data:`~.const.DEFAULT_HORIZON_DAYS`.  Returns the number of instances
+    :data:`~.const.DEFAULT_HORIZON_DAYS`.  A bool, non-int, or sub-1 value
+    raises ValueError BEFORE any delete.  Returns the number of instances
     the re-materialization upserted for the child across the whole
     snapshot.
     """
     if isinstance(child_id, bool) or not isinstance(child_id, int):
         raise ValueError(f"child_id must be an integer, got {child_id!r}")
 
-    horizon = DEFAULT_HORIZON_DAYS if horizon_days is None else horizon_days
+    horizon = _resolve_horizon_days(horizon_days)
     today_date = _resolve_today(today)
 
     instances = QuestInstancesDao(database)
