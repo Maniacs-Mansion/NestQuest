@@ -1621,3 +1621,113 @@ def test_list_definitions_firing_on_rejects_malformed_date(tmp_path, bad) -> Non
         return None
 
     _with_db(tmp_path, "list-firing-on-bad-date.db")(_body)
+
+
+# ---------------------------------------------------------------------------
+# full-lifecycle integration: one definition through every operation
+# ---------------------------------------------------------------------------
+
+
+def test_full_lifecycle_never_touches_instances_or_history(tmp_path) -> None:
+    """End-to-end lifecycle on one definition writes only the four
+    definition tables; ``quest_instances`` and ``completion_events`` are
+    left exactly as they were at every stage.
+
+    A real instance and completion event are seeded before the lifecycle
+    begins, so each stage is checked against pre-existing data being
+    mutated (not an empty table staying empty): create -> edit
+    rule/windows -> assign a second child -> unassign the original child
+    -> deactivate -> reactivate.
+    """
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database,
+            "Brush teeth",
+            _daily_rule(),
+            [child.id],
+            [("morning", "07:00")],
+        )
+        definition_id = created.definition.id
+
+        instances = QuestInstancesDao(database)
+        events = CompletionEventsDao(database)
+        instance = await instances.upsert(
+            definition_id, child.id, _today_iso(), NOW, window="morning"
+        )
+        event = await events.append(
+            instance.id,
+            child.id,
+            "completed",
+            "user",
+            NOW,
+            True,
+            actor_user_id="admin-1",
+        )
+        instance_count = await database.fetch_one(
+            "SELECT COUNT(*) FROM quest_instances"
+        )
+        event_count = await database.fetch_one(
+            "SELECT COUNT(*) FROM completion_events"
+        )
+
+        async def _assert_history_untouched():
+            assert await instances.get_by_id(instance.id) == instance
+            assert await events.list_by_instance(instance.id) == [event]
+            assert await database.fetch_one(
+                "SELECT COUNT(*) FROM quest_instances"
+            ) == instance_count
+            assert await database.fetch_one(
+                "SELECT COUNT(*) FROM completion_events"
+            ) == event_count
+
+        await _assert_history_untouched()
+
+        # Edit rule and windows together; the definition's rule row is
+        # rewritten in place and its window set replaced.
+        edited = await edit_quest_definition(
+            database,
+            definition_id,
+            rule=ScheduleRule(
+                rule_type=RuleType.WEEKLY,
+                weekday_set={1, 3},
+                start_date="2026-09-14",
+            ),
+            windows=[("morning", "08:00"), ("evening", "19:30")],
+        )
+        assert edited.rule == ScheduleRule(
+            rule_type=RuleType.WEEKLY,
+            weekday_set={1, 3},
+            start_date="2026-09-14",
+        )
+        by_name = {w.window: w.due_time for w in edited.windows}
+        assert by_name == {"morning": "08:00", "evening": "19:30"}
+        await _assert_history_untouched()
+
+        # Assign a second child: multi-assignee, both present.
+        bo = await children.create("Bo", NOW)
+        roster = await assign_child(database, definition_id, bo.id)
+        assert sorted(c.id for c in roster) == sorted([child.id, bo.id])
+        await _assert_history_untouched()
+
+        # Unassign the original child: only the link drops.
+        assert await unassign_child(database, definition_id, child.id) is True
+        assert [
+            c.id for c in await definitions.list_assignees(definition_id)
+        ] == [bo.id]
+        await _assert_history_untouched()
+
+        # Deactivate, then reactivate: the definition survives both.
+        deactivated = await set_quest_definition_active(
+            database, definition_id, False
+        )
+        assert deactivated.definition.is_active is False
+        await _assert_history_untouched()
+        reactivated = await set_quest_definition_active(
+            database, definition_id, True
+        )
+        assert reactivated.definition.is_active is True
+        await _assert_history_untouched()
+
+        return reactivated
+
+    _with_db(tmp_path, "full-lifecycle.db")(_body)
