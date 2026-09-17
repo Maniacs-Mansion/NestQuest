@@ -423,11 +423,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ):
                 if remove_listener is None:
                     continue
-                result = remove_listener()
-                if inspect.isawaitable(result):
-                    await result
-        except BaseException as err:
-            unload_error = err
+                try:
+                    result = remove_listener()
+                    if inspect.isawaitable(result):
+                        await result
+                except BaseException as err:
+                    # Cancel EVERY listener even when an earlier remover
+                    # raises: a skipped remover would leave a daily
+                    # callback firing against a closed database after
+                    # unload.  The first error is retained and re-raised
+                    # only after both removers (and the DB close) ran.
+                    if unload_error is None:
+                        unload_error = err
         finally:
             database = getattr(runtime_data, "database", None)
             if database is not None:

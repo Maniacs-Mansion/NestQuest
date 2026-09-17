@@ -241,6 +241,33 @@ async def test_unload_closes_database_even_when_listener_removal_raises() -> Non
     assert database.connected is False, "database leaked despite remover error"
     assert entry.runtime_data is None
     assert DOMAIN not in hass.data
+    assert hass.time_change.size == 0, "time-change listener leaked"
+
+
+async def test_unload_cancels_time_listener_even_when_update_remover_raises() -> None:
+    """A raising update-listener remover must not skip the time-change cancel.
+
+    Both removers are independent: the update-listener remover raising must
+    still cancel the daily time-change callback, whose action would otherwise
+    fire after unload against a closed database.
+    """
+
+    class _RemoveBoom(Exception):
+        pass
+
+    def _remover():
+        raise _RemoveBoom()
+
+    entry = make_config_entry(entry_id="update-boom-time-cancel")
+    entry.add_update_listener = lambda listener: _remover
+    hass, _registry = make_hass()
+    await async_setup_entry(hass, entry)
+    assert hass.time_change.size == 1
+    with pytest.raises(_RemoveBoom):
+        await async_unload_entry(hass, entry)
+    assert hass.time_change.size == 0, "time-change listener not cancelled"
+    assert entry.runtime_data is None
+    assert DOMAIN not in hass.data
 
 
 async def test_setup_registers_day_rollover_listener(hass, make_entry) -> None:
