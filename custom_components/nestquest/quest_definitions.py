@@ -271,6 +271,7 @@ async def edit_quest_definition(
     icon: str | None | object = _UNSET,
     rule: ScheduleRule | object = _UNSET,
     windows: list[str | tuple[str, str | None]] | object = _UNSET,
+    today: datetime.date | None = None,
 ) -> CreatedQuestDefinition:
     """Edit a quest definition's metadata, rule and windows atomically.
 
@@ -292,6 +293,13 @@ async def edit_quest_definition(
     so the returned bundle is a consistent edit snapshot.  Edits change
     future instances only; no ``quest_instances`` or
     ``completion_events`` row is touched.
+
+    ``today`` optionally pins the caller-resolved HA-local date the
+    regeneration's no-past guard and horizon are anchored to (threaded
+    into :func:`~.materialize.regenerate_for_definition`); it is a plain
+    ``datetime.date`` with no HA import here — the Feature 09 service
+    supplies the hass-derived value.  When omitted, regeneration falls
+    back to the host clock, same as before.
     """
     _validate_definition_id(definition_id)
 
@@ -342,7 +350,7 @@ async def edit_quest_definition(
         schedule_rule_storage_from_record(snapshot.rule)
     )
 
-    await regenerate_for_definition(database, definition_id)
+    await regenerate_for_definition(database, definition_id, today=today)
 
     return CreatedQuestDefinition(
         definition=snapshot.definition,
@@ -356,6 +364,8 @@ async def assign_child(
     database: NestQuestDatabase,
     definition_id: int,
     child_id: int,
+    *,
+    today: datetime.date | None = None,
 ) -> list[ChildRecord]:
     """Assign ``child_id`` to the definition (idempotent).
 
@@ -369,6 +379,9 @@ async def assign_child(
     write).  Raises ValueError on any rejected argument.  Only the
     ``quest_definition_assignees`` link is written; existing instances
     and completion history are never touched.
+
+    ``today`` optionally pins the caller-resolved HA-local date threaded
+    into the assignment's regeneration (see :func:`edit_quest_definition`).
     """
     _validate_definition_id(definition_id)
     _validate_child_id(child_id)
@@ -384,7 +397,7 @@ async def assign_child(
         if message.startswith("quest definition "):
             raise ValueError(f"definition_id: {message}") from error
         raise
-    await regenerate_for_definition(database, definition_id)
+    await regenerate_for_definition(database, definition_id, today=today)
     return assignees
 
 
@@ -392,6 +405,8 @@ async def unassign_child(
     database: NestQuestDatabase,
     definition_id: int,
     child_id: int,
+    *,
+    today: datetime.date | None = None,
 ) -> bool:
     """Unassign ``child_id`` from the definition; True when removed.
 
@@ -401,6 +416,9 @@ async def unassign_child(
     was not currently assigned.  Raises ValueError on a rejected
     argument.  Only the ``quest_definition_assignees`` link is written;
     existing instances and completion history are never touched.
+
+    ``today`` optionally pins the caller-resolved HA-local date threaded
+    into the unassignment's regeneration (see :func:`edit_quest_definition`).
     """
     _validate_definition_id(definition_id)
     _validate_child_id(child_id)
@@ -411,7 +429,7 @@ async def unassign_child(
             f"definition_id: quest definition {definition_id} does not exist"
         )
     removed = await dao.remove_assignee(definition_id, child_id)
-    await regenerate_for_definition(database, definition_id)
+    await regenerate_for_definition(database, definition_id, today=today)
     return removed
 
 
@@ -419,6 +437,8 @@ async def set_quest_definition_active(
     database: NestQuestDatabase,
     definition_id: int,
     is_active: bool,
+    *,
+    today: datetime.date | None = None,
 ) -> CreatedQuestDefinition:
     """Deactivate or reactivate a definition; returns the updated view.
 
@@ -441,6 +461,10 @@ async def set_quest_definition_active(
     definition, its rule, assignees and windows all run inside the
     connection-scoped lock, so the returned bundle is a consistent
     snapshot that a concurrent mutation cannot race.
+
+    ``today`` optionally pins the caller-resolved HA-local date threaded
+    into the activation change's regeneration (see
+    :func:`edit_quest_definition`).
     """
     _validate_definition_id(definition_id)
     if not isinstance(is_active, bool):
@@ -464,7 +488,7 @@ async def set_quest_definition_active(
     rule = schedule_rule_from_storage(
         schedule_rule_storage_from_record(rule_record)
     )
-    await regenerate_for_definition(database, definition_id)
+    await regenerate_for_definition(database, definition_id, today=today)
     return CreatedQuestDefinition(
         definition=updated,
         rule=rule,
