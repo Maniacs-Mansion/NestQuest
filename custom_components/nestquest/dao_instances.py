@@ -277,6 +277,117 @@ class QuestInstancesDao:
         assert instance is not None
         return instance
 
+    async def upsert_if_valid(
+        self,
+        definition_id: int,
+        child_id: int,
+        due_date: str,
+        generated_at: str,
+        *,
+        window: str,
+        due_time: str | None = None,
+    ) -> QuestInstanceRecord | None:
+        """Insert one dated instance iff its tuple is still materializable.
+
+        This is the materialization walk's single write path.  Unlike the
+        generic :meth:`upsert`, which validates only existence and
+        assignment, this method re-validates EVERY materialization
+        precondition in the SAME connection-lock-held transaction as the
+        INSERT — closing the check-then-insert gap a concurrent config
+        write could otherwise slip through:
+
+        - the definition exists AND is active (a definition deactivated
+          after the input snapshot is skipped, never written);
+        - the child exists AND is active (a deactivated child is skipped);
+        - the (definition, child) assignment link still exists (a removed
+          assignment is skipped);
+        - the window is still declared on the definition (a removed window
+          is skipped).
+
+        The live checks above ONLY decide whether the tuple is still
+        valid; they never read the window's ``due_time``.  The instance is
+        written with the caller-supplied ``due_time`` — the value snapshotted
+        from the coherent input read — so a window-time edit landing
+        mid-walk cannot leak a newer time into a batch that was already
+        snapshotted against older rule/presence/assignment decisions.
+
+        Returns the stored instance, or ``None`` when a precondition
+        failed — the tuple no longer materializable, which the walk SKIPS
+        rather than raising, so the rest of the batch is unaffected.  The
+        no-past rule and the immutable-completed-instance refusal are
+        preserved from :meth:`upsert` (those are not configuration
+        invalidations and still raise ValueError).
+        """
+        _validate_date(due_date, "due_date")
+        _validate_window(window)
+        # Fail fast on obviously-past dates before queuing on the lock;
+        # the authoritative check re-runs under the lock (see upsert).
+        today = datetime.date.today().isoformat()
+        if due_date < today:
+            raise ValueError(
+                f"instances are never generated in the past: due_date "
+                f"{due_date!r} is before today {today!r}"
+            )
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                today = datetime.date.today().isoformat()
+                if due_date < today:
+                    raise ValueError(
+                        f"instances are never generated in the past: "
+                        f"due_date {due_date!r} is before today {today!r}"
+                    )
+                still_valid = await self._database.fetch_one(
+                    "SELECT 1 FROM quest_definitions d "
+                    "JOIN quest_definition_assignees a "
+                    "ON a.definition_id = d.id "
+                    "JOIN children c ON c.id = a.child_id "
+                    "JOIN quest_definition_windows w "
+                    "ON w.definition_id = d.id "
+                    "WHERE d.id = ? AND a.child_id = ? AND w.window = ? "
+                    "AND d.is_active = 1 AND c.is_active = 1 LIMIT 1",
+                    (definition_id, child_id, window),
+                )
+                if still_valid is None:
+                    # A config change invalidated the tuple since the
+                    # snapshot: skip it rather than abort the batch.
+                    return None
+                existing = await self._database.fetch_one(
+                    "SELECT 1 FROM completion_events "
+                    "WHERE instance_id = (SELECT id FROM quest_instances "
+                    "WHERE definition_id = ? AND child_id = ? "
+                    "AND due_date = ? AND window = ?)",
+                    (definition_id, child_id, due_date, window),
+                )
+                if existing is not None:
+                    raise ValueError(
+                        f"instance for (definition {definition_id}, "
+                        f"child {child_id}, due_date {due_date!r}, "
+                        f"window {window!r}) already has a completion "
+                        "event and is immutable; it cannot be regenerated"
+                    )
+                await self._database.execute(
+                    "INSERT INTO quest_instances (definition_id, child_id, "
+                    "window, due_date, due_time, generated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (definition_id, child_id, due_date, "
+                    "window) DO UPDATE SET "
+                    "due_time = excluded.due_time, "
+                    "generated_at = excluded.generated_at",
+                    (
+                        definition_id,
+                        child_id,
+                        window,
+                        due_date,
+                        due_time,
+                        generated_at,
+                    ),
+                )
+                instance = await self.get(
+                    definition_id, child_id, due_date, window
+                )
+        assert instance is not None
+        return instance
+
     async def get(
         self,
         definition_id: int,
