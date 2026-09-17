@@ -344,14 +344,20 @@ class QuestInstancesDao:
         - the (definition, child) assignment link still exists (a removed
           assignment is skipped);
         - the window is still declared on the definition (a removed window
-          is skipped).
+          is skipped);
+        - the window's live ``due_time`` still EQUALS the caller-supplied
+          ``due_time`` (NULL-safe: NULL == NULL counts as equal; a window
+          with no due time matches a snapshot with no due time).  A
+          window-time edit landed after the input snapshot makes the
+          caller's ``due_time`` stale, and writing it would overwrite the
+          newer due_time a concurrent regeneration already upserted — so
+          the tuple is skipped instead of written.
 
-        The live checks above ONLY decide whether the tuple is still
-        valid; they never read the window's ``due_time``.  The instance is
-        written with the caller-supplied ``due_time`` — the value snapshotted
-        from the coherent input read — so a window-time edit landing
-        mid-walk cannot leak a newer time into a batch that was already
-        snapshotted against older rule/presence/assignment decisions.
+        The due_time check closes the one check-then-insert gap this
+        method previously left open: it re-validated every OTHER
+        precondition but then wrote the snapshot's ``due_time``
+        unconditionally, so a stale materialization could clobber a
+        newer, concurrently-regenerated due_time.
 
         Returns the stored instance, or ``None`` when a precondition
         failed — the tuple no longer materializable, which the walk SKIPS
@@ -384,8 +390,9 @@ class QuestInstancesDao:
                     "JOIN quest_definition_windows w "
                     "ON w.definition_id = d.id "
                     "WHERE d.id = ? AND a.child_id = ? AND w.window = ? "
-                    "AND d.is_active = 1 AND c.is_active = 1 LIMIT 1",
-                    (definition_id, child_id, window),
+                    "AND d.is_active = 1 AND c.is_active = 1 "
+                    "AND w.due_time IS ? LIMIT 1",
+                    (definition_id, child_id, window, due_time),
                 )
                 if still_valid is None:
                     # A config change invalidated the tuple since the
