@@ -16,11 +16,15 @@ Validation policy mirrors :mod:`.children`:
 - ``assignee_child_ids`` is non-empty; every id is a plain int (bools
   and floats rejected, since SQLite would bind them onto a real child)
   and must reference an existing ACTIVE child (the DAO enforces the
-  active/exists check inside the same transaction).
+  active/exists check inside the same transaction).  Duplicate ids are
+  rejected here, before the composite primary key could surface them as
+  an :class:`sqlite3.IntegrityError`.
 - ``windows`` is non-empty; each entry is a window name from
   :data:`~.const.QUEST_WINDOWS` — either a bare name (no due time) or a
   ``(name, due_time)`` pair whose due time is a strict 24-hour HH:MM
-  string.
+  string.  Duplicate window names are rejected here, before the
+  composite primary key could surface them as an
+  :class:`sqlite3.IntegrityError`.
 
 The rule, definition, assignees and windows are persisted in ONE
 transaction (the DAO's :meth:`~.dao_rules.QuestDefinitionsDao.create_with_rule_and_windows`),
@@ -113,6 +117,10 @@ def _validate_assignee_ids(value: object) -> list[int]:
                 f"got {entry!r}"
             )
         ids.append(entry)
+    if len(set(ids)) != len(ids):
+        raise ValueError(
+            "assignee_child_ids must not contain duplicate child ids"
+        )
     return ids
 
 
@@ -135,6 +143,7 @@ def _normalize_windows(
     if not value:
         raise ValueError("windows must not be empty")
     normalized: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
     for index, entry in enumerate(value):
         if isinstance(entry, str):
             name: object = entry
@@ -149,6 +158,11 @@ def _normalize_windows(
         _validate_window(name)
         if due_time is not None:
             _validate_time(due_time, "due_time")
+        if name in seen:
+            raise ValueError(
+                f"windows must not contain duplicate window {name!r}"
+            )
+        seen.add(name)
         normalized.append((name, due_time))
     return normalized
 
@@ -168,8 +182,10 @@ async def create_quest_definition(
     Validates the arguments up front, then persists the schedule rule,
     the definition, its assignees and its windows in one transaction via
     the DAO.  Returns the stored definition together with its decoded
-    rule, assignees and windows.  Raises ValueError on any rejected
-    argument; a rejected or failed create persists nothing.
+    rule, assignees and windows — all read back inside that same
+    transaction, so the returned bundle is a consistent creation
+    snapshot.  Raises ValueError on any rejected argument; a rejected or
+    failed create persists nothing.
     """
     name = _validate_text(title, "title", required=True)
     assert name is not None
@@ -182,7 +198,7 @@ async def create_quest_definition(
 
     storage = schedule_rule_to_storage(rule)
     dao = QuestDefinitionsDao(database)
-    definition = await dao.create_with_rule_and_windows(
+    snapshot = await dao.create_with_rule_and_windows(
         name,
         storage,
         _now_stamp(),
@@ -192,11 +208,9 @@ async def create_quest_definition(
         icon=icon_value,
     )
     decoded_rule = schedule_rule_from_storage(storage)
-    assignees = await dao.list_assignees(definition.id)
-    window_records = await dao.list_windows(definition.id)
     return CreatedQuestDefinition(
-        definition=definition,
+        definition=snapshot.definition,
         rule=decoded_rule,
-        assignees=assignees,
-        windows=window_records,
+        assignees=snapshot.assignees,
+        windows=snapshot.windows,
     )

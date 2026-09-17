@@ -10,6 +10,7 @@ from custom_components.nestquest.dao_children import ChildrenDao
 from custom_components.nestquest.dao_rules import (
     QuestDefinitionsDao,
     ScheduleRulesDao,
+    schedule_rule_to_storage,
 )
 from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.migrations import apply_migrations
@@ -213,6 +214,23 @@ def test_create_rejects_non_int_assignee(tmp_path, bad) -> None:
     _with_db(tmp_path, "create-bad-assignee.db")(_body)
 
 
+def test_create_rejects_duplicate_assignees(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(
+            ValueError, match="assignee_child_ids must not contain duplicate"
+        ):
+            await create_quest_definition(
+                database,
+                "Brush teeth",
+                _daily_rule(),
+                [child.id, child.id],
+                ["morning"],
+            )
+        return None
+
+    _with_db(tmp_path, "create-duplicate-assignees.db")(_body)
+
+
 def test_create_rejects_inactive_child(tmp_path) -> None:
     async def _body(database, children, rules, definitions, child):
         inactive = await children.create("Bo", NOW)
@@ -263,6 +281,33 @@ def test_create_rejects_invalid_window(tmp_path, bad) -> None:
         return None
 
     _with_db(tmp_path, "create-bad-window.db")(_body)
+
+
+def test_create_rejects_duplicate_windows(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(
+            ValueError, match="windows must not contain duplicate"
+        ):
+            await create_quest_definition(
+                database,
+                "Brush teeth",
+                _daily_rule(),
+                [child.id],
+                ["morning", "morning"],
+            )
+        with pytest.raises(
+            ValueError, match="windows must not contain duplicate"
+        ):
+            await create_quest_definition(
+                database,
+                "Brush teeth",
+                _daily_rule(),
+                [child.id],
+                [("morning", "09:00"), ("morning", "10:00")],
+            )
+        return None
+
+    _with_db(tmp_path, "create-duplicate-windows.db")(_body)
 
 
 @pytest.mark.parametrize("bad", ["9:30", "25:00", "09:60", "0900"])
@@ -351,3 +396,36 @@ def test_rejected_create_writes_nothing(tmp_path) -> None:
         return None
 
     _with_db(tmp_path, "create-rejected-nothing.db")(_body)
+
+
+def test_post_write_failure_rolls_back_everything(tmp_path) -> None:
+    """A failure after some writes rolls all four tables back together.
+
+    Deterministic post-write trigger: the DAO method inserts the rule,
+    the definition and the assignee rows, THEN validates the window name
+    and raises ValueError for a window outside const.QUEST_WINDOWS.
+    That failure lands after three writes inside the transaction, so the
+    rule, definition and assignee rows must all roll back — no partial
+    rows survive in any of the four tables.
+    """
+    async def _body(database, children, rules, definitions, child):
+        storage = schedule_rule_to_storage(_daily_rule())
+        dao = QuestDefinitionsDao(database)
+        with pytest.raises(ValueError, match="window must be one of"):
+            await dao.create_with_rule_and_windows(
+                "Brush teeth",
+                storage,
+                NOW,
+                [child.id],
+                [("noon", None)],
+            )
+        # All four tables are empty: the earlier rule, definition and
+        # assignee writes were rolled back, and no window row was added.
+        assert await rules.get(1) is None
+        assert await definitions.get(1) is None
+        assert await definitions.list_active() == []
+        assert await definitions.list_assignees(1) == []
+        assert await definitions.list_windows(1) == []
+        return None
+
+    _with_db(tmp_path, "post-write-rollback.db")(_body)

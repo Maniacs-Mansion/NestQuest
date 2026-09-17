@@ -163,6 +163,22 @@ class QuestDefinitionWindowRecord:
     due_time: str | None
 
 
+@dataclass(frozen=True)
+class QuestDefinitionSnapshot:
+    """A definition plus its assignees and windows, read atomically.
+
+    Returned by :meth:`QuestDefinitionsDao.create_with_rule_and_windows`
+    with the assignees and windows read inside the SAME transaction that
+    inserted them, so the snapshot is a consistent creation-time view —
+    a concurrent assignee or window mutation cannot change it between
+    the write and the read.
+    """
+
+    definition: QuestDefinitionRecord
+    assignees: list[ChildRecord]
+    windows: list[QuestDefinitionWindowRecord]
+
+
 _RULE_COLUMNS = (
     "id, rule_type, interval, weekday_set, day_of_month, nth_weekday, "
     "month, start_date, end_date"
@@ -644,7 +660,7 @@ class QuestDefinitionsDao:
         *,
         description: str | None = None,
         icon: str | None = None,
-    ) -> QuestDefinitionRecord:
+    ) -> QuestDefinitionSnapshot:
         """Insert a rule, definition, assignees and windows atomically.
 
         The whole write — the schedule rule row, the definition row,
@@ -654,6 +670,11 @@ class QuestDefinitionsDao:
         caller can never observe a definition with a missing rule,
         assignee or window, and a rejected create leaves no partial
         rows.
+
+        Returns a :class:`QuestDefinitionSnapshot` whose assignees and
+        windows are read back inside the same transaction, so the
+        returned view cannot be raced by a concurrent assignee/window
+        mutation after the write.
 
         The rule arrives as pre-validated storage fields (mapped from a
         :class:`~.recurrence.ScheduleRule` via
@@ -696,8 +717,14 @@ class QuestDefinitionsDao:
                         (definition_id, window, due_time),
                     )
                 definition = await self.get(definition_id)
+                assignees = await self.list_assignees(definition_id)
+                window_records = await self.list_windows(definition_id)
         assert definition is not None
-        return definition
+        return QuestDefinitionSnapshot(
+            definition=definition,
+            assignees=assignees,
+            windows=window_records,
+        )
 
     async def _validate_rule_exists(self, schedule_rule_id: int) -> None:
         """Raise ValueError unless the rule exists.
