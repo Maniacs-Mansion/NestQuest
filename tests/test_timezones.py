@@ -18,7 +18,11 @@ from custom_components.nestquest.dao_children import ChildrenDao
 from custom_components.nestquest.dao_instances import QuestInstancesDao
 from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.migrations import apply_migrations
-from custom_components.nestquest.quest_definitions import create_quest_definition
+from custom_components.nestquest.quest_definitions import (
+    assign_child,
+    create_quest_definition,
+    edit_quest_definition,
+)
 from custom_components.nestquest.recurrence import RuleType, ScheduleRule
 
 NOW = "2026-09-14T12:00:00+00:00"
@@ -228,20 +232,24 @@ def test_horizon_resolves_fall_back_day_without_off_by_one(
 ) -> None:
     """Across the 2026-11-01 fall-back, today and the horizon stay local.
 
-    The repeated 01:00-02:00 hour must not resolve to the wrong calendar day:
-    "01:30" (ambiguous) and "03:30 EST" (after the jump) both resolve to
-    2026-11-01, and the full horizon remains 15 contiguous days.
+    The repeated 01:00-02:00 hour must not resolve to the wrong calendar
+    day: the first 01:30 (``fold=0``, EDT) and the repeated 01:30
+    (``fold=1``, EST) are distinct instants yet both resolve to 2026-11-01
+    — and both, along with 03:30 EST after the jump, materialize the same
+    15 contiguous-day horizon with no off-by-one.
     """
     zone = ZoneInfo(NEW_YORK)
-    ambiguous = datetime.datetime(2026, 11, 1, 1, 30, tzinfo=zone)
+    first = datetime.datetime(2026, 11, 1, 1, 30, tzinfo=zone, fold=0)  # EDT
+    second = datetime.datetime(2026, 11, 1, 1, 30, tzinfo=zone, fold=1)  # EST
     after = datetime.datetime(2026, 11, 1, 3, 30, tzinfo=zone)  # EST
-    assert ambiguous.date() == after.date() == datetime.date(2026, 11, 1)
+    assert first.date() == second.date() == after.date() == datetime.date(2026, 11, 1)
+    assert first.utcoffset() != second.utcoffset()  # the two repeated-hour folds
 
     async def _body(database):
         hass = _tz_hass(NEW_YORK)
         import custom_components.nestquest as nestquest
 
-        for instant in (ambiguous, after):
+        for instant in (first, second, after):
             _freeze_clock(monkeypatch, instant)
             local_today = instant.date()
             child_id = await _seed_daily(database, local_today.isoformat())
@@ -262,3 +270,72 @@ def test_horizon_resolves_fall_back_day_without_off_by_one(
             await database.close()
 
     assert _run(_main()) == datetime.date(2026, 11, 1)
+
+
+def test_definition_business_regeneration_uses_pinned_today_not_host(
+    tmp_path, monkeypatch
+) -> None:
+    """``edit_quest_definition``/``assign_child`` anchor regeneration on
+    the caller-pinned HA-local ``today``, not the host clock.
+
+    The host clock (the ``_today`` fallback) is pinned one day AHEAD of the
+    HA-local ``today``; the guard would reject the local "today" as past
+    (and the horizon would skip it) if it consulted the host clock.  Both
+    business operations must regenerate against the pinned date and keep
+    that first local day, proving the threaded ``today`` wins.
+    """
+    import custom_components.nestquest.dao_instances as dao_instances_module
+
+    pinned = datetime.date(2026, 1, 14)
+    host_today = datetime.date(2026, 1, 15)
+    monkeypatch.setattr(dao_instances_module, "_today", lambda: host_today)
+
+    async def _body(database):
+        children = ChildrenDao(database)
+        dao = QuestInstancesDao(database)
+        horizon_end = pinned + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+
+        a = await children.create("Ada", NOW)
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=pinned.isoformat()),
+            [a.id],
+            [("morning", "09:00")],
+        )
+        definition_id = created.definition.id
+
+        # edit anchors on pinned: the horizon starts at the local day the
+        # host clock calls "past", so its presence proves pinned won.
+        await edit_quest_definition(
+            database,
+            definition_id,
+            windows=[("morning", "10:15")],
+            today=pinned,
+        )
+        a_records = await dao.list_by_date_range(
+            a.id, pinned.isoformat(), horizon_end.isoformat()
+        )
+        assert [r.due_date for r in a_records][0] == pinned.isoformat()
+        assert {r.due_time for r in a_records} == {"10:15"}
+        assert len(a_records) == DEFAULT_HORIZON_DAYS + 1
+
+        # assign anchors on pinned too: the new child's regeneration keeps
+        # the same pinned-local first day rather than skipping to the host day.
+        b = await children.create("Bo", NOW)
+        await assign_child(database, definition_id, b.id, today=pinned)
+        b_records = await dao.list_by_date_range(
+            b.id, pinned.isoformat(), horizon_end.isoformat()
+        )
+        assert [r.due_date for r in b_records][0] == pinned.isoformat()
+        assert len(b_records) == DEFAULT_HORIZON_DAYS + 1
+        return definition_id
+
+    async def _main():
+        database = await _prepare(tmp_path / "tz-definition-regen.db")
+        try:
+            return await _body(database)
+        finally:
+            await database.close()
+
+    assert _run(_main()) is not None
