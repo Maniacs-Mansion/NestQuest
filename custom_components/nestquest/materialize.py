@@ -47,13 +47,17 @@ never the past — and re-run the walk over the rolling horizon
 ``[today, today + DEFAULT_HORIZON_DAYS]``.
 
 HOOK (Feature 09 presence services): the presence business layer that
-lands in Feature 09 (``set_presence_pattern`` / ``create_presence_override``
-/ ``delete_presence_override``) MUST call :func:`regenerate_for_child`
-after each successful presence write so a child's future instances track
-its presence.  This hook is documented, not yet wired: no presence
-business layer exists yet, and the presence DAO (``dao_presence.py``)
-must stay free of business rules — never call :func:`regenerate_for_child`
-from inside the DAO layer.
+lands in Feature 09 MUST call :func:`regenerate_for_child` after EVERY
+presence-state write so a child's future instances track its presence:
+``set_presence_pattern`` (including clearing/setting an empty pattern),
+deleting/clearing the presence schedule
+(:meth:`~.dao_presence.PresenceSchedulesDao.delete`),
+``create_presence_override``, and ``delete_presence_override``.  A
+schedule delete changes presence state too (the child becomes
+always-present), so it must regenerate just like the others.  This hook
+is documented, not yet wired: no presence business layer exists yet, and
+the presence DAO (``dao_presence.py``) must stay free of business rules
+— never call :func:`regenerate_for_child` from inside the DAO layer.
 """
 from __future__ import annotations
 
@@ -221,25 +225,31 @@ async def regenerate_for_definition(
 
 # HOOK (Feature 09 presence services): ``regenerate_for_child`` is the
 # child-presence counterpart to ``regenerate_for_definition``.  The
-# presence business layer that lands in Feature 09
-# (set_presence_pattern / create_presence_override /
-# delete_presence_override) MUST call ``regenerate_for_child`` after each
-# successful write, so future instances track a child's changed presence.
-# It is deliberately NOT wired into ``dao_presence.py``: the DAO layer
-# stays pure storage (no business rules), and no presence business layer
-# exists yet to host the call — see the module docstring note below.
+# presence business layer that lands in Feature 09 MUST call
+# ``regenerate_for_child`` after EVERY presence-state write, so future
+# instances track a child's changed presence: set_presence_pattern
+# (including clearing/setting an empty pattern), deleting/clearing the
+# presence schedule (PresenceSchedulesDao.delete),
+# create_presence_override, and delete_presence_override.  A schedule
+# delete changes presence state too (the child becomes always-present),
+# so it must regenerate just like the others.  It is deliberately NOT
+# wired into ``dao_presence.py``: the DAO layer stays pure storage (no
+# business rules), and no presence business layer exists yet to host the
+# call — see the module docstring note above.
 async def regenerate_for_child(
     database: NestQuestDatabase,
     child_id: int,
 ) -> int:
     """Regenerate a child's future instances after a presence change.
 
-    The Feature 09 presence services (set_presence_pattern /
-    create_presence_override / delete_presence_override) call this after
-    every presence write so a child's future instances track its new
-    presence: the child's open instances at or after today are deleted
-    across ALL its definitions (never a completed instance, never the
-    past) via
+    The Feature 09 presence services call this after every
+    presence-state write — set_presence_pattern (including clearing or
+    setting an empty pattern), deleting/clearing the presence schedule
+    (:meth:`~.dao_presence.PresenceSchedulesDao.delete`),
+    create_presence_override, and delete_presence_override — so a
+    child's future instances track its new presence: the child's open
+    instances at or after today are deleted across ALL its definitions
+    (never a completed instance, never the past) via
     :meth:`~.dao_instances.QuestInstancesDao.delete_future_uncompleted_for_child`,
     then the materialization walk re-runs over the rolling horizon
     ``[today, today + DEFAULT_HORIZON_DAYS]`` so the child's
