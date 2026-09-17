@@ -277,3 +277,74 @@ class PresenceOverridesDao:
             (override_id,),
         )
         return result.rowcount > 0
+
+
+async def load_snapshot(
+    database: NestQuestDatabase,
+    child_ids: list[int],
+    range_start: str,
+    range_end: str,
+) -> tuple[
+    dict[int, PresenceScheduleRecord],
+    dict[int, list[PresenceOverrideRecord]],
+]:
+    """Read schedules and overrides for ``child_ids`` in ONE transaction.
+
+    Returns ``(schedules, overrides)``:
+
+    - ``schedules`` maps ``child_id`` to its :class:`PresenceScheduleRecord`
+      for every child that HAS a schedule row.  A child absent from the
+      mapping has no schedule, i.e. is present every day (Feature 05).
+    - ``overrides`` maps ``child_id`` to that child's overrides overlapping
+      ``[range_start, range_end]`` (inclusive boundaries), ordered by start
+      date; a child with no matching override is absent from the mapping.
+
+    Both tables are read inside one BEGIN..COMMIT span under the
+    connection-scoped lock, so the returned pairing is a coherent snapshot
+    — a concurrent schedule upsert or override create cannot interleave
+    between the two reads.  Children are validated as existing up front so
+    an unknown ``child_id`` raises ValueError rather than being silently
+    read as "present every day", mirroring
+    :meth:`PresenceSchedulesDao.get_by_child`.
+    """
+    _validate_date(range_start, "range_start")
+    _validate_date(range_end, "range_end")
+    if range_end < range_start:
+        raise ValueError(
+            "range_end must be on or after range_start, got "
+            f"{range_end!r} < {range_start!r}"
+        )
+    children = sorted(set(child_ids))
+    if not children:
+        return {}, {}
+    placeholders = ",".join("?" for _ in children)
+    async with _connection_lock(database):
+        async with database.transaction():
+            existing_rows = await database.fetch_all(
+                f"SELECT id FROM children WHERE id IN ({placeholders})",
+                tuple(children),
+            )
+            existing = {row[0] for row in existing_rows}
+            unknown = sorted(set(children) - existing)
+            if unknown:
+                raise ValueError(f"child {unknown[0]} does not exist")
+            schedule_rows = await database.fetch_all(
+                f"SELECT {_SCHEDULE_COLUMNS} FROM presence_schedules "
+                f"WHERE child_id IN ({placeholders})",
+                tuple(children),
+            )
+            override_rows = await database.fetch_all(
+                f"SELECT {_OVERRIDE_COLUMNS} FROM presence_overrides "
+                f"WHERE child_id IN ({placeholders}) AND end_date >= ? "
+                "AND start_date <= ? ORDER BY start_date",
+                tuple(children) + (range_start, range_end),
+            )
+    schedules = {
+        record.child_id: record
+        for record in map(_schedule_from_row, schedule_rows)
+    }
+    overrides: dict[int, list[PresenceOverrideRecord]] = {}
+    for row in override_rows:
+        record = _override_from_row(row)
+        overrides.setdefault(record.child_id, []).append(record)
+    return schedules, overrides

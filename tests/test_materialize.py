@@ -1,0 +1,288 @@
+"""Tests for materialize.py: the Feature 07 materialization walk."""
+from __future__ import annotations
+
+import asyncio
+import datetime
+
+import pytest
+
+from custom_components.nestquest.dao_children import ChildrenDao
+from custom_components.nestquest.dao_instances import QuestInstancesDao
+from custom_components.nestquest.dao_presence import PresenceSchedulesDao
+from custom_components.nestquest.db import NestQuestDatabase
+from custom_components.nestquest.materialize import materialize
+from custom_components.nestquest.migrations import apply_migrations
+from custom_components.nestquest.quest_definitions import (
+    create_quest_definition,
+)
+from custom_components.nestquest.recurrence import RuleType, ScheduleRule
+
+
+def _run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def _make_hass_mock():
+    from unittest.mock import AsyncMock, MagicMock
+
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=(lambda fn, *a: fn(*a)))
+    return hass
+
+
+NOW = "2026-09-14T12:00:00+00:00"
+
+
+async def _prepare(path):
+    database = NestQuestDatabase(_make_hass_mock())
+    await database.open(path)
+    await apply_migrations(database)
+    return database
+
+
+def _with_db(tmp_path, name):
+    def _run_test(body):
+        async def _main():
+            database = await _prepare(tmp_path / name)
+            try:
+                return await body(database)
+            finally:
+                await database.close()
+
+        return _run(_main())
+
+    return _run_test
+
+
+def _future_monday() -> datetime.date:
+    """The Monday of next week (strictly future, all 28 days eligible)."""
+    today = datetime.date.today()
+    this_monday = today - datetime.timedelta(days=today.weekday())
+    return this_monday + datetime.timedelta(days=7)
+
+
+def _build_expected(start, def1_id, def2_id, a_id, b_id, c_id) -> set:
+    """Hand-derived expected (definition_id, child_id, window, due_date,
+    due_time) tuples over the four-week window.
+
+    Custody: A is present week 0 and 2 of the two-week cycle, absent
+    1 and 3; B is the mirror; C has no schedule (present every day).
+    """
+    expected: set = set()
+    start_dt = datetime.date.fromisoformat(start)
+    for offset in range(28):
+        day = start_dt + datetime.timedelta(days=offset)
+        iso = day.isoformat()
+        week = offset // 7
+        monday = day.weekday() == 0
+
+        # Def1: DAILY, assignees A + C, window morning due 09:00.
+        if week % 2 == 0:
+            expected.add((def1_id, a_id, "morning", iso, "09:00"))
+        expected.add((def1_id, c_id, "morning", iso, "09:00"))
+
+        # Def2: WEEKLY Monday, assignees B + C, morning 07:00 + evening 19:00.
+        if monday:
+            if week % 2 == 1:
+                expected.add((def2_id, b_id, "morning", iso, "07:00"))
+                expected.add((def2_id, b_id, "evening", iso, "19:00"))
+            expected.add((def2_id, c_id, "morning", iso, "07:00"))
+            expected.add((def2_id, c_id, "evening", iso, "19:00"))
+    return expected
+
+
+async def _collect_instances(database, child_ids, start, end) -> set:
+    dao = QuestInstancesDao(database)
+    collected = set()
+    for child_id in child_ids:
+        for record in await dao.list_by_date_range(child_id, start, end):
+            collected.add(
+                (
+                    record.definition_id,
+                    record.child_id,
+                    record.window,
+                    record.due_date,
+                    record.due_time,
+                )
+            )
+    return collected
+
+
+def test_materialize_two_custody_one_always_present(tmp_path) -> None:
+    async def _body(database):
+        children = ChildrenDao(database)
+        schedules = PresenceSchedulesDao(database)
+
+        a = await children.create("Ada", NOW)      # present weeks 0, 2
+        b = await children.create("Bo", NOW)       # present weeks 1, 3
+        c = await children.create("Cleo", NOW)     # no schedule: always present
+
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=27)).isoformat()
+
+        await schedules.upsert_by_child(
+            a.id, 2, start_iso, "0,1,2,3,4,5,6|"
+        )
+        await schedules.upsert_by_child(
+            b.id, 2, start_iso, "|0,1,2,3,4,5,6"
+        )
+
+        def1 = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [a.id, c.id],
+            [("morning", "09:00")],
+        )
+        def2 = await create_quest_definition(
+            database,
+            "Weekly chore",
+            ScheduleRule(
+                rule_type=RuleType.WEEKLY,
+                weekday_set={0},
+                start_date=start_iso,
+            ),
+            [b.id, c.id],
+            [("morning", "07:00"), ("evening", "19:00")],
+        )
+
+        expected = _build_expected(
+            start_iso, def1.definition.id, def2.definition.id,
+            a.id, b.id, c.id,
+        )
+
+        count = await materialize(database, start_iso, end_iso)
+        assert count == len(expected)
+
+        actual = await _collect_instances(
+            database, (a.id, b.id, c.id), start_iso, end_iso
+        )
+        assert actual == expected
+        return count
+
+    _with_db(tmp_path, "materialize.db")(_body)
+
+
+def test_materialize_shares_one_generated_at_per_run(tmp_path) -> None:
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=6)).isoformat()
+        await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            ["morning"],
+        )
+        await materialize(database, start_iso, end_iso)
+        dao = QuestInstancesDao(database)
+        stamps = {
+            record.generated_at
+            for record in await dao.list_by_date_range(
+                child.id, start_iso, end_iso
+            )
+        }
+        assert len(stamps) == 1
+        return stamps
+
+    _with_db(tmp_path, "materialize-stamp.db")(_body)
+
+
+def test_materialize_is_idempotent(tmp_path) -> None:
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=6)).isoformat()
+        await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            ["morning"],
+        )
+        first = await materialize(database, start_iso, end_iso)
+        second = await materialize(database, start_iso, end_iso)
+        assert first == second == 7
+        return first
+
+    _with_db(tmp_path, "materialize-idempotent.db")(_body)
+
+
+def test_materialize_honours_overrides(tmp_path) -> None:
+    async def _body(database):
+        from custom_components.nestquest.dao_presence import (
+            PresenceOverridesDao,
+        )
+
+        children = ChildrenDao(database)
+        overrides = PresenceOverridesDao(database)
+        child = await children.create("Ada", NOW)
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=6)).isoformat()
+        # No schedule means the child is present every day; a blocking
+        # override covering the whole week must still suppress every day.
+        await overrides.create(
+            child.id, start_iso, end_iso, False, note="away all week"
+        )
+        await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            ["morning"],
+        )
+        count = await materialize(database, start_iso, end_iso)
+        assert count == 0
+        return count
+
+    _with_db(tmp_path, "materialize-override.db")(_body)
+
+
+def test_materialize_rejects_malformed_or_inverted_bounds(tmp_path) -> None:
+    async def _body(database):
+        start = (_future_monday()).isoformat()
+        end = (datetime.date.fromisoformat(start)
+               + datetime.timedelta(days=1)).isoformat()
+        for bad in ("not-a-date", "2026-9-7", ""):
+            with pytest.raises(ValueError, match="start_date"):
+                await materialize(database, bad, end)
+            with pytest.raises(ValueError, match="end_date"):
+                await materialize(database, start, bad)
+        with pytest.raises(ValueError, match="end_date must be on or after"):
+            await materialize(database, end, start)
+        return None
+
+    _with_db(tmp_path, "materialize-bounds.db")(_body)
+
+
+def test_materialize_skips_inactive_definitions(tmp_path) -> None:
+    async def _body(database):
+        from custom_components.nestquest.quest_definitions import (
+            set_quest_definition_active,
+        )
+
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=6)).isoformat()
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            ["morning"],
+        )
+        await set_quest_definition_active(database, created.definition.id, False)
+        count = await materialize(database, start_iso, end_iso)
+        assert count == 0
+        return count
+
+    _with_db(tmp_path, "materialize-inactive.db")(_body)
