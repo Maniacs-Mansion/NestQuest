@@ -49,6 +49,7 @@ from .dao_rules import (
     ScheduleRuleStorage,
     ScheduleRulesDao,
     _UNSET,
+    _validate_date,
     _validate_time,
     _validate_window,
     schedule_rule_from_storage,
@@ -56,7 +57,7 @@ from .dao_rules import (
     schedule_rule_to_storage,
 )
 from .db import NestQuestDatabase
-from .recurrence import ScheduleRule
+from .recurrence import ScheduleRule, occurs_on
 
 
 @dataclass(frozen=True)
@@ -452,3 +453,100 @@ async def set_quest_definition_active(
         assignees=assignees,
         windows=windows,
     )
+
+
+async def _bundle_definition(
+    database: NestQuestDatabase,
+    dao: QuestDefinitionsDao,
+    definition: QuestDefinitionRecord,
+) -> CreatedQuestDefinition:
+    """Assemble a definition's rich view: decoded rule + assignees + windows.
+
+    Reads the schedule rule through :class:`~.dao_rules.ScheduleRulesDao`
+    and the assignees and windows through the DAO, then wraps them in the
+    same :class:`CreatedQuestDefinition` shape the create/edit/activate
+    paths return, so every query helper here reuses one snapshot type
+    rather than inventing a second one.
+    """
+    rule_record = await ScheduleRulesDao(database).get(
+        definition.schedule_rule_id
+    )
+    assert rule_record is not None
+    rule = schedule_rule_from_storage(
+        schedule_rule_storage_from_record(rule_record)
+    )
+    assignees = await dao.list_assignees(definition.id)
+    windows = await dao.list_windows(definition.id)
+    return CreatedQuestDefinition(
+        definition=definition,
+        rule=rule,
+        assignees=assignees,
+        windows=windows,
+    )
+
+
+async def list_active_definitions(
+    database: NestQuestDatabase,
+) -> list[CreatedQuestDefinition]:
+    """Return every ACTIVE definition with its decoded rule and links.
+
+    Ordered by rising definition id, matching the DAO's ``list_active``
+    order, so callers get a stable, repeatable sequence.  Each entry is
+    the same rich :class:`CreatedQuestDefinition` snapshot as the rest of
+    the layer: the stored row plus its decoded
+    :class:`~.recurrence.ScheduleRule`, assignees and windows.
+    """
+    dao = QuestDefinitionsDao(database)
+    definitions = await dao.list_active()
+    return [
+        await _bundle_definition(database, dao, definition)
+        for definition in definitions
+    ]
+
+
+async def list_definitions_for_child(
+    database: NestQuestDatabase,
+    child_id: int,
+) -> list[CreatedQuestDefinition]:
+    """Return the definitions assigned to ``child_id`` (rich view).
+
+    ``child_id`` must be a plain int (bools and floats rejected, since
+    SQLite would bind ``True`` onto child 1).  Results are ordered by
+    rising definition id, matching ``list_active_definitions`` and
+    ``list_definitions_firing_on``.  Each entry is a
+    :class:`CreatedQuestDefinition` snapshot bundling the definition with
+    its decoded rule, assignees and windows.
+    """
+    _validate_child_id(child_id)
+    dao = QuestDefinitionsDao(database)
+    definitions = await dao.list_by_child(child_id)
+    bundles = [
+        await _bundle_definition(database, dao, definition)
+        for definition in definitions
+    ]
+    return sorted(bundles, key=lambda bundle: bundle.definition.id)
+
+
+async def list_definitions_firing_on(
+    database: NestQuestDatabase,
+    date: str,
+) -> list[CreatedQuestDefinition]:
+    """Return the ACTIVE definitions whose rule fires on ``date``.
+
+    ``date`` must be a strict ISO calendar date (YYYY-MM-DD); a malformed
+    value raises ValueError naming the field.  Each active definition's
+    stored rule is decoded through the task-1 storage mapping and handed
+    to the recurrence engine's :func:`~.recurrence.occurs_on`; only the
+    definitions whose decoded rule fires on the date are returned, in
+    rising definition-id order, each as the same rich
+    :class:`CreatedQuestDefinition` snapshot as the rest of the layer.
+    """
+    _validate_date(date, "date")
+    target = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+    dao = QuestDefinitionsDao(database)
+    definitions = await dao.list_active()
+    bundles = [
+        await _bundle_definition(database, dao, definition)
+        for definition in definitions
+    ]
+    return [bundle for bundle in bundles if occurs_on(bundle.rule, target)]

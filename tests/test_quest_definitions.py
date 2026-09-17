@@ -24,6 +24,9 @@ from custom_components.nestquest.quest_definitions import (
     assign_child,
     create_quest_definition,
     edit_quest_definition,
+    list_active_definitions,
+    list_definitions_firing_on,
+    list_definitions_for_child,
     set_quest_definition_active,
     unassign_child,
 )
@@ -1420,3 +1423,201 @@ def test_set_quest_definition_active_concurrent_opposite_transitions_return_own(
             await database.close()
 
     _run(_main())
+
+
+# ---------------------------------------------------------------------------
+# list query helpers: list_active_definitions / list_definitions_for_child /
+# list_definitions_firing_on
+# ---------------------------------------------------------------------------
+
+
+def test_list_active_definitions_returns_only_active_in_id_order(tmp_path) -> None:
+    """Only active definitions come back, in rising id order, each rich.
+
+    Two definitions are created (ids 1 and 2), then definition 1 is
+    deactivated.  ``list_active_definitions`` must return only definition
+    2, and every bundle must carry the decoded rule, assignees and
+    windows of its own definition.
+    """
+    async def _body(database, children, rules, definitions, child):
+        bo = await children.create("Bo", NOW)
+        first = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        weekly = ScheduleRule(
+            rule_type=RuleType.WEEKLY,
+            weekday_set={0, 2},
+            start_date="2026-09-14",
+        )
+        second = await create_quest_definition(
+            database,
+            "Tidy room",
+            weekly,
+            [child.id, bo.id],
+            [("morning", "08:00"), ("evening", "19:00")],
+        )
+        assert [d.id for d in await definitions.list_active()] == [
+            first.definition.id,
+            second.definition.id,
+        ]
+
+        await set_quest_definition_active(database, first.definition.id, False)
+
+        result = await list_active_definitions(database)
+        assert [bundle.definition.id for bundle in result] == [second.definition.id]
+        assert isinstance(result[0], CreatedQuestDefinition)
+        assert result[0].rule == weekly
+        assert sorted(c.id for c in result[0].assignees) == sorted(
+            [child.id, bo.id]
+        )
+        by_name = {w.window: w.due_time for w in result[0].windows}
+        assert by_name == {"morning": "08:00", "evening": "19:00"}
+        return result
+
+    _with_db(tmp_path, "list-active.db")(_body)
+
+
+def test_list_definitions_for_child_returns_only_that_child(tmp_path) -> None:
+    """Only the given child's definitions come back, deterministically.
+
+    Definitions are created assigned to Ada (child), Bo, or both; the
+    helper must return exactly the definitions assigned to Ada, excluding
+    a Bo-only definition.  Inactive definitions are still assigned, so
+    they too come back (the helper filters by child, not by activity).
+    """
+    async def _body(database, children, rules, definitions, child):
+        bo = await children.create("Bo", NOW)
+        ada_only = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        both = await create_quest_definition(
+            database,
+            "Tidy room",
+            ScheduleRule(
+                rule_type=RuleType.WEEKLY,
+                weekday_set={1},
+                start_date="2026-09-14",
+            ),
+            [child.id, bo.id],
+            ["evening"],
+        )
+        bo_only = await create_quest_definition(
+            database, "Walk dog", _daily_rule(), [bo.id], ["afternoon"]
+        )
+
+        # The helper returns the given child's definitions in ascending
+        # id order, consistent with list_active_definitions.
+        result = await list_definitions_for_child(database, child.id)
+        assert [bundle.definition.id for bundle in result] == [
+            ada_only.definition.id,
+            both.definition.id,
+        ]
+        assert result[0].rule == _daily_rule()
+        assert [c.id for c in result[0].assignees] == [child.id]
+        assert [w.window for w in result[0].windows] == ["morning"]
+
+        bo_result = await list_definitions_for_child(database, bo.id)
+        assert [bundle.definition.id for bundle in bo_result] == [
+            both.definition.id,
+            bo_only.definition.id,
+        ]
+        return result
+
+    _with_db(tmp_path, "list-for-child.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [True, False, 1.5, "1", None])
+def test_list_definitions_for_child_rejects_non_int_child_id(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(ValueError, match="child_id must be an integer"):
+            await list_definitions_for_child(database, bad)
+        return None
+
+    _with_db(tmp_path, "list-for-child-bad-id.db")(_body)
+
+
+def test_list_definitions_firing_on_mixed_rules(tmp_path) -> None:
+    """A mixed daily + weekly + monthly set fires on the right dates.
+
+    Daily fires every day from its start; weekly fires on its weekdays;
+    monthly fires on its day-of-month.  Deactivated definitions never
+    fire, and the returned bundles carry the decoded rule.
+    """
+    async def _body(database, children, rules, definitions, child):
+        daily = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date="2026-09-14"),
+            [child.id],
+            ["morning"],
+        )
+        weekly = await create_quest_definition(
+            database,
+            "Weekly chore",
+            ScheduleRule(
+                rule_type=RuleType.WEEKLY,
+                weekday_set={0, 2},  # Monday, Wednesday
+                start_date="2026-09-14",
+            ),
+            [child.id],
+            ["evening"],
+        )
+        monthly = await create_quest_definition(
+            database,
+            "Monthly chore",
+            ScheduleRule(
+                rule_type=RuleType.MONTHLY_DAY,
+                day_of_month=15,
+                start_date="2026-09-14",
+            ),
+            [child.id],
+            ["afternoon"],
+        )
+
+        # 2026-09-14 is a Monday (weekday 0): daily + weekly fire;
+        # monthly (the 15th) does not.
+        hits = await list_definitions_firing_on(database, "2026-09-14")
+        assert [b.definition.id for b in hits] == [
+            daily.definition.id,
+            weekly.definition.id,
+        ]
+        # 2026-09-15 is a Tuesday (weekday 1, day 15): daily + monthly.
+        hits = await list_definitions_firing_on(database, "2026-09-15")
+        assert [b.definition.id for b in hits] == [
+            daily.definition.id,
+            monthly.definition.id,
+        ]
+        # 2026-09-16 is a Wednesday (weekday 2, day 16): daily + weekly.
+        hits = await list_definitions_firing_on(database, "2026-09-16")
+        assert [b.definition.id for b in hits] == [
+            daily.definition.id,
+            weekly.definition.id,
+        ]
+
+        # Deactivating a definition removes it from every future result.
+        await set_quest_definition_active(database, weekly.definition.id, False)
+        hits = await list_definitions_firing_on(database, "2026-09-14")
+        assert [b.definition.id for b in hits] == [daily.definition.id]
+        # The returned bundle carries the decoded rule, not the raw row.
+        assert hits[0].rule == ScheduleRule(
+            rule_type=RuleType.DAILY, start_date="2026-09-14"
+        )
+        return hits
+
+    _with_db(tmp_path, "list-firing-on.db")(_body)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["2026-9-4", "2026-13-01", "2026-02-30", "not-a-date", None, 20260914],
+)
+def test_list_definitions_firing_on_rejects_malformed_date(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        with pytest.raises(ValueError, match="date must be"):
+            await list_definitions_firing_on(database, bad)
+        return None
+
+    _with_db(tmp_path, "list-firing-on-bad-date.db")(_body)
