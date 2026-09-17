@@ -329,6 +329,28 @@ def schedule_rule_from_storage(storage: ScheduleRuleStorage) -> ScheduleRule:
     )
 
 
+def schedule_rule_storage_from_record(
+    record: ScheduleRuleRecord,
+) -> ScheduleRuleStorage:
+    """Copy a rule row's value columns into a storage mapping.
+
+    ``ScheduleRuleRecord`` is the read shape (it carries ``id``);
+    :func:`schedule_rule_from_storage` consumes the value-only
+    :class:`ScheduleRuleStorage` shape, so callers re-reading a stored
+    rule convert through this helper.
+    """
+    return ScheduleRuleStorage(
+        rule_type=record.rule_type,
+        interval=record.interval,
+        weekday_set=record.weekday_set,
+        day_of_month=record.day_of_month,
+        nth_weekday=record.nth_weekday,
+        month=record.month,
+        start_date=record.start_date,
+        end_date=record.end_date,
+    )
+
+
 def _reject_forbidden_storage_fields(
     storage: ScheduleRuleStorage, shape: RuleType
 ) -> None:
@@ -722,6 +744,105 @@ class QuestDefinitionsDao:
         assert definition is not None
         return QuestDefinitionSnapshot(
             definition=definition,
+            assignees=assignees,
+            windows=window_records,
+        )
+
+    async def edit_definition(
+        self,
+        definition_id: int,
+        *,
+        title: str | None | object = _UNSET,
+        description: str | None | object = _UNSET,
+        icon: str | None | object = _UNSET,
+        rule: ScheduleRuleStorage | object = _UNSET,
+        windows: list[tuple[str, str | None]] | object = _UNSET,
+    ) -> QuestDefinitionSnapshot:
+        """Edit a definition's metadata, rule and windows atomically.
+
+        Mirrors :meth:`create_with_rule_and_windows`: everything runs
+        inside ONE transaction under the connection lock, and the
+        returned snapshot's assignees and windows are read back inside
+        that transaction.  Arguments default to the module sentinel
+        ``_UNSET`` meaning "leave this field alone"; ``None`` writes SQL
+        NULL so optional metadata (description, icon) can be cleared.
+
+        - ``title``/``description``/``icon`` update the definition row
+          in place; the definition-level ``due_time`` column is never
+          written (per-window due times supersede it, D-008).
+        - ``rule`` (a pre-validated :class:`ScheduleRuleStorage`)
+          overwrites the referenced ``schedule_rules`` row in place: the
+          definition keeps its ``schedule_rule_id``, so no new or
+          orphaned rule row appears.
+        - ``windows`` REPLACES the whole window set: the current rows
+          are deleted and the given set re-inserted, so missing windows
+          are added, changed due times updated and removed windows
+          dropped.
+
+        Assignment is deliberately not settable here (multi-assignee is
+        managed by :meth:`add_assignee`/:meth:`remove_assignee`), and
+        activation is untouched.  Raises ValueError when the definition
+        does not exist.  Edits change future instances only: no
+        ``quest_instances`` or ``completion_events`` row is touched.
+        """
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                definition = await self.get(definition_id)
+                if definition is None:
+                    raise ValueError(
+                        f"quest definition {definition_id} does not exist"
+                    )
+                assignments: list[str] = []
+                parameters: list[object] = []
+                for column, value in (
+                    ("title", title),
+                    ("description", description),
+                    ("icon", icon),
+                ):
+                    if value is not _UNSET:
+                        assignments.append(f"{column} = ?")
+                        parameters.append(value)
+                if assignments:
+                    parameters.append(definition_id)
+                    await self._database.execute(
+                        f"UPDATE quest_definitions SET "
+                        f"{', '.join(assignments)} WHERE id = ?",
+                        tuple(parameters),
+                    )
+                if rule is not _UNSET:
+                    await ScheduleRulesDao(self._database).update(
+                        definition.schedule_rule_id,
+                        rule_type=rule.rule_type,
+                        interval=rule.interval,
+                        weekday_set=rule.weekday_set,
+                        day_of_month=rule.day_of_month,
+                        nth_weekday=rule.nth_weekday,
+                        month=rule.month,
+                        start_date=rule.start_date,
+                        end_date=rule.end_date,
+                    )
+                if windows is not _UNSET:
+                    await self._database.execute(
+                        "DELETE FROM quest_definition_windows "
+                        "WHERE definition_id = ?",
+                        (definition_id,),
+                    )
+                    for window, due_time in windows:
+                        _validate_window(window)
+                        if due_time is not None:
+                            _validate_time(due_time, "due_time")
+                        await self._database.execute(
+                            "INSERT INTO quest_definition_windows "
+                            "(definition_id, window, due_time) "
+                            "VALUES (?, ?, ?)",
+                            (definition_id, window, due_time),
+                        )
+                updated = await self.get(definition_id)
+                assignees = await self.list_assignees(definition_id)
+                window_records = await self.list_windows(definition_id)
+        assert updated is not None
+        return QuestDefinitionSnapshot(
+            definition=updated,
             assignees=assignees,
             windows=window_records,
         )

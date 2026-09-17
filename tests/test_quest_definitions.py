@@ -17,6 +17,7 @@ from custom_components.nestquest.migrations import apply_migrations
 from custom_components.nestquest.quest_definitions import (
     CreatedQuestDefinition,
     create_quest_definition,
+    edit_quest_definition,
 )
 from custom_components.nestquest.recurrence import RuleType, ScheduleRule
 
@@ -461,3 +462,317 @@ def test_post_write_failure_rolls_back_everything(tmp_path) -> None:
         return None
 
     _with_db(tmp_path, "post-write-rollback.db")(_body)
+
+
+# ---------------------------------------------------------------------------
+# edit_quest_definition: successful edits
+# ---------------------------------------------------------------------------
+
+
+def test_edit_title_description_icon(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database,
+            "Brush teeth",
+            _daily_rule(),
+            [child.id],
+            ["morning"],
+            description="Old description",
+            icon="mdi:old",
+        )
+        result = await edit_quest_definition(
+            database,
+            created.definition.id,
+            title="  Floss  ",
+            description="  New description  ",
+            icon="  mdi:new  ",
+        )
+        assert result.definition.title == "Floss"
+        assert result.definition.description == "New description"
+        assert result.definition.icon == "mdi:new"
+        # Untouched fields survive the edit unchanged.
+        assert result.definition.id == created.definition.id
+        assert result.definition.schedule_rule_id == created.definition.schedule_rule_id
+        assert result.definition.due_time is None
+        assert result.definition.is_active is True
+        assert result.definition.created_at == created.definition.created_at
+        # Rule, assignees and windows are read back through the DAO.
+        assert result.rule == _daily_rule()
+        assert [c.id for c in result.assignees] == [child.id]
+        assert [w.window for w in result.windows] == ["morning"]
+        stored = await definitions.get(created.definition.id)
+        assert stored is not None
+        assert stored.title == "Floss"
+        assert stored.description == "New description"
+        assert stored.icon == "mdi:new"
+        return None
+
+    _with_db(tmp_path, "edit-metadata.db")(_body)
+
+
+def test_edit_omitted_fields_left_unchanged(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database,
+            "Brush teeth",
+            _daily_rule(),
+            [child.id],
+            ["morning"],
+            description="Keep me",
+        )
+        result = await edit_quest_definition(
+            database, created.definition.id, title="Renamed"
+        )
+        assert result.definition.title == "Renamed"
+        assert result.definition.description == "Keep me"
+        assert result.definition.icon is None
+        return None
+
+    _with_db(tmp_path, "edit-omitted.db")(_body)
+
+
+def test_edit_clears_optional_metadata(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database,
+            "Brush teeth",
+            _daily_rule(),
+            [child.id],
+            ["morning"],
+            description="Old",
+            icon="mdi:old",
+        )
+        result = await edit_quest_definition(
+            database,
+            created.definition.id,
+            description=None,
+            icon=None,
+        )
+        assert result.definition.description is None
+        assert result.definition.icon is None
+        return None
+
+    _with_db(tmp_path, "edit-clear-metadata.db")(_body)
+
+
+def test_edit_rule_updates_existing_row_in_place(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        rule_id = created.definition.schedule_rule_id
+        assert rule_id == 1
+        new_rule = ScheduleRule(
+            rule_type=RuleType.WEEKLY,
+            weekday_set={1, 3},
+            start_date="2026-09-14",
+        )
+        result = await edit_quest_definition(
+            database, created.definition.id, rule=new_rule
+        )
+        assert result.rule == new_rule
+        # The definition keeps the SAME rule row: no new or orphaned row.
+        assert result.definition.schedule_rule_id == rule_id
+        rule_row = await rules.get(rule_id)
+        assert rule_row is not None
+        assert rule_row.rule_type == "weekly"
+        assert rule_row.weekday_set == "1,3"
+        assert await rules.get(rule_id + 1) is None
+        return None
+
+    _with_db(tmp_path, "edit-rule-in-place.db")(_body)
+
+
+def test_edit_rule_shape_change_clears_stale_columns(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        weekly = ScheduleRule(
+            rule_type=RuleType.WEEKLY,
+            weekday_set={2},
+            start_date="2026-09-14",
+        )
+        created = await create_quest_definition(
+            database, "Chore", weekly, [child.id], ["morning"]
+        )
+        rule_id = created.definition.schedule_rule_id
+        result = await edit_quest_definition(
+            database, created.definition.id, rule=_daily_rule()
+        )
+        assert result.rule == _daily_rule()
+        rule_row = await rules.get(rule_id)
+        assert rule_row is not None
+        # The old weekly shape's weekday_set must be cleared, not left stale.
+        assert rule_row.rule_type == "daily"
+        assert rule_row.weekday_set is None
+        return None
+
+    _with_db(tmp_path, "edit-rule-shape.db")(_body)
+
+
+def test_edit_replaces_windows(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database,
+            "Brush teeth",
+            _daily_rule(),
+            [child.id],
+            [("morning", "07:00"), ("evening", "19:00")],
+        )
+        result = await edit_quest_definition(
+            database,
+            created.definition.id,
+            windows=[("morning", "08:00"), ("afternoon", "12:00")],
+        )
+        by_name = {w.window: w.due_time for w in result.windows}
+        # morning's due time changed, afternoon added, evening removed.
+        assert by_name == {"morning": "08:00", "afternoon": "12:00"}
+        persisted = {
+            w.window: w.due_time
+            for w in await definitions.list_windows(created.definition.id)
+        }
+        assert persisted == {"morning": "08:00", "afternoon": "12:00"}
+        return None
+
+    _with_db(tmp_path, "edit-replace-windows.db")(_body)
+
+
+def test_edit_preserves_assignees(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        bo = await children.create("Bo", NOW)
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id, bo.id], ["morning"]
+        )
+        result = await edit_quest_definition(
+            database,
+            created.definition.id,
+            title="Renamed",
+            rule=ScheduleRule(
+                rule_type=RuleType.WEEKLY,
+                weekday_set={0},
+                start_date="2026-09-14",
+            ),
+            windows=[("evening", "20:00")],
+        )
+        assert sorted(c.id for c in result.assignees) == sorted([child.id, bo.id])
+        persisted = [
+            c.id for c in await definitions.list_assignees(created.definition.id)
+        ]
+        assert sorted(persisted) == sorted([child.id, bo.id])
+        return None
+
+    _with_db(tmp_path, "edit-preserves-assignees.db")(_body)
+
+
+# ---------------------------------------------------------------------------
+# edit_quest_definition: argument rejections
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", ["", "   ", None])
+def test_edit_rejects_empty_title(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        with pytest.raises(ValueError, match="title is required"):
+            await edit_quest_definition(
+                database, created.definition.id, title=bad
+            )
+        return None
+
+    _with_db(tmp_path, "edit-bad-title.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [None, "weekly", 42, {"rule_type": "daily"}])
+def test_edit_rejects_non_schedule_rule(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        with pytest.raises(ValueError, match="rule must be a ScheduleRule"):
+            await edit_quest_definition(
+                database, created.definition.id, rule=bad
+            )
+        return None
+
+    _with_db(tmp_path, "edit-bad-rule.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [["noon"], [("MORNING", None)], [("", None)]])
+def test_edit_rejects_invalid_window(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        with pytest.raises(ValueError, match="window must be one of"):
+            await edit_quest_definition(
+                database, created.definition.id, windows=bad
+            )
+        return None
+
+    _with_db(tmp_path, "edit-bad-window.db")(_body)
+
+
+@pytest.mark.parametrize("bad", ["9:30", "25:00", "09:60", "0900"])
+def test_edit_rejects_malformed_due_time(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        with pytest.raises(ValueError, match="HH:MM"):
+            await edit_quest_definition(
+                database, created.definition.id, windows=[("morning", bad)]
+            )
+        return None
+
+    _with_db(tmp_path, "edit-bad-due-time.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [[]])
+def test_edit_rejects_empty_windows(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        with pytest.raises(ValueError, match="windows must not be empty"):
+            await edit_quest_definition(
+                database, created.definition.id, windows=bad
+            )
+        return None
+
+    _with_db(tmp_path, "edit-empty-windows.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [("morning",), "morning", {"morning"}])
+def test_edit_rejects_non_list_windows(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        with pytest.raises(ValueError, match="windows must be a list"):
+            await edit_quest_definition(
+                database, created.definition.id, windows=bad
+            )
+        return None
+
+    _with_db(tmp_path, "edit-non-list-windows.db")(_body)
+
+
+def test_edit_rejects_nonexistent_definition(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(ValueError, match="does not exist"):
+            await edit_quest_definition(database, 999, title="X")
+        return None
+
+    _with_db(tmp_path, "edit-missing-definition.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [True, 1.5, "1", None])
+def test_edit_rejects_non_int_definition_id(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(
+            ValueError, match="definition_id must be an integer"
+        ):
+            await edit_quest_definition(database, bad, title="X")
+        return None
+
+    _with_db(tmp_path, "edit-bad-definition-id.db")(_body)
