@@ -125,6 +125,8 @@ async def materialize(
     database: NestQuestDatabase,
     start_date: str,
     end_date: str,
+    *,
+    child_ids: list[int] | None = None,
 ) -> int:
     """Generate quest instances for the closed range [start_date, end_date].
 
@@ -133,6 +135,12 @@ async def materialize(
     else raises ValueError naming the offending field.  Returns the number
     of instances upserted for the range (idempotent — a re-run refreshes
     the same rows, never duplicates them).
+
+    ``child_ids`` optionally scopes the walk to exactly those children:
+    assignees outside the list are never written, so a caller that only
+    wants one child's instances rebuilt (e.g. :func:`regenerate_for_child`
+    after a presence change) cannot touch any unrelated child's rows.
+    When omitted (or None) the walk covers every assignee as before.
 
     All inputs are read in ONE locked transaction; each tuple's write then
     goes through the atomic :meth:`~.dao_instances.QuestInstancesDao.upsert_if_valid`,
@@ -153,6 +161,7 @@ async def materialize(
         load_materialization_input(database, start_date, end_date)
     )
     engine = _build_engine(schedules_records, overrides_records)
+    child_filter = None if child_ids is None else set(child_ids)
 
     definitions = [
         (snapshot.definition.id, _decode_rule(snapshot),
@@ -174,6 +183,8 @@ async def materialize(
             if not occurs_on(rule, cursor):
                 continue
             for child in assignees:
+                if child_filter is not None and child.id not in child_filter:
+                    continue
                 if not engine.is_present(child.id, cursor):
                     continue
                 for window in windows:
@@ -252,8 +263,13 @@ async def regenerate_for_child(
     (never a completed instance, never the past) via
     :meth:`~.dao_instances.QuestInstancesDao.delete_future_uncompleted_for_child`,
     then the materialization walk re-runs over the rolling horizon
-    ``[today, today + DEFAULT_HORIZON_DAYS]`` so the child's
-    now-absent/present dates re-materialize against today's presence.
+    ``[today, today + DEFAULT_HORIZON_DAYS]`` scoped to that child only,
+    so the child's now-absent/present dates re-materialize against
+    today's presence WITHOUT touching any other child's rows.
+
+    ``child_id`` must be a plain int — bool and float are rejected
+    (SQLite binds a bool as 0/1 and a float would round, so a malformed
+    id must never mutate the wrong profile).
 
     "today" is computed the same way the walk computes it —
     :func:`~.dao_instances._today` — and the re-materialization range uses the
@@ -261,10 +277,12 @@ async def regenerate_for_child(
     :meth:`~.dao_instances.QuestInstancesDao.delete_future_uncompleted_for_child`),
     so the delete cutoff and the re-materialization window share ONE
     execution-day anchor even when the call is queued across midnight.
-    Returns the number of instances the re-materialization upserted
-    across the whole snapshot (idempotent — other children's and
-    unaffected definitions' tuples refresh in place, never duplicate).
+    Returns the number of instances the re-materialization upserted for
+    the child across the whole snapshot.
     """
+    if isinstance(child_id, bool) or not isinstance(child_id, int):
+        raise ValueError(f"child_id must be an integer, got {child_id!r}")
+
     today = _today()
 
     instances = QuestInstancesDao(database)
@@ -279,4 +297,6 @@ async def regenerate_for_child(
     )
     start = datetime.date.fromisoformat(effective_cutoff)
     end_date = (start + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
-    return await materialize(database, start.isoformat(), end_date)
+    return await materialize(
+        database, start.isoformat(), end_date, child_ids=[child_id]
+    )

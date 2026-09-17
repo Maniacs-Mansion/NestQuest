@@ -962,3 +962,82 @@ def test_regenerate_for_child_uses_single_anchor_across_midnight(
         return rebuilt
 
     _with_db(tmp_path, "regenerate-child-midnight.db")(_body)
+
+
+def test_regenerate_for_child_is_child_scoped(tmp_path) -> None:
+    """Regenerating one child must never touch another child's rows."""
+    async def _body(database):
+        from custom_components.nestquest.dao_presence import (
+            PresenceOverridesDao,
+        )
+
+        children = ChildrenDao(database)
+        overrides = PresenceOverridesDao(database)
+        a = await children.create("Ada", NOW)
+        b = await children.create("Bo", NOW)
+
+        today = datetime.date.today()
+        horizon_end = today + datetime.timedelta(days=14)
+        start_iso = today.isoformat()
+
+        await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [a.id, b.id],
+            [("morning", "09:00")],
+        )
+
+        dao = QuestInstancesDao(database)
+        await materialize(database, start_iso, horizon_end.isoformat())
+
+        # Baseline for child b, keyed by due_date, so we can prove its rows
+        # are byte-for-byte unchanged afterward.
+        baseline_b = {
+            r.due_date: (r.id, r.due_time, r.generated_at)
+            for r in await dao.list_by_date_range(
+                b.id, start_iso, horizon_end.isoformat()
+            )
+        }
+        assert len(baseline_b) == 15
+
+        # An ABSENT override for child a only, covering days 2..4.
+        absent_start = (today + datetime.timedelta(days=2)).isoformat()
+        absent_end = (today + datetime.timedelta(days=4)).isoformat()
+        await overrides.create(
+            a.id, absent_start, absent_end, False, note="away"
+        )
+
+        await regenerate_for_child(database, a.id)
+
+        # Child a's now-absent days vanished.
+        a_by_due = {
+            r.due_date: r
+            for r in await dao.list_by_date_range(
+                a.id, start_iso, horizon_end.isoformat()
+            )
+        }
+        for offset in range(2, 5):
+            iso = (today + datetime.timedelta(days=offset)).isoformat()
+            assert iso not in a_by_due
+
+        # Child b is untouched: same physical rows, same snapshot columns.
+        b_records = await dao.list_by_date_range(
+            b.id, start_iso, horizon_end.isoformat()
+        )
+        assert len(b_records) == 15
+        for r in b_records:
+            assert (r.id, r.due_time, r.generated_at) == baseline_b[r.due_date]
+        return None
+
+    _with_db(tmp_path, "regenerate-child-scoped.db")(_body)
+
+
+def test_regenerate_for_child_rejects_non_int_child_id(tmp_path) -> None:
+    async def _body(database):
+        for bad in (True, False, 1.0, "1"):
+            with pytest.raises(ValueError, match="child_id must be an integer"):
+                await regenerate_for_child(database, bad)
+        return None
+
+    _with_db(tmp_path, "regenerate-child-badid.db")(_body)
