@@ -40,6 +40,7 @@ from .const import QUEST_WINDOWS
 from .dao_children import ChildRecord, _child_from_row, _connection_lock
 from .dao_children import _CHILD_COLUMNS
 from .db import NestQuestDatabase
+from .recurrence import RuleType, RuleValidationError, ScheduleRule
 
 #: Sentinel distinguishing "argument omitted" from "explicit SQL NULL"
 #: in update methods: passing ``None`` must mean clearing a nullable
@@ -120,6 +121,26 @@ class ScheduleRuleRecord:
 
 
 @dataclass(frozen=True)
+class ScheduleRuleStorage:
+    """The eight value columns a ScheduleRule maps to (no id column).
+
+    ``id`` is assigned by the database on insert, so the model<->storage
+    mapping concerns only the value columns.  ``nth_weekday_weekday`` is
+    deliberately absent here: for MONTHLY_WEEKDAY its value is folded
+    into ``weekday_set`` as that column's single CSV element.
+    """
+
+    rule_type: str
+    interval: int
+    weekday_set: str | None
+    day_of_month: int | None
+    nth_weekday: int | None
+    month: int | None
+    start_date: str
+    end_date: str | None
+
+
+@dataclass(frozen=True)
 class QuestDefinitionRecord:
     """One row of ``quest_definitions`` (without its assignees)."""
 
@@ -186,6 +207,130 @@ def _window_from_row(row: tuple) -> QuestDefinitionWindowRecord:
         window=row[1],
         due_time=row[2],
     )
+
+
+def schedule_rule_to_storage(rule: ScheduleRule) -> ScheduleRuleStorage:
+    """Map a validated ScheduleRule onto its storage columns.
+
+    ``rule_type`` stores as ``RuleType.storage_value`` (MONTHLY_DAY and
+    MONTHLY_WEEKDAY both store ``'monthly'``); ``weekday_set`` stores as
+    a sorted CSV list.  MONTHLY_WEEKDAY folds its model-only
+    ``nth_weekday_weekday`` into ``weekday_set`` as that list's single
+    element; every other type leaves the column as its own set
+    (WEEKLY/CUSTOM_DAYS) or NULL.
+    """
+    shape = rule.rule_type
+    if shape is RuleType.MONTHLY_WEEKDAY:
+        weekday_set = str(rule.nth_weekday_weekday)
+    elif shape is RuleType.WEEKLY or shape is RuleType.CUSTOM_DAYS:
+        weekday_set = ",".join(str(w) for w in sorted(rule.weekday_set))
+    else:
+        weekday_set = None
+    return ScheduleRuleStorage(
+        rule_type=shape.storage_value,
+        interval=rule.interval,
+        weekday_set=weekday_set,
+        day_of_month=rule.day_of_month,
+        nth_weekday=rule.nth_weekday,
+        month=rule.month,
+        start_date=rule.start_date,
+        end_date=rule.end_date,
+    )
+
+
+def schedule_rule_from_storage(storage: ScheduleRuleStorage) -> ScheduleRule:
+    """Reconstruct a ScheduleRule from storage columns.
+
+    Disambiguates MONTHLY_DAY from MONTHLY_WEEKDAY by which field is
+    populated, and raises RuleValidationError rather than silently
+    mis-decoding an ambiguous or invalid shape.
+    """
+    rule_type = storage.rule_type
+    if rule_type == "daily":
+        shape = RuleType.DAILY
+    elif rule_type == "weekly":
+        shape = RuleType.WEEKLY
+    elif rule_type == "monthly":
+        shape = _disambiguate_monthly(storage)
+    elif rule_type == "yearly":
+        shape = RuleType.YEARLY
+    elif rule_type == "custom":
+        shape = RuleType.CUSTOM_DAYS
+    else:
+        raise RuleValidationError(
+            f"unknown storage rule_type {rule_type!r}"
+        )
+
+    weekday_set = None
+    nth_weekday_weekday = None
+    if shape is RuleType.WEEKLY or shape is RuleType.CUSTOM_DAYS:
+        weekday_set = _weekdays_from_csv(storage.weekday_set)
+    elif shape is RuleType.MONTHLY_WEEKDAY:
+        nth_weekday_weekday = _single_weekday_from_csv(storage.weekday_set)
+
+    return ScheduleRule(
+        rule_type=shape,
+        interval=storage.interval,
+        weekday_set=weekday_set,
+        day_of_month=storage.day_of_month,
+        nth_weekday=storage.nth_weekday,
+        nth_weekday_weekday=nth_weekday_weekday,
+        month=storage.month,
+        start_date=storage.start_date,
+        end_date=storage.end_date,
+    )
+
+
+def _disambiguate_monthly(storage: ScheduleRuleStorage) -> RuleType:
+    """Resolve the shared 'monthly' storage value to a model type.
+
+    MONTHLY_DAY names ``day_of_month`` only; MONTHLY_WEEKDAY names
+    ``nth_weekday`` only.  Neither, or both, is ambiguous and raises.
+    """
+    day_of_month = storage.day_of_month
+    nth_weekday = storage.nth_weekday
+    if day_of_month is not None and nth_weekday is None:
+        return RuleType.MONTHLY_DAY
+    if nth_weekday is not None and day_of_month is None:
+        return RuleType.MONTHLY_WEEKDAY
+    raise RuleValidationError(
+        "storage rule_type 'monthly' is ambiguous: must name exactly one "
+        "of day_of_month or nth_weekday, got "
+        f"day_of_month={day_of_month!r}, nth_weekday={nth_weekday!r}"
+    )
+
+
+def _weekdays_from_csv(value: str | None) -> frozenset[int]:
+    """Parse a weekday CSV column into a frozenset of ints.
+
+    ``None`` and ``""`` both yield an empty frozenset (the caller decides
+    whether empty is legal); a non-integer token raises
+    RuleValidationError rather than leaking a raw ValueError.
+    """
+    if value is None or value == "":
+        return frozenset()
+    try:
+        entries = [int(token) for token in value.split(",")]
+    except ValueError:
+        raise RuleValidationError(
+            f"weekday_set must be a CSV of integers, got {value!r}"
+        ) from None
+    return frozenset(entries)
+
+
+def _single_weekday_from_csv(value: str | None) -> int:
+    """The one weekday a MONTHLY_WEEKDAY stores in weekday_set.
+
+    Raises RuleValidationError when the column is empty or holds more
+    than one weekday — the position's weekday must be unambiguous.
+    """
+    entries = _weekdays_from_csv(value)
+    if len(entries) != 1:
+        raise RuleValidationError(
+            "MONTHLY_WEEKDAY storage weekday_set must hold exactly one "
+            f"weekday, got {value!r}"
+        )
+    return next(iter(entries))
 
 
 class ScheduleRulesDao:
