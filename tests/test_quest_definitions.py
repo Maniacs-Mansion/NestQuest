@@ -786,6 +786,24 @@ def test_edit_rejects_nonexistent_definition(tmp_path) -> None:
     _with_db(tmp_path, "edit-missing-definition.db")(_body)
 
 
+def test_edit_nonexistent_definition_names_field(tmp_path) -> None:
+    """A missing definition's error names the ``definition_id`` field.
+
+    The DAO raises a bare "quest definition <id> does not exist"; the
+    business layer must re-raise it prefixed with the field the caller
+    passed, matching assign/unassign/deactivate.
+    """
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(
+            ValueError,
+            match="definition_id: quest definition 999 does not exist",
+        ):
+            await edit_quest_definition(database, 999, title="X")
+        return None
+
+    _with_db(tmp_path, "edit-missing-definition-field.db")(_body)
+
+
 @pytest.mark.parametrize("bad", [True, 1.5, "1", None])
 def test_edit_rejects_non_int_definition_id(tmp_path, bad) -> None:
     async def _body(database, children, rules, definitions, child):
@@ -1621,6 +1639,201 @@ def test_list_definitions_firing_on_rejects_malformed_date(tmp_path, bad) -> Non
         return None
 
     _with_db(tmp_path, "list-firing-on-bad-date.db")(_body)
+
+
+def test_list_query_snapshot_coherent_under_racing_edit(tmp_path) -> None:
+    """A racing edit cannot mix states into a query helper's snapshot.
+
+    The query helper pauses mid-snapshot (inside its locked transaction)
+    while an edit that changes BOTH the rule and the windows is queued
+    behind the connection lock.  Because the helper reads definitions,
+    rules and windows in one locked transaction, its returned bundle is
+    either the whole old state or the whole new state — never the old
+    rule paired with the new windows (the exact interleaving the unlocked
+    reads used to allow).  The pause hook holds
+    ``list_windows`` mid-flight so the edit is deterministically queued
+    against the helper's lock.
+    """
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        weekly = ScheduleRule(
+            rule_type=RuleType.WEEKLY,
+            weekday_set={2},
+            start_date="2026-09-14",
+        )
+
+        import custom_components.nestquest.dao_rules as dao_rules
+
+        original_list = dao_rules.QuestDefinitionsDao.list_windows
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _pausing_list(self, definition_id):
+            if not started.is_set():
+                started.set()
+                await release.wait()
+            return await original_list(self, definition_id)
+
+        dao_rules.QuestDefinitionsDao.list_windows = _pausing_list
+        try:
+            read_task = asyncio.ensure_future(
+                list_definitions_firing_on(database, "2026-09-16")
+            )
+            await started.wait()
+            edit_task = asyncio.ensure_future(
+                edit_quest_definition(
+                    database,
+                    created.definition.id,
+                    rule=weekly,
+                    windows=["evening"],
+                )
+            )
+            await asyncio.sleep(0)
+            release.set()
+            result, edited = await asyncio.gather(read_task, edit_task)
+        finally:
+            dao_rules.QuestDefinitionsDao.list_windows = original_list
+
+        # The helper finished before the queued edit, so its snapshot is
+        # the whole OLD state: the daily rule with its morning window.
+        assert [b.definition.id for b in result] == [created.definition.id]
+        assert result[0].rule == _daily_rule()
+        assert [w.window for w in result[0].windows] == ["morning"]
+        # The edit then reported the whole NEW state, not a mix either.
+        assert edited.rule == weekly
+        assert [w.window for w in edited.windows] == ["evening"]
+        return result
+
+    _with_db(tmp_path, "list-snapshot-concurrent.db")(_body)
+
+
+def test_list_definitions_for_child_snapshot_coherent_under_racing_unassign(
+    tmp_path,
+) -> None:
+    """A racing unassign cannot strip the child from the child-scoped
+    snapshot that ``list_definitions_for_child`` returns.
+
+    The helper pauses mid-snapshot (inside its locked transaction) while
+    an unassign of the very child it is listing is queued behind the
+    connection lock.  Because the definition set and its assignees are
+    read in one locked transaction, the returned bundle still shows the
+    child assigned — the coherent pre-unassign snapshot — rather than the
+    mixed state (definition returned "for child" but with the child
+    already gone from its roster) that the unlocked reads used to allow.
+    The pause hook holds ``list_assignees`` mid-flight so the unassign is
+    deterministically queued against the helper's lock.
+    """
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+
+        import custom_components.nestquest.dao_rules as dao_rules
+
+        original_list = dao_rules.QuestDefinitionsDao.list_assignees
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _pausing_list(self, definition_id):
+            if not started.is_set():
+                started.set()
+                await release.wait()
+            return await original_list(self, definition_id)
+
+        dao_rules.QuestDefinitionsDao.list_assignees = _pausing_list
+        try:
+            read_task = asyncio.ensure_future(
+                list_definitions_for_child(database, child.id)
+            )
+            await started.wait()
+            unassign_task = asyncio.ensure_future(
+                unassign_child(database, created.definition.id, child.id)
+            )
+            for _ in range(5):
+                await asyncio.sleep(0)
+            release.set()
+            result, removed = await asyncio.gather(read_task, unassign_task)
+        finally:
+            dao_rules.QuestDefinitionsDao.list_assignees = original_list
+
+        # The helper finished before the queued unassign, so its snapshot
+        # is the whole OLD state: the child still assigned to the
+        # definition it returned for that child.
+        assert [b.definition.id for b in result] == [created.definition.id]
+        assert [c.id for c in result[0].assignees] == [child.id]
+        assert removed is True
+        return result
+
+    _with_db(tmp_path, "list-for-child-snapshot-concurrent.db")(_body)
+
+
+def test_list_active_definitions_snapshot_coherent_under_racing_edit(
+    tmp_path,
+) -> None:
+    """A racing edit cannot mix states into ``list_active_definitions``.
+
+    The helper pauses mid-snapshot (inside its locked transaction) while
+    an edit that changes BOTH the rule and the windows is queued behind
+    the connection lock.  Because definitions, rules and windows are read
+    in one locked transaction, the returned bundle is the whole old state
+    — the daily rule with its morning window — never the old rule paired
+    with the new windows.  The pause hook holds ``list_windows``
+    mid-flight so the edit is deterministically queued against the
+    helper's lock.
+    """
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        weekly = ScheduleRule(
+            rule_type=RuleType.WEEKLY,
+            weekday_set={2},
+            start_date="2026-09-14",
+        )
+
+        import custom_components.nestquest.dao_rules as dao_rules
+
+        original_list = dao_rules.QuestDefinitionsDao.list_windows
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _pausing_list(self, definition_id):
+            if not started.is_set():
+                started.set()
+                await release.wait()
+            return await original_list(self, definition_id)
+
+        dao_rules.QuestDefinitionsDao.list_windows = _pausing_list
+        try:
+            read_task = asyncio.ensure_future(list_active_definitions(database))
+            await started.wait()
+            edit_task = asyncio.ensure_future(
+                edit_quest_definition(
+                    database,
+                    created.definition.id,
+                    rule=weekly,
+                    windows=["evening"],
+                )
+            )
+            await asyncio.sleep(0)
+            release.set()
+            result, edited = await asyncio.gather(read_task, edit_task)
+        finally:
+            dao_rules.QuestDefinitionsDao.list_windows = original_list
+
+        # The helper finished before the queued edit, so its snapshot is
+        # the whole OLD state: the daily rule with its morning window.
+        assert [b.definition.id for b in result] == [created.definition.id]
+        assert result[0].rule == _daily_rule()
+        assert [w.window for w in result[0].windows] == ["morning"]
+        # The edit then reported the whole NEW state, not a mix either.
+        assert edited.rule == weekly
+        assert [w.window for w in edited.windows] == ["evening"]
+        return result
+
+    _with_db(tmp_path, "list-active-snapshot-concurrent.db")(_body)
 
 
 # ---------------------------------------------------------------------------

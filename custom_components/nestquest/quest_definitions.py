@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from .dao_children import ChildRecord, _connection_lock
 from .dao_rules import (
     QuestDefinitionRecord,
+    QuestDefinitionSnapshot,
     QuestDefinitionWindowRecord,
     QuestDefinitionsDao,
     ScheduleRuleStorage,
@@ -318,14 +319,23 @@ async def edit_quest_definition(
         window_specs = _normalize_windows(windows)
 
     dao = QuestDefinitionsDao(database)
-    snapshot = await dao.edit_definition(
-        definition_id,
-        title=title_value,
-        description=description_value,
-        icon=icon_value,
-        rule=rule_storage,
-        windows=window_specs,
-    )
+    try:
+        snapshot = await dao.edit_definition(
+            definition_id,
+            title=title_value,
+            description=description_value,
+            icon=icon_value,
+            rule=rule_storage,
+            windows=window_specs,
+        )
+    except ValueError as error:
+        # The DAO's missing-definition error names only the id; re-raise
+        # so the public contract names the field the caller passed (matching
+        # assign/unassign/deactivate).
+        message = str(error)
+        if message.startswith("quest definition "):
+            raise ValueError(f"definition_id: {message}") from error
+        raise
 
     decoded_rule = schedule_rule_from_storage(
         schedule_rule_storage_from_record(snapshot.rule)
@@ -455,33 +465,25 @@ async def set_quest_definition_active(
     )
 
 
-async def _bundle_definition(
-    database: NestQuestDatabase,
-    dao: QuestDefinitionsDao,
-    definition: QuestDefinitionRecord,
+def _bundle_snapshot(
+    snapshot: QuestDefinitionSnapshot,
 ) -> CreatedQuestDefinition:
-    """Assemble a definition's rich view: decoded rule + assignees + windows.
+    """Decode a DAO snapshot into the layer's rich view.
 
-    Reads the schedule rule through :class:`~.dao_rules.ScheduleRulesDao`
-    and the assignees and windows through the DAO, then wraps them in the
-    same :class:`CreatedQuestDefinition` shape the create/edit/activate
-    paths return, so every query helper here reuses one snapshot type
-    rather than inventing a second one.
+    The rule record carried by the snapshot is the one the definition
+    referenced at read time, so decoding it here (rather than re-reading
+    through :class:`~.dao_rules.ScheduleRulesDao`) preserves the
+    coherence the DAO's locked snapshot guarantees: the rule, assignees
+    and windows all come from one atomic read, never three separate ones.
     """
-    rule_record = await ScheduleRulesDao(database).get(
-        definition.schedule_rule_id
-    )
-    assert rule_record is not None
     rule = schedule_rule_from_storage(
-        schedule_rule_storage_from_record(rule_record)
+        schedule_rule_storage_from_record(snapshot.rule)
     )
-    assignees = await dao.list_assignees(definition.id)
-    windows = await dao.list_windows(definition.id)
     return CreatedQuestDefinition(
-        definition=definition,
+        definition=snapshot.definition,
         rule=rule,
-        assignees=assignees,
-        windows=windows,
+        assignees=snapshot.assignees,
+        windows=snapshot.windows,
     )
 
 
@@ -494,14 +496,14 @@ async def list_active_definitions(
     order, so callers get a stable, repeatable sequence.  Each entry is
     the same rich :class:`CreatedQuestDefinition` snapshot as the rest of
     the layer: the stored row plus its decoded
-    :class:`~.recurrence.ScheduleRule`, assignees and windows.
+    :class:`~.recurrence.ScheduleRule`, assignees and windows.  The
+    definitions and their links are read by the DAO inside one locked
+    transaction, so each bundle is a coherent snapshot that a concurrent
+    edit cannot interleave.
     """
     dao = QuestDefinitionsDao(database)
-    definitions = await dao.list_active()
-    return [
-        await _bundle_definition(database, dao, definition)
-        for definition in definitions
-    ]
+    snapshots = await dao.list_snapshots_active()
+    return [_bundle_snapshot(snapshot) for snapshot in snapshots]
 
 
 async def list_definitions_for_child(
@@ -515,15 +517,12 @@ async def list_definitions_for_child(
     rising definition id, matching ``list_active_definitions`` and
     ``list_definitions_firing_on``.  Each entry is a
     :class:`CreatedQuestDefinition` snapshot bundling the definition with
-    its decoded rule, assignees and windows.
+    its decoded rule, assignees and windows, read atomically by the DAO.
     """
     _validate_child_id(child_id)
     dao = QuestDefinitionsDao(database)
-    definitions = await dao.list_by_child(child_id)
-    bundles = [
-        await _bundle_definition(database, dao, definition)
-        for definition in definitions
-    ]
+    snapshots = await dao.list_snapshots_by_child(child_id)
+    bundles = [_bundle_snapshot(snapshot) for snapshot in snapshots]
     return sorted(bundles, key=lambda bundle: bundle.definition.id)
 
 
@@ -540,13 +539,13 @@ async def list_definitions_firing_on(
     definitions whose decoded rule fires on the date are returned, in
     rising definition-id order, each as the same rich
     :class:`CreatedQuestDefinition` snapshot as the rest of the layer.
+    The definitions and their rules are read inside one locked
+    transaction, so a bundle can never filter on one rule while
+    presenting another state's windows.
     """
     _validate_date(date, "date")
     target = datetime.datetime.strptime(date, "%Y-%m-%d").date()
     dao = QuestDefinitionsDao(database)
-    definitions = await dao.list_active()
-    bundles = [
-        await _bundle_definition(database, dao, definition)
-        for definition in definitions
-    ]
+    snapshots = await dao.list_snapshots_active()
+    bundles = [_bundle_snapshot(snapshot) for snapshot in snapshots]
     return [bundle for bundle in bundles if occurs_on(bundle.rule, target)]
