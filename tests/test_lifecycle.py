@@ -251,7 +251,6 @@ async def test_setup_registers_day_rollover_listener(hass, make_entry) -> None:
     registration = hass.time_change.registrations[0]
     assert registration["hour"] == 0
     assert registration["minute"] == 0
-    assert registration["local"] is True
     assert callable(entry.runtime_data.remove_time_change_listener)
 
 
@@ -320,6 +319,23 @@ async def test_day_rollover_listener_materializes_ha_local_horizon(
     await hass.time_change.fire()
 
     fake.assert_awaited_once_with(database, expected_start, expected_end)
+
+
+def test_day_rollover_time_change_tracker_rejects_local_kwarg() -> None:
+    """The fake async_track_time_change mirrors HA 2024.6 (no ``local`` kwarg).
+
+    Setup drives the local-time wrapper directly, so passing ``local=`` must
+    raise TypeError — otherwise a regression in the production call would be
+    silently masked by the fake.
+    """
+    import inspect as _inspect
+
+    from homeassistant.helpers.event import async_track_time_change
+
+    params = _inspect.signature(async_track_time_change).parameters
+    assert list(params) == ["hass", "action", "hour", "minute", "second"]
+    with pytest.raises(TypeError):
+        async_track_time_change(None, lambda _now: None, hour=0, minute=0, local=True)
 
 
 async def test_setup_applies_all_v1_tables(hass, make_entry) -> None:

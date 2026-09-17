@@ -298,7 +298,7 @@ def _register_day_rollover_listener(
         await _materialize_run(database, start_date, end_date)
 
     return async_track_time_change(
-        hass, _run_materialization, hour=hour, minute=minute, local=True
+        hass, _run_materialization, hour=hour, minute=minute
     )
 
 

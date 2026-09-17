@@ -248,7 +248,7 @@ class TimeChangeRegistry:
     """Models HA's time-change listener bookkeeping.
 
     ``track`` mirrors ``homeassistant.helpers.event.async_track_time_change``:
-    each call appends a record (action + hour/minute/second/local) and returns
+    each call appends a record (action + hour/minute/second) and returns
     a remove callable that reverses the registration.  Tests inspect
     ``registrations`` and exercise the newest action through :meth:`fire`.
     """
@@ -257,13 +257,12 @@ class TimeChangeRegistry:
         self._hass = hass
         self._registrations: list[dict] = []
 
-    def track(self, action, hour=None, minute=None, second=None, local=False):
+    def track(self, action, hour=None, minute=None, second=None):
         record = {
             "action": action,
             "hour": hour,
             "minute": minute,
             "second": second,
-            "local": local,
         }
 
         def _remove():
@@ -290,17 +289,19 @@ class TimeChangeRegistry:
             await result
 
 
-def _async_track_time_change(hass, action, hour=None, minute=None, second=None, local=False):
+def _async_track_time_change(hass, action, hour=None, minute=None, second=None):
     """Mirror homeassistant.helpers.event.async_track_time_change.
 
-    Routes to the registry attached to ``hass`` (created on demand), so
-    tests reach the registrations via ``hass.time_change``.
+    Exact HA 2024.6 signature — no ``local`` keyword: the local-time
+    wrapper is already this function.  Routes to the registry attached to
+    ``hass`` (created on demand), so tests reach the registrations via
+    ``hass.time_change``.
     """
     registry = getattr(hass, "time_change", None)
     if registry is None:
         registry = TimeChangeRegistry(hass)
         hass.time_change = registry
-    return registry.track(action, hour=hour, minute=minute, second=second, local=local)
+    return registry.track(action, hour=hour, minute=minute, second=second)
 
 
 _ha_mock("homeassistant.helpers.event").async_track_time_change = _async_track_time_change
