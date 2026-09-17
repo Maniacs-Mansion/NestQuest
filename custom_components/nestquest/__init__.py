@@ -19,6 +19,7 @@ from homeassistant.helpers.event import async_track_time_change
 from .const import (
     CONF_ADMIN_USER_IDS,
     CONF_DAY_ROLLOVER_TIME,
+    CONF_HORIZON_DAYS,
     DEFAULT_DAY_ROLLOVER_TIME,
     DEFAULT_HORIZON_DAYS,
     DOMAIN,
@@ -273,10 +274,28 @@ def _day_rollover_hour_minute(options: dict[str, Any]) -> tuple[int, int]:
     return int(hour), int(minute)
 
 
+def _configured_horizon_days(options: dict[str, Any]) -> int:
+    """Return the configured generation horizon, validated, else the default.
+
+    The options flow already validates ``horizon_days`` as an integer >= 1,
+    but a stored ``entry.options`` dict could still carry a partial or
+    hand-edited value.  Re-checking here — and falling back to
+    :data:`~.const.DEFAULT_HORIZON_DAYS` on a missing, non-int or sub-1 value
+    — keeps a malformed option from shrinking or exploding the materialized
+    horizon.
+    """
+    value = options.get(CONF_HORIZON_DAYS, DEFAULT_HORIZON_DAYS)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return DEFAULT_HORIZON_DAYS
+    return value
+
+
 async def _run_horizon_materialization(
-    hass: HomeAssistant, database: NestQuestDatabase
+    hass: HomeAssistant,
+    database: NestQuestDatabase,
+    horizon_days: int = DEFAULT_HORIZON_DAYS,
 ) -> None:
-    """Materialize the rolling horizon ``[today, today + DEFAULT_HORIZON_DAYS]``.
+    """Materialize the rolling horizon ``[today, today + horizon_days]``.
 
     "today" is computed in HA local time (``hass.config.time_zone``) rather
     than the system clock, so the horizon tracks the household's own day.
@@ -285,13 +304,15 @@ async def _run_horizon_materialization(
 
     This is the ONE generation path: the startup backfill, the daily rollover
     listener and the ``regenerate`` service all funnel through it, so there is
-    no duplicated materialization logic.
+    no duplicated materialization logic.  ``horizon_days`` sizes the window
+    and defaults to :data:`~.const.DEFAULT_HORIZON_DAYS`; callers thread the
+    entry's validated option value through.
     """
     time_zone = ZoneInfo(hass.config.time_zone)
     today = datetime.datetime.now(time_zone).date()
     start_date = today.isoformat()
     end_date = (
-        today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+        today + datetime.timedelta(days=horizon_days)
     ).isoformat()
     await _materialize_run(database, start_date, end_date, today=today)
 
@@ -304,31 +325,34 @@ def _register_day_rollover_listener(
     """Register the daily materialization listener and return its remover.
 
     Fires once per day at the configured local ``day_rollover_time`` and
-    materializes the rolling horizon ``[today, today + DEFAULT_HORIZON_DAYS]``
-    through the shared :func:`_run_horizon_materialization` path.
+    materializes the rolling horizon ``[today, today + horizon_days]``
+    through the shared :func:`_run_horizon_materialization` path, using the
+    entry's configured (validated) ``horizon_days``.
     """
     hour, minute = _day_rollover_hour_minute(options)
+    horizon_days = _configured_horizon_days(options)
 
     async def _run_materialization(_now: datetime.datetime) -> None:
-        await _run_horizon_materialization(hass, database)
+        await _run_horizon_materialization(hass, database, horizon_days)
 
     return async_track_time_change(
         hass, _run_materialization, hour=hour, minute=minute
     )
 
 
-def _find_live_database(hass: HomeAssistant) -> NestQuestDatabase | None:
-    """Return a connected database from the active runtime data, or None.
+def _find_live_runtime_data(hass: HomeAssistant) -> NestQuestRuntimeData | None:
+    """Return a live runtime record with a connected database, or None.
 
     The domain-global services (e.g. ``regenerate``) have no database of
-    their own; they resolve whichever config entry's database is currently
-    live at call time, so none of them can hold a stale handle to a closed
-    connection after another entry unloads.
+    their own; they resolve whichever config entry's runtime data is
+    currently live at call time, so none of them can hold a stale handle
+    to a closed connection after another entry unloads.  The record also
+    carries that entry's options (e.g. the configured horizon).
     """
     for runtime_data in hass.data.get(DOMAIN, {}).values():
         database = getattr(runtime_data, "database", None)
         if database is not None and database.connected:
-            return database
+            return runtime_data
     return None
 
 
@@ -349,14 +373,17 @@ def _register_regenerate_service(hass: HomeAssistant) -> None:
         return
 
     async def _regenerate(_call: Any) -> None:
-        database = _find_live_database(hass)
-        if database is None:
+        runtime_data = _find_live_runtime_data(hass)
+        if runtime_data is None:
             _LOGGER.warning(
                 "NestQuest regenerate requested but no config entry has a "
                 "live database; ignoring"
             )
             return
-        await _run_horizon_materialization(hass, database)
+        horizon_days = _configured_horizon_days(runtime_data.options)
+        await _run_horizon_materialization(
+            hass, runtime_data.database, horizon_days
+        )
 
     hass.services.async_register(DOMAIN, SERVICE_REGENERATE, _regenerate)
 
@@ -456,9 +483,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         # Backfill any days the daily listener missed while the integration
         # was off (or freshly installed): run the one idempotent walk over
-        # [today, today + DEFAULT_HORIZON_DAYS] once at setup.  This runs
-        # through the SAME path as the daily listener and regenerate service.
-        await _run_horizon_materialization(hass, database)
+        # [today, today + horizon_days] once at setup, using the entry's
+        # configured horizon.  This runs through the SAME path as the daily
+        # listener and regenerate service.
+        await _run_horizon_materialization(
+            hass, database, _configured_horizon_days(dict(entry.options))
+        )
         _register_regenerate_service(hass)
     except BaseException:
         # A failure anywhere after the database is open must not leak the

@@ -272,6 +272,7 @@ async def edit_quest_definition(
     rule: ScheduleRule | object = _UNSET,
     windows: list[str | tuple[str, str | None]] | object = _UNSET,
     today: datetime.date | None = None,
+    horizon_days: int | None = None,
 ) -> CreatedQuestDefinition:
     """Edit a quest definition's metadata, rule and windows atomically.
 
@@ -299,7 +300,10 @@ async def edit_quest_definition(
     into :func:`~.materialize.regenerate_for_definition`); it is a plain
     ``datetime.date`` with no HA import here — the Feature 09 service
     supplies the hass-derived value.  When omitted, regeneration falls
-    back to the host clock, same as before.
+    back to the host clock, same as before.  ``horizon_days`` sizes the
+    regeneration's re-materialization window the same way (threaded into
+    :func:`~.materialize.regenerate_for_definition`); it defaults to
+    :data:`~.const.DEFAULT_HORIZON_DAYS` when omitted.
     """
     _validate_definition_id(definition_id)
 
@@ -350,7 +354,9 @@ async def edit_quest_definition(
         schedule_rule_storage_from_record(snapshot.rule)
     )
 
-    await regenerate_for_definition(database, definition_id, today=today)
+    await regenerate_for_definition(
+        database, definition_id, today=today, horizon_days=horizon_days
+    )
 
     return CreatedQuestDefinition(
         definition=snapshot.definition,
@@ -366,6 +372,7 @@ async def assign_child(
     child_id: int,
     *,
     today: datetime.date | None = None,
+    horizon_days: int | None = None,
 ) -> list[ChildRecord]:
     """Assign ``child_id`` to the definition (idempotent).
 
@@ -382,6 +389,8 @@ async def assign_child(
 
     ``today`` optionally pins the caller-resolved HA-local date threaded
     into the assignment's regeneration (see :func:`edit_quest_definition`).
+    ``horizon_days`` optionally sizes the regeneration's re-materialization
+    window the same way.
     """
     _validate_definition_id(definition_id)
     _validate_child_id(child_id)
@@ -397,7 +406,9 @@ async def assign_child(
         if message.startswith("quest definition "):
             raise ValueError(f"definition_id: {message}") from error
         raise
-    await regenerate_for_definition(database, definition_id, today=today)
+    await regenerate_for_definition(
+        database, definition_id, today=today, horizon_days=horizon_days
+    )
     return assignees
 
 
@@ -407,6 +418,7 @@ async def unassign_child(
     child_id: int,
     *,
     today: datetime.date | None = None,
+    horizon_days: int | None = None,
 ) -> bool:
     """Unassign ``child_id`` from the definition; True when removed.
 
@@ -419,6 +431,8 @@ async def unassign_child(
 
     ``today`` optionally pins the caller-resolved HA-local date threaded
     into the unassignment's regeneration (see :func:`edit_quest_definition`).
+    ``horizon_days`` optionally sizes the regeneration's re-materialization
+    window the same way.
     """
     _validate_definition_id(definition_id)
     _validate_child_id(child_id)
@@ -429,7 +443,9 @@ async def unassign_child(
             f"definition_id: quest definition {definition_id} does not exist"
         )
     removed = await dao.remove_assignee(definition_id, child_id)
-    await regenerate_for_definition(database, definition_id, today=today)
+    await regenerate_for_definition(
+        database, definition_id, today=today, horizon_days=horizon_days
+    )
     return removed
 
 
@@ -439,6 +455,7 @@ async def set_quest_definition_active(
     is_active: bool,
     *,
     today: datetime.date | None = None,
+    horizon_days: int | None = None,
 ) -> CreatedQuestDefinition:
     """Deactivate or reactivate a definition; returns the updated view.
 
@@ -464,7 +481,8 @@ async def set_quest_definition_active(
 
     ``today`` optionally pins the caller-resolved HA-local date threaded
     into the activation change's regeneration (see
-    :func:`edit_quest_definition`).
+    :func:`edit_quest_definition`).  ``horizon_days`` optionally sizes the
+    regeneration's re-materialization window the same way.
     """
     _validate_definition_id(definition_id)
     if not isinstance(is_active, bool):
@@ -488,7 +506,9 @@ async def set_quest_definition_active(
     rule = schedule_rule_from_storage(
         schedule_rule_storage_from_record(rule_record)
     )
-    await regenerate_for_definition(database, definition_id, today=today)
+    await regenerate_for_definition(
+        database, definition_id, today=today, horizon_days=horizon_days
+    )
     return CreatedQuestDefinition(
         definition=updated,
         rule=rule,

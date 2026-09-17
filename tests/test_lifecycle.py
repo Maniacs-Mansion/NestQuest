@@ -10,6 +10,7 @@ from conftest import make_config_entry, make_hass, wire_entry_to_registry
 from custom_components.nestquest import DOMAIN, async_setup_entry, async_unload_entry
 from custom_components.nestquest.const import (
     CONF_DAY_ROLLOVER_TIME,
+    CONF_HORIZON_DAYS,
     DEFAULT_HORIZON_DAYS,
     SERVICE_REGENERATE,
     DOMAIN as DOMAIN_CONST,
@@ -351,6 +352,39 @@ async def test_day_rollover_listener_materializes_ha_local_horizon(
     )
 
 
+async def test_day_rollover_uses_configured_horizon_days(hass, make_entry) -> None:
+    """The daily run materializes only the configured horizon window."""
+    import datetime
+
+    from custom_components.nestquest.dao_instances import QuestInstancesDao
+
+    entry = _wire(make_entry(options={CONF_HORIZON_DAYS: 5}), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    database = entry.runtime_data.database
+
+    # A definition created AFTER setup has no instances yet (create does not
+    # materialize); firing the daily listener must generate only the horizon.
+    child_id = await _seed_daily_child_and_definition(
+        database, _local_today(hass)
+    )
+    await hass.time_change.fire()
+
+    today = _local_today(hass)
+    end = (today + datetime.timedelta(days=5)).isoformat()
+    records = await QuestInstancesDao(database).list_by_date_range(
+        child_id, today.isoformat(), end
+    )
+    assert len(records) == 6
+
+    beyond = (today + datetime.timedelta(days=6)).isoformat()
+    beyond_end = (
+        today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+    ).isoformat()
+    assert await QuestInstancesDao(database).list_by_date_range(
+        child_id, beyond, beyond_end
+    ) == []
+
+
 def test_day_rollover_time_change_tracker_rejects_local_kwarg() -> None:
     """The fake async_track_time_change mirrors HA 2024.6 (no ``local`` kwarg).
 
@@ -447,6 +481,63 @@ async def test_setup_backfills_instances_over_horizon(hass, make_entry) -> None:
     assert len(records) == DEFAULT_HORIZON_DAYS + 1
 
 
+async def test_setup_backfills_configured_horizon_days(hass, make_entry) -> None:
+    """Setup backfills only the configured (non-default) horizon window."""
+    import datetime
+
+    from custom_components.nestquest.dao_instances import QuestInstancesDao
+    from custom_components.nestquest.db import NestQuestDatabase
+    from custom_components.nestquest.migrations import apply_migrations
+    from custom_components.nestquest.store import async_get_db_path
+
+    db_path = await async_get_db_path(hass)
+    pre = NestQuestDatabase(hass)
+    await pre.open(db_path)
+    await apply_migrations(pre)
+    child_id = await _seed_daily_child_and_definition(pre, _local_today(hass))
+    await pre.close()
+
+    entry = _wire(
+        make_entry(options={CONF_HORIZON_DAYS: 5}), hass.registry
+    )
+    assert await async_setup_entry(hass, entry) is True
+
+    today = _local_today(hass)
+    end = (today + datetime.timedelta(days=5)).isoformat()
+    records = await QuestInstancesDao(
+        entry.runtime_data.database
+    ).list_by_date_range(child_id, today.isoformat(), end)
+    assert len(records) == 6
+
+    beyond = (today + datetime.timedelta(days=6)).isoformat()
+    beyond_end = (
+        today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+    ).isoformat()
+    assert await QuestInstancesDao(
+        entry.runtime_data.database
+    ).list_by_date_range(child_id, beyond, beyond_end) == []
+
+
+def test_configured_horizon_days_validates_and_falls_back() -> None:
+    """The configured horizon is validated; a malformed value uses the default."""
+    import custom_components.nestquest as nestquest
+
+    assert nestquest._configured_horizon_days({CONF_HORIZON_DAYS: 5}) == 5
+    assert nestquest._configured_horizon_days({}) == DEFAULT_HORIZON_DAYS
+    assert (
+        nestquest._configured_horizon_days({CONF_HORIZON_DAYS: True})
+        == DEFAULT_HORIZON_DAYS
+    )
+    assert (
+        nestquest._configured_horizon_days({CONF_HORIZON_DAYS: "5"})
+        == DEFAULT_HORIZON_DAYS
+    )
+    assert (
+        nestquest._configured_horizon_days({CONF_HORIZON_DAYS: 0})
+        == DEFAULT_HORIZON_DAYS
+    )
+
+
 async def test_regenerate_service_registered_and_materializes(
     hass, make_entry
 ) -> None:
@@ -472,6 +563,40 @@ async def test_regenerate_service_registered_and_materializes(
         child_id, today.isoformat(), end
     )
     assert len(records) == DEFAULT_HORIZON_DAYS + 1
+
+
+async def test_regenerate_service_uses_configured_horizon_days(
+    hass, make_entry
+) -> None:
+    """``nestquest.regenerate`` regenerates only the configured horizon."""
+    import datetime
+
+    from custom_components.nestquest.dao_instances import QuestInstancesDao
+
+    entry = _wire(
+        make_entry(options={CONF_HORIZON_DAYS: 5}), hass.registry
+    )
+    assert await async_setup_entry(hass, entry) is True
+
+    database = entry.runtime_data.database
+    child_id = await _seed_daily_child_and_definition(database, _local_today(hass))
+
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+
+    today = _local_today(hass)
+    end = (today + datetime.timedelta(days=5)).isoformat()
+    records = await QuestInstancesDao(database).list_by_date_range(
+        child_id, today.isoformat(), end
+    )
+    assert len(records) == 6
+
+    beyond = (today + datetime.timedelta(days=6)).isoformat()
+    beyond_end = (
+        today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+    ).isoformat()
+    assert await QuestInstancesDao(database).list_by_date_range(
+        child_id, beyond, beyond_end
+    ) == []
 
 
 async def test_unload_deregisters_regenerate_service(hass, make_entry) -> None:

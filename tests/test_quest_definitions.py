@@ -8,6 +8,7 @@ import re
 import pytest
 
 from custom_components.nestquest.dao_children import ChildrenDao
+from custom_components.nestquest.const import DEFAULT_HORIZON_DAYS
 from custom_components.nestquest.dao_instances import (
     CompletionEventsDao,
     QuestInstancesDao,
@@ -1938,3 +1939,71 @@ def test_full_lifecycle_preserves_completed_and_history(tmp_path) -> None:
         return reactivated
 
     _with_db(tmp_path, "full-lifecycle.db")(_body)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["edit", "assign", "unassign", "set_active"],
+)
+def test_wrappers_forward_horizon_days(tmp_path, mode) -> None:
+    """The four change wrappers forward a non-default horizon_days.
+
+    Each wrapper threads ``horizon_days`` into the regeneration it triggers;
+    passing 5 here must bound the regenerated window to today..today+5 —
+    proving the forwarding argument is actually honored, not dropped.
+    """
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database,
+            "Chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=_today_iso()),
+            [child.id],
+            ["morning"],
+        )
+        definition_id = created.definition.id
+        instances = QuestInstancesDao(database)
+
+        if mode == "edit":
+            await edit_quest_definition(
+                database,
+                definition_id,
+                windows=[("morning", "10:30")],
+                horizon_days=5,
+            )
+            tracked = child
+        elif mode == "assign":
+            bo = await children.create("Bo", NOW)
+            await assign_child(database, definition_id, bo.id, horizon_days=5)
+            tracked = bo
+        elif mode == "unassign":
+            # The remaining assignee (``child``) must be regenerated over
+            # the 5-day window after ``bo`` is removed.
+            bo = await children.create("Bo", NOW)
+            await assign_child(database, definition_id, bo.id)
+            await unassign_child(
+                database, definition_id, bo.id, horizon_days=5
+            )
+            tracked = child
+        else:  # set_active
+            await set_quest_definition_active(
+                database, definition_id, True, horizon_days=5
+            )
+            tracked = child
+
+        today = datetime.date.today()
+        end = (today + datetime.timedelta(days=5)).isoformat()
+        records = await instances.list_by_date_range(
+            tracked.id, today.isoformat(), end
+        )
+        assert len(records) == 6
+
+        beyond = (today + datetime.timedelta(days=6)).isoformat()
+        beyond_end = (
+            today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+        ).isoformat()
+        assert await instances.list_by_date_range(
+            tracked.id, beyond, beyond_end
+        ) == []
+        return None
+
+    _with_db(tmp_path, f"wrapper-horizon-{mode}.db")(_body)

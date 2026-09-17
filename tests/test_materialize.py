@@ -7,6 +7,7 @@ import datetime
 import pytest
 
 from custom_components.nestquest.dao_children import ChildrenDao
+from custom_components.nestquest.const import DEFAULT_HORIZON_DAYS
 from custom_components.nestquest.dao_instances import (
     CompletionEventsDao,
     QuestInstancesDao,
@@ -1111,6 +1112,158 @@ def test_regenerate_for_child_is_child_scoped(tmp_path) -> None:
         return None
 
     _with_db(tmp_path, "regenerate-child-scoped.db")(_body)
+
+
+def test_regenerate_for_definition_respects_horizon_days(tmp_path) -> None:
+    """A non-default horizon_days sizes the definition's rebuild window."""
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+
+        today = datetime.date.today()
+        start_iso = today.isoformat()
+
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            [("morning", "09:00")],
+        )
+
+        # ``create`` does not materialize; regeneration over a 5-day horizon
+        # must build exactly today..today+5 (six daily rows).
+        await regenerate_for_definition(
+            database, created.definition.id, horizon_days=5
+        )
+
+        dao = QuestInstancesDao(database)
+        horizon_end = today + datetime.timedelta(days=5)
+        records = await dao.list_by_date_range(
+            child.id, start_iso, horizon_end.isoformat()
+        )
+        assert len(records) == 6
+
+        # The window is BOUNDED: nothing must exist at day 6 or later (a
+        # hard-coded 14-day default would still emit rows there).
+        beyond = (today + datetime.timedelta(days=6)).isoformat()
+        beyond_end = (
+            today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+        ).isoformat()
+        assert await dao.list_by_date_range(child.id, beyond, beyond_end) == []
+        return None
+
+    _with_db(tmp_path, "regenerate-def-horizon.db")(_body)
+
+
+def test_regenerate_for_child_respects_horizon_days(tmp_path) -> None:
+    """A non-default horizon_days sizes the child's rebuild window."""
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+
+        today = datetime.date.today()
+        start_iso = today.isoformat()
+
+        await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            [("morning", "09:00")],
+        )
+
+        await regenerate_for_child(database, child.id, horizon_days=5)
+
+        dao = QuestInstancesDao(database)
+        horizon_end = today + datetime.timedelta(days=5)
+        records = await dao.list_by_date_range(
+            child.id, start_iso, horizon_end.isoformat()
+        )
+        assert len(records) == 6
+
+        # Bounded window: nothing must exist at day 6 or later.
+        beyond = (today + datetime.timedelta(days=6)).isoformat()
+        beyond_end = (
+            today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+        ).isoformat()
+        assert await dao.list_by_date_range(child.id, beyond, beyond_end) == []
+        return None
+
+    _with_db(tmp_path, "regenerate-child-horizon.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [-1, 0, True, False, "5", 1.5])
+def test_regenerate_for_definition_rejects_invalid_horizon_before_delete(
+    tmp_path, bad
+) -> None:
+    """A malformed horizon fails BEFORE any future-instance delete."""
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+
+        today = datetime.date.today()
+        start_iso = today.isoformat()
+        horizon_end = today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            [("morning", "09:00")],
+        )
+        dao = QuestInstancesDao(database)
+        await materialize(database, start_iso, horizon_end.isoformat())
+
+        with pytest.raises(ValueError, match="horizon_days"):
+            await regenerate_for_definition(
+                database, created.definition.id, horizon_days=bad
+            )
+
+        # The refused call deleted nothing: the seeded horizon survives.
+        records = await dao.list_by_date_range(
+            child.id, start_iso, horizon_end.isoformat()
+        )
+        assert len(records) == DEFAULT_HORIZON_DAYS + 1
+        return None
+
+    _with_db(tmp_path, "regenerate-def-horizon-invalid.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [-1, 0, True, False, "5", 1.5])
+def test_regenerate_for_child_rejects_invalid_horizon_before_delete(
+    tmp_path, bad
+) -> None:
+    """A malformed child horizon fails BEFORE any future-instance delete."""
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+
+        today = datetime.date.today()
+        start_iso = today.isoformat()
+        horizon_end = today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+
+        await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            [("morning", "09:00")],
+        )
+        dao = QuestInstancesDao(database)
+        await materialize(database, start_iso, horizon_end.isoformat())
+
+        with pytest.raises(ValueError, match="horizon_days"):
+            await regenerate_for_child(database, child.id, horizon_days=bad)
+
+        records = await dao.list_by_date_range(
+            child.id, start_iso, horizon_end.isoformat()
+        )
+        assert len(records) == DEFAULT_HORIZON_DAYS + 1
+        return None
+
+    _with_db(tmp_path, "regenerate-child-horizon-invalid.db")(_body)
 
 
 #: Fixed end-to-end anchor: 2026-06-01 is a Monday AND the 1st of its month,
