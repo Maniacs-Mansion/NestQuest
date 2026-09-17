@@ -13,17 +13,17 @@ Validation policy mirrors :mod:`.children`:
 - ``rule`` must be an already-validated :class:`~.recurrence.ScheduleRule`
   (its constructor is total — rule validation is NOT re-implemented
   here).
-- ``assignee_child_ids`` is non-empty; every id is a plain int (bools
-  and floats rejected, since SQLite would bind them onto a real child)
-  and must reference an existing ACTIVE child (the DAO enforces the
-  active/exists check inside the same transaction).  Duplicate ids are
-  rejected here, before the composite primary key could surface them as
-  an :class:`sqlite3.IntegrityError`.
-- ``windows`` is non-empty; each entry is a window name from
-  :data:`~.const.QUEST_WINDOWS` — either a bare name (no due time) or a
-  ``(name, due_time)`` pair whose due time is a strict 24-hour HH:MM
-  string.  Duplicate window names are rejected here, before the
-  composite primary key could surface them as an
+- ``assignee_child_ids`` must be a non-empty list (strictly a ``list``);
+  every id is a plain int (bools and floats rejected, since SQLite would
+  bind them onto a real child) and must reference an existing ACTIVE
+  child (the DAO enforces the active/exists check inside the same
+  transaction).  Duplicate ids are rejected here, before the composite
+  primary key could surface them as an :class:`sqlite3.IntegrityError`.
+- ``windows`` must be a non-empty list (strictly a ``list``); each entry
+  is a window name from :data:`~.const.QUEST_WINDOWS` — either a bare
+  name (no due time) or a ``(name, due_time)`` pair whose due time is a
+  strict 24-hour HH:MM string.  Duplicate window names are rejected
+  here, before the composite primary key could surface them as an
   :class:`sqlite3.IntegrityError`.
 
 The rule, definition, assignees and windows are persisted in ONE
@@ -99,13 +99,14 @@ def _validate_text(
 def _validate_assignee_ids(value: object) -> list[int]:
     """Return the assignee ids as plain ints, or raise naming the field.
 
-    The list must be non-empty; each entry must be a real int (bools and
-    floats rejected) so SQLite cannot bind ``True`` onto child 1 or a
-    float onto a neighbouring profile.
+    The argument must be a non-empty list — strictly a ``list``: tuples
+    and other sequences are rejected.  Each entry must be a real int
+    (bools and floats rejected) so SQLite cannot bind ``True`` onto
+    child 1 or a float onto a neighbouring profile.
     """
-    if not isinstance(value, (list, tuple)):
+    if type(value) is not list:
         raise ValueError(
-            "assignee_child_ids must be a non-empty list of child ids"
+            f"assignee_child_ids must be a list, got {type(value).__name__}"
         )
     if not value:
         raise ValueError("assignee_child_ids must not be empty")
@@ -129,16 +130,17 @@ def _normalize_windows(
 ) -> list[tuple[str, str | None]]:
     """Normalize the windows argument to ``(name, due_time)`` pairs.
 
-    Each entry is a bare window name (due time None) or a
-    ``(name, due_time)`` pair.  The name must be a
+    The outer argument must be a non-empty list — strictly a ``list``:
+    tuples and other sequences are rejected, while each individual entry
+    may still be a ``(window, due_time)`` tuple.  A bare window name
+    (due time None) is also accepted.  The name must be a
     :data:`~.const.QUEST_WINDOWS` spelling and a present due time must be
     a strict 24-hour HH:MM, both validated up front so a malformed
     window is rejected before any write.
     """
-    if not isinstance(value, (list, tuple)):
+    if type(value) is not list:
         raise ValueError(
-            "windows must be a non-empty list of window names or "
-            "(name, due_time) pairs"
+            f"windows must be a list, got {type(value).__name__}"
         )
     if not value:
         raise ValueError("windows must not be empty")

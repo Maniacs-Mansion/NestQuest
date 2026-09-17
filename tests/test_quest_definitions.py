@@ -186,7 +186,7 @@ def test_create_rejects_non_schedule_rule(tmp_path, bad) -> None:
     _with_db(tmp_path, "create-bad-rule.db")(_body)
 
 
-@pytest.mark.parametrize("bad", [[], ()])
+@pytest.mark.parametrize("bad", [[]])
 def test_create_rejects_empty_assignees(tmp_path, bad) -> None:
     async def _body(database, children, rules, definitions, child):
         with pytest.raises(
@@ -198,6 +198,20 @@ def test_create_rejects_empty_assignees(tmp_path, bad) -> None:
         return None
 
     _with_db(tmp_path, "create-empty-assignees.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [(1,), (1, 2), "1", {1}])
+def test_create_rejects_non_list_assignees(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(
+            ValueError, match="assignee_child_ids must be a list"
+        ):
+            await create_quest_definition(
+                database, "Brush teeth", _daily_rule(), bad, ["morning"]
+            )
+        return None
+
+    _with_db(tmp_path, "create-non-list-assignees.db")(_body)
 
 
 @pytest.mark.parametrize("bad", [True, False, 1.5, "1", None])
@@ -259,7 +273,7 @@ def test_create_rejects_unknown_child(tmp_path) -> None:
     _with_db(tmp_path, "create-unknown-child.db")(_body)
 
 
-@pytest.mark.parametrize("bad", [[], ()])
+@pytest.mark.parametrize("bad", [[]])
 def test_create_rejects_empty_windows(tmp_path, bad) -> None:
     async def _body(database, children, rules, definitions, child):
         with pytest.raises(ValueError, match="windows must not be empty"):
@@ -269,6 +283,20 @@ def test_create_rejects_empty_windows(tmp_path, bad) -> None:
         return None
 
     _with_db(tmp_path, "create-empty-windows.db")(_body)
+
+
+@pytest.mark.parametrize(
+    "bad", [("morning",), ("morning", "afternoon"), "morning", {"morning"}]
+)
+def test_create_rejects_non_list_windows(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(ValueError, match="windows must be a list"):
+            await create_quest_definition(
+                database, "Brush teeth", _daily_rule(), [child.id], bad
+            )
+        return None
+
+    _with_db(tmp_path, "create-non-list-windows.db")(_body)
 
 
 @pytest.mark.parametrize("bad", [["noon"], [("MORNING", None)], [("", None)]])
