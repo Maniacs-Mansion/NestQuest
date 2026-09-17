@@ -1505,20 +1505,21 @@ def test_list_definitions_for_child_returns_only_that_child(tmp_path) -> None:
             database, "Walk dog", _daily_rule(), [bo.id], ["afternoon"]
         )
 
-        # DAO list_by_child orders newest-first (id DESC), active or not.
+        # The helper returns the given child's definitions in ascending
+        # id order, consistent with list_active_definitions.
         result = await list_definitions_for_child(database, child.id)
         assert [bundle.definition.id for bundle in result] == [
-            both.definition.id,
             ada_only.definition.id,
+            both.definition.id,
         ]
-        assert result[1].rule == _daily_rule()
-        assert [c.id for c in result[1].assignees] == [child.id]
-        assert [w.window for w in result[1].windows] == ["morning"]
+        assert result[0].rule == _daily_rule()
+        assert [c.id for c in result[0].assignees] == [child.id]
+        assert [w.window for w in result[0].windows] == ["morning"]
 
         bo_result = await list_definitions_for_child(database, bo.id)
         assert [bundle.definition.id for bundle in bo_result] == [
-            bo_only.definition.id,
             both.definition.id,
+            bo_only.definition.id,
         ]
         return result
 

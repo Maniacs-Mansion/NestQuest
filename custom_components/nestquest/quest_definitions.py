@@ -511,19 +511,20 @@ async def list_definitions_for_child(
     """Return the definitions assigned to ``child_id`` (rich view).
 
     ``child_id`` must be a plain int (bools and floats rejected, since
-    SQLite would bind ``True`` onto child 1).  Ordering follows the DAO's
-    ``list_by_child`` (newest definition first), so the result is
-    deterministic.  Each entry is a :class:`CreatedQuestDefinition`
-    snapshot bundling the definition with its decoded rule, assignees and
-    windows.
+    SQLite would bind ``True`` onto child 1).  Results are ordered by
+    rising definition id, matching ``list_active_definitions`` and
+    ``list_definitions_firing_on``.  Each entry is a
+    :class:`CreatedQuestDefinition` snapshot bundling the definition with
+    its decoded rule, assignees and windows.
     """
     _validate_child_id(child_id)
     dao = QuestDefinitionsDao(database)
     definitions = await dao.list_by_child(child_id)
-    return [
+    bundles = [
         await _bundle_definition(database, dao, definition)
         for definition in definitions
     ]
+    return sorted(bundles, key=lambda bundle: bundle.definition.id)
 
 
 async def list_definitions_firing_on(
