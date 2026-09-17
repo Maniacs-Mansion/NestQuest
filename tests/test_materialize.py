@@ -207,15 +207,33 @@ def test_materialize_is_idempotent(tmp_path) -> None:
             [child.id],
             ["morning"],
         )
+        dao = QuestInstancesDao(database)
         first = await materialize(database, start_iso, end_iso)
-        second = await materialize(database, start_iso, end_iso)
-        assert first == second == 7
-        # Running twice refreshes the SAME seven rows: exactly one
-        # physical row per (definition_id, child_id, due_date, window)
-        # key, never a duplicate.
-        records = await QuestInstancesDao(database).list_by_date_range(
-            child.id, start_iso, end_iso
+        assert first == 7
+        first_ids = sorted(
+            r.id
+            for r in await dao.list_by_date_range(child.id, start_iso, end_iso)
         )
+        assert len(first_ids) == 7
+        assert len(set(first_ids)) == 7
+
+        # Re-running over the same range refreshes the SAME physical rows:
+        # the ON CONFLICT path updates the snapshot columns in place and
+        # never delete + reinserts, so every primary-key id is stable.
+        for _ in range(2):
+            count = await materialize(database, start_iso, end_iso)
+            assert count == 7
+            run_ids = sorted(
+                r.id
+                for r in await dao.list_by_date_range(
+                    child.id, start_iso, end_iso
+                )
+            )
+            assert run_ids == first_ids
+
+        # And the widened key never duplicated: exactly one physical row
+        # per (definition_id, child_id, due_date, window).
+        records = await dao.list_by_date_range(child.id, start_iso, end_iso)
         keys = [
             (r.definition_id, r.child_id, r.due_date, r.window)
             for r in records
