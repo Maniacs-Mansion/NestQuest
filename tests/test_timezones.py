@@ -48,21 +48,29 @@ def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
 
-def _freeze_clock(monkeypatch, instant: datetime.datetime) -> datetime.datetime:
+def _freeze_clock(
+    monkeypatch, instant: datetime.datetime
+) -> tuple[datetime.datetime, list]:
     """Freeze the integration's ``datetime`` clock to a fixed aware instant.
 
     Only ``custom_components.nestquest``'s ``datetime`` binding is patched, so
     the generation path's "today" reads this instant (localized to whatever
     time zone it asks for) while every other module and the test harness keep
-    the real clock.  Returns the instant normalized to UTC.
+    the real clock.  Returns ``(frozen, requested)`` where ``frozen`` is the
+    instant normalized to UTC and ``requested`` is the list of ``tzinfo``
+    objects the code under test passed to ``now`` — so a test can prove the
+    generation path actually requested the configured HA time zone rather
+    than silently reading UTC.
     """
     import custom_components.nestquest as nestquest
 
     frozen = instant.astimezone(datetime.timezone.utc)
+    requested: list = []
 
     class _FrozenDatetime(datetime.datetime):
         @classmethod
         def now(cls, tz=None):
+            requested.append(tz)
             if tz is None:
                 return frozen.replace(tzinfo=None)
             return frozen.astimezone(tz)
@@ -73,7 +81,18 @@ def _freeze_clock(monkeypatch, instant: datetime.datetime) -> datetime.datetime:
         date=datetime.date,
     )
     monkeypatch.setattr(nestquest, "datetime", fake_module)
-    return frozen
+    return frozen, requested
+
+
+def _assert_requested_ha_timezone(requested, time_zone: str) -> None:
+    """Assert ``now`` was called with (only) the configured HA time zone.
+
+    This is what turns the DST tests into a real proof of the HA-local date
+    source: if the generation path regressed to ``now(timezone.utc)``, its
+    requested tz would be UTC and this fails.
+    """
+    assert requested, "the generation path never called now(tz)"
+    assert all(tz == ZoneInfo(time_zone) for tz in requested)
 
 
 def _tz_hass(time_zone: str):
@@ -124,7 +143,7 @@ def test_horizon_uses_newyork_local_date_after_local_midnight(
 
     async def _body(database):
         hass = _tz_hass(NEW_YORK)
-        _freeze_clock(monkeypatch, instant)
+        _frozen, requested = _freeze_clock(monkeypatch, instant)
         import custom_components.nestquest as nestquest
 
         child_id = await _seed_daily(database, local_today.isoformat())
@@ -135,6 +154,7 @@ def test_horizon_uses_newyork_local_date_after_local_midnight(
             (local_today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat(),
         )
         _assert_contiguous_horizon(records, local_today)
+        _assert_requested_ha_timezone(requested, NEW_YORK)
         return len(records)
 
     async def _main():
@@ -163,7 +183,7 @@ def test_horizon_uses_local_date_not_utc_when_host_ahead(
 
     async def _body(database):
         hass = _tz_hass(NEW_YORK)
-        _freeze_clock(monkeypatch, instant)
+        _frozen, requested = _freeze_clock(monkeypatch, instant)
         import custom_components.nestquest as nestquest
 
         child_id = await _seed_daily(database, local_today.isoformat())
@@ -174,6 +194,7 @@ def test_horizon_uses_local_date_not_utc_when_host_ahead(
             (local_today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat(),
         )
         _assert_contiguous_horizon(records, local_today)
+        _assert_requested_ha_timezone(requested, NEW_YORK)
         return len(records)
 
     async def _main():
@@ -204,8 +225,10 @@ def test_horizon_resolves_spring_forward_day_without_off_by_one(
         hass = _tz_hass(NEW_YORK)
         import custom_components.nestquest as nestquest
 
+        requested_batches: list[list] = []
         for instant in (before, after):
-            _freeze_clock(monkeypatch, instant)
+            _frozen, requested = _freeze_clock(monkeypatch, instant)
+            requested_batches.append(requested)
             local_today = instant.date()
             child_id = await _seed_daily(database, local_today.isoformat())
             await nestquest._run_horizon_materialization(hass, database)
@@ -215,6 +238,8 @@ def test_horizon_resolves_spring_forward_day_without_off_by_one(
                 (local_today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat(),
             )
             _assert_contiguous_horizon(records, local_today)
+        requested_all = [tz for batch in requested_batches for tz in batch]
+        _assert_requested_ha_timezone(requested_all, NEW_YORK)
         return local_today
 
     async def _main():
@@ -249,8 +274,10 @@ def test_horizon_resolves_fall_back_day_without_off_by_one(
         hass = _tz_hass(NEW_YORK)
         import custom_components.nestquest as nestquest
 
+        requested_batches: list[list] = []
         for instant in (first, second, after):
-            _freeze_clock(monkeypatch, instant)
+            _frozen, requested = _freeze_clock(monkeypatch, instant)
+            requested_batches.append(requested)
             local_today = instant.date()
             child_id = await _seed_daily(database, local_today.isoformat())
             await nestquest._run_horizon_materialization(hass, database)
@@ -260,6 +287,8 @@ def test_horizon_resolves_fall_back_day_without_off_by_one(
                 (local_today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat(),
             )
             _assert_contiguous_horizon(records, local_today)
+        requested_all = [tz for batch in requested_batches for tz in batch]
+        _assert_requested_ha_timezone(requested_all, NEW_YORK)
         return local_today
 
     async def _main():
