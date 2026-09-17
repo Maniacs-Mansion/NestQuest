@@ -1113,6 +1113,251 @@ def test_regenerate_for_child_is_child_scoped(tmp_path) -> None:
     _with_db(tmp_path, "regenerate-child-scoped.db")(_body)
 
 
+def _is_nth_weekday(day, *, weekday, nth) -> bool:
+    """True when ``day`` is the ``nth`` (1-based) ``weekday`` of its month.
+
+    Independent calendar arithmetic (not ``occurs_on``): the month's
+    1st anchors the count, so the target day-of-month is
+    ``1 + first_weekday_gap + (nth - 1) * 7``.
+    """
+    first = datetime.date(day.year, day.month, 1)
+    first_gap = (weekday - first.weekday()) % 7
+    return day.day == 1 + first_gap + (nth - 1) * 7
+
+
+def _e2e_expected(start_iso, def_ids, a_id, b_id, c_id) -> set:
+    """Hand-derived expected (definition_id, child_id, window, due_date,
+    due_time) tuples over the 28-day window, one per
+    (definition, child, window, firing date).
+
+    Custody uses anchor-date arithmetic on the Monday ``start``: cycle
+    week = ``floor(offset / 7) % 2``.  A is present cycle-weeks 0 and 2
+    (offsets 0..6, 14..20); B is present cycle-weeks 1 and 3 (offsets
+    7..13, 21..27); C has no schedule so is present every day.
+
+    Six definitions, all anchored at ``start``:
+
+    - daily    DAILY              [A, C] morning 09:00
+    - weekly   WEEKLY Mondays     [B, C] morning 07:00 + evening 19:00
+    - month_day  MONTHLY_DAY 15   [C]    morning 08:00
+    - month_wd   MONTHLY_WEEKDAY  [C]    morning 07:30 (2nd Wednesday)
+    - yearly     YEARLY day 1 of  [C]    afternoon 12:00
+      the start month
+    - custom     CUSTOM_DAYS      [A, C] evening 20:00
+      Saturdays + Sundays
+    """
+    expected: set = set()
+    start_date = datetime.date.fromisoformat(start_iso)
+    start_month = start_date.month
+    for offset in range(28):
+        day = start_date + datetime.timedelta(days=offset)
+        iso = day.isoformat()
+        week = offset // 7
+        a_present = week % 2 == 0
+        b_present = week % 2 == 1
+        monday = day.weekday() == 0
+        fifteenth = day.day == 15
+        second_wednesday = _is_nth_weekday(day, weekday=2, nth=2)
+        yearly_firing = day.month == start_month and day.day == 1
+        weekend = day.weekday() in (5, 6)
+
+        # DAILY: every day.
+        if a_present:
+            expected.add((def_ids["daily"], a_id, "morning", iso, "09:00"))
+        expected.add((def_ids["daily"], c_id, "morning", iso, "09:00"))
+
+        # WEEKLY: Mondays only, two windows each.
+        if monday:
+            if b_present:
+                expected.add((def_ids["weekly"], b_id, "morning", iso, "07:00"))
+                expected.add((def_ids["weekly"], b_id, "evening", iso, "19:00"))
+            expected.add((def_ids["weekly"], c_id, "morning", iso, "07:00"))
+            expected.add((def_ids["weekly"], c_id, "evening", iso, "19:00"))
+
+        # MONTHLY_DAY: the 15th of the month.
+        if fifteenth:
+            expected.add((def_ids["month_day"], c_id, "morning", iso, "08:00"))
+
+        # MONTHLY_WEEKDAY: the 2nd Wednesday of the month.
+        if second_wednesday:
+            expected.add((def_ids["month_wd"], c_id, "morning", iso, "07:30"))
+
+        # YEARLY: day 1 of the start month, same year.
+        if yearly_firing:
+            expected.add((def_ids["yearly"], c_id, "afternoon", iso, "12:00"))
+
+        # CUSTOM_DAYS: Saturdays and Sundays.
+        if weekend:
+            if a_present:
+                expected.add((def_ids["custom"], a_id, "evening", iso, "20:00"))
+            expected.add((def_ids["custom"], c_id, "evening", iso, "20:00"))
+
+    return expected
+
+
+async def _collect_ids(database, child_ids, start, end) -> set:
+    """Return the set of instance primary-key ids for the children/range."""
+    dao = QuestInstancesDao(database)
+    ids = set()
+    for child_id in child_ids:
+        for record in await dao.list_by_date_range(child_id, start, end):
+            ids.add(record.id)
+    return ids
+
+
+def test_materialize_end_to_end_six_rule_types(tmp_path) -> None:
+    async def _body(database):
+        from custom_components.nestquest.dao_presence import (
+            PresenceOverridesDao,
+        )
+        from custom_components.nestquest.presence import PresenceSchedule
+
+        children = ChildrenDao(database)
+        schedules = PresenceSchedulesDao(database)
+        overrides = PresenceOverridesDao(database)
+
+        a = await children.create("Ada", NOW)      # present weeks 0, 2
+        b = await children.create("Bo", NOW)       # present weeks 1, 3
+        c = await children.create("Cleo", NOW)     # no schedule: always present
+
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=27)).isoformat()
+
+        # Two-week custody with OPPOSITE weeks, encoded through the
+        # PresenceSchedule model so the anchor-date arithmetic is explicit.
+        all_week = frozenset(range(7))
+        a_schedule = PresenceSchedule(a.id, 2, start, {0: all_week, 1: frozenset()})
+        b_schedule = PresenceSchedule(b.id, 2, start, {0: frozenset(), 1: all_week})
+        await schedules.upsert_by_child(a.id, 2, start_iso, a_schedule.encode())
+        await schedules.upsert_by_child(b.id, 2, start_iso, b_schedule.encode())
+
+        def_ids = {}
+        def_ids["daily"] = (await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [a.id, c.id],
+            [("morning", "09:00")],
+        )).definition.id
+        def_ids["weekly"] = (await create_quest_definition(
+            database,
+            "Weekly Monday chore",
+            ScheduleRule(
+                rule_type=RuleType.WEEKLY,
+                weekday_set={0},
+                start_date=start_iso,
+            ),
+            [b.id, c.id],
+            [("morning", "07:00"), ("evening", "19:00")],
+        )).definition.id
+        def_ids["month_day"] = (await create_quest_definition(
+            database,
+            "Monthly 15th chore",
+            ScheduleRule(
+                rule_type=RuleType.MONTHLY_DAY,
+                day_of_month=15,
+                start_date=start_iso,
+            ),
+            [c.id],
+            [("morning", "08:00")],
+        )).definition.id
+        def_ids["month_wd"] = (await create_quest_definition(
+            database,
+            "Monthly 2nd-Wednesday chore",
+            ScheduleRule(
+                rule_type=RuleType.MONTHLY_WEEKDAY,
+                nth_weekday=2,
+                nth_weekday_weekday=2,
+                start_date=start_iso,
+            ),
+            [c.id],
+            [("morning", "07:30")],
+        )).definition.id
+        def_ids["yearly"] = (await create_quest_definition(
+            database,
+            "Yearly first-of-month chore",
+            ScheduleRule(
+                rule_type=RuleType.YEARLY,
+                month=start.month,
+                day_of_month=1,
+                start_date=start_iso,
+            ),
+            [c.id],
+            [("afternoon", "12:00")],
+        )).definition.id
+        def_ids["custom"] = (await create_quest_definition(
+            database,
+            "Weekend chore",
+            ScheduleRule(
+                rule_type=RuleType.CUSTOM_DAYS,
+                weekday_set={5, 6},
+                start_date=start_iso,
+            ),
+            [a.id, c.id],
+            [("evening", "20:00")],
+        )).definition.id
+
+        expected = _e2e_expected(start_iso, def_ids, a.id, b.id, c.id)
+        child_ids = (a.id, b.id, c.id)
+
+        # First run: every (definition, child, window, date) tuple, exactly.
+        first = await materialize(database, start_iso, end_iso)
+        assert first == len(expected)
+        assert await _collect_instances(
+            database, child_ids, start_iso, end_iso
+        ) == expected
+
+        # Second run: idempotent — same physical rows, same primary keys.
+        first_ids = await _collect_ids(
+            database, child_ids, start_iso, end_iso
+        )
+        first_a_ids = await _collect_ids(database, (a.id,), start_iso, end_iso)
+        first_b_ids = await _collect_ids(database, (b.id,), start_iso, end_iso)
+
+        second = await materialize(database, start_iso, end_iso)
+        assert second == len(expected)
+        assert await _collect_ids(
+            database, child_ids, start_iso, end_iso
+        ) == first_ids
+
+        # Absent override over Cleo's mid-window stretch days 3..5, then
+        # regenerate.  regenerate_for_child rebuilds only a 14-day rolling
+        # horizon and deletes the child's tail beyond it, so re-materialize
+        # the full window afterward to restore the horizon and isolate the
+        # override's effect on exactly those three due dates.
+        absent_start = start + datetime.timedelta(days=3)
+        absent_end = start + datetime.timedelta(days=5)
+        await overrides.create(
+            c.id, absent_start.isoformat(), absent_end.isoformat(),
+            False, note="away",
+        )
+
+        await regenerate_for_child(database, c.id, today=start)
+        await materialize(database, start_iso, end_iso, today=start)
+
+        absent_dates = {
+            (absent_start + datetime.timedelta(days=i)).isoformat()
+            for i in range(3)
+        }
+        removed = {t for t in expected if t[1] == c.id and t[3] in absent_dates}
+
+        # Unrelated children are byte-for-byte untouched (same ids).
+        assert await _collect_ids(database, (a.id,), start_iso, end_iso) == first_a_ids
+        assert await _collect_ids(database, (b.id,), start_iso, end_iso) == first_b_ids
+
+        # Exactly Cleo's (window, date) tuples inside the override vanish;
+        # every other tuple survives.
+        remaining = await _collect_instances(
+            database, child_ids, start_iso, end_iso
+        )
+        assert remaining == expected - removed
+        assert remaining.isdisjoint(removed)
+        return first
+
+    _with_db(tmp_path, "materialize-e2e.db")(_body)
+
+
 def test_regenerate_for_child_rejects_non_int_child_id(tmp_path) -> None:
     async def _body(database):
         for bad in (True, False, 1.0, "1"):
