@@ -1113,6 +1113,342 @@ def test_regenerate_for_child_is_child_scoped(tmp_path) -> None:
     _with_db(tmp_path, "regenerate-child-scoped.db")(_body)
 
 
+#: Fixed end-to-end anchor: 2026-06-01 is a Monday AND the 1st of its month,
+#: so the two-week custody cycle is week-aligned and the yearly rule's
+#: "1st of the anchor month" is GUARANTEED to fire inside the 28-day window
+#: (pin ``today=anchor`` throughout so the walk never clamps this fixed
+#: calendar date up to the host clock).
+_E2E_ANCHOR = "2026-06-01"
+
+#: Hand-checked oracle over 2026-06-01 .. 2026-06-28 (69 entries).  Each row
+#: is one independent (definition, child, window, due_date, due_time); the
+#: definition/child slugs are substituted with runtime ids, but the dates are
+#: literal, reviewed by hand — no recurrence/presence math is re-run here.
+#: Custody (2-week cycle anchored on the Monday): A present weeks 0 and 2,
+#: B present weeks 1 and 3, C present every day.
+_E2E_EXPECTED = [
+    # daily  [A, C]  morning 09:00, every day.  A present weeks 0, 2.
+    ("daily", "A", "morning", "2026-06-01", "09:00"),
+    ("daily", "A", "morning", "2026-06-02", "09:00"),
+    ("daily", "A", "morning", "2026-06-03", "09:00"),
+    ("daily", "A", "morning", "2026-06-04", "09:00"),
+    ("daily", "A", "morning", "2026-06-05", "09:00"),
+    ("daily", "A", "morning", "2026-06-06", "09:00"),
+    ("daily", "A", "morning", "2026-06-07", "09:00"),
+    ("daily", "A", "morning", "2026-06-15", "09:00"),
+    ("daily", "A", "morning", "2026-06-16", "09:00"),
+    ("daily", "A", "morning", "2026-06-17", "09:00"),
+    ("daily", "A", "morning", "2026-06-18", "09:00"),
+    ("daily", "A", "morning", "2026-06-19", "09:00"),
+    ("daily", "A", "morning", "2026-06-20", "09:00"),
+    ("daily", "A", "morning", "2026-06-21", "09:00"),
+    # daily  C is present every day: all 28 days.
+    ("daily", "C", "morning", "2026-06-01", "09:00"),
+    ("daily", "C", "morning", "2026-06-02", "09:00"),
+    ("daily", "C", "morning", "2026-06-03", "09:00"),
+    ("daily", "C", "morning", "2026-06-04", "09:00"),
+    ("daily", "C", "morning", "2026-06-05", "09:00"),
+    ("daily", "C", "morning", "2026-06-06", "09:00"),
+    ("daily", "C", "morning", "2026-06-07", "09:00"),
+    ("daily", "C", "morning", "2026-06-08", "09:00"),
+    ("daily", "C", "morning", "2026-06-09", "09:00"),
+    ("daily", "C", "morning", "2026-06-10", "09:00"),
+    ("daily", "C", "morning", "2026-06-11", "09:00"),
+    ("daily", "C", "morning", "2026-06-12", "09:00"),
+    ("daily", "C", "morning", "2026-06-13", "09:00"),
+    ("daily", "C", "morning", "2026-06-14", "09:00"),
+    ("daily", "C", "morning", "2026-06-15", "09:00"),
+    ("daily", "C", "morning", "2026-06-16", "09:00"),
+    ("daily", "C", "morning", "2026-06-17", "09:00"),
+    ("daily", "C", "morning", "2026-06-18", "09:00"),
+    ("daily", "C", "morning", "2026-06-19", "09:00"),
+    ("daily", "C", "morning", "2026-06-20", "09:00"),
+    ("daily", "C", "morning", "2026-06-21", "09:00"),
+    ("daily", "C", "morning", "2026-06-22", "09:00"),
+    ("daily", "C", "morning", "2026-06-23", "09:00"),
+    ("daily", "C", "morning", "2026-06-24", "09:00"),
+    ("daily", "C", "morning", "2026-06-25", "09:00"),
+    ("daily", "C", "morning", "2026-06-26", "09:00"),
+    ("daily", "C", "morning", "2026-06-27", "09:00"),
+    ("daily", "C", "morning", "2026-06-28", "09:00"),
+    # weekly  [B, C]  Mondays, morning 07:00 + evening 19:00.
+    # B present weeks 1, 3 -> Mondays 06-08 and 06-22.
+    ("weekly", "B", "morning", "2026-06-08", "07:00"),
+    ("weekly", "B", "evening", "2026-06-08", "19:00"),
+    ("weekly", "B", "morning", "2026-06-22", "07:00"),
+    ("weekly", "B", "evening", "2026-06-22", "19:00"),
+    # C present every Monday: 06-01, 06-08, 06-15, 06-22.
+    ("weekly", "C", "morning", "2026-06-01", "07:00"),
+    ("weekly", "C", "evening", "2026-06-01", "19:00"),
+    ("weekly", "C", "morning", "2026-06-08", "07:00"),
+    ("weekly", "C", "evening", "2026-06-08", "19:00"),
+    ("weekly", "C", "morning", "2026-06-15", "07:00"),
+    ("weekly", "C", "evening", "2026-06-15", "19:00"),
+    ("weekly", "C", "morning", "2026-06-22", "07:00"),
+    ("weekly", "C", "evening", "2026-06-22", "19:00"),
+    # month_day  [C]  the 15th, morning 08:00.  2026-06-15 is the 15th.
+    ("month_day", "C", "morning", "2026-06-15", "08:00"),
+    # month_wd  [C]  2nd Wednesday, morning 07:30.  June 2026's 2nd
+    # Wednesday is 06-10 (the 1st is 06-03).
+    ("month_wd", "C", "morning", "2026-06-10", "07:30"),
+    # yearly  [C]  1st of June, afternoon 12:00.  Fires on 06-01.
+    ("yearly", "C", "afternoon", "2026-06-01", "12:00"),
+    # custom  [A, C]  Saturdays + Sundays, evening 20:00.
+    # A present weeks 0, 2 -> 06-06, 06-07, 06-20, 06-21.
+    ("custom", "A", "evening", "2026-06-06", "20:00"),
+    ("custom", "A", "evening", "2026-06-07", "20:00"),
+    ("custom", "A", "evening", "2026-06-20", "20:00"),
+    ("custom", "A", "evening", "2026-06-21", "20:00"),
+    # C present every weekend day.
+    ("custom", "C", "evening", "2026-06-06", "20:00"),
+    ("custom", "C", "evening", "2026-06-07", "20:00"),
+    ("custom", "C", "evening", "2026-06-13", "20:00"),
+    ("custom", "C", "evening", "2026-06-14", "20:00"),
+    ("custom", "C", "evening", "2026-06-20", "20:00"),
+    ("custom", "C", "evening", "2026-06-21", "20:00"),
+    ("custom", "C", "evening", "2026-06-27", "20:00"),
+    ("custom", "C", "evening", "2026-06-28", "20:00"),
+]
+
+# The tuples that must disappear when Cleo (C) is overridden to ABSENT for
+# 2026-06-04 .. 2026-06-06 (a mid-window stretch): her two daily chores and
+# the Saturday-evening custom chore on 06-06.
+_E2E_REMOVED = [
+    ("daily", "C", "morning", "2026-06-04", "09:00"),
+    ("daily", "C", "morning", "2026-06-05", "09:00"),
+    ("daily", "C", "morning", "2026-06-06", "09:00"),
+    ("custom", "C", "evening", "2026-06-06", "20:00"),
+]
+
+
+def _resolve_e2e(raw, def_ids, child_ids) -> set:
+    """Substitute the oracle's definition/child slugs with runtime ids."""
+    return {
+        (def_ids[slug], child_ids[child], window, due_date, due_time)
+        for slug, child, window, due_date, due_time in raw
+    }
+
+
+async def _collect_keyed(database, child_ids, start, end) -> dict:
+    """Return {(definition_id, child_id, window, due_date): (id, due_time)}.
+
+    The stable parts of an instance — its widened key, its physical id and
+    its due_time snapshot — with the refreshable ``generated_at`` stamp
+    deliberately excluded.  Comparing two of these captures the real
+    re-run contract: no rows added/removed, ids stable (upsert refreshes
+    in place, never delete + reinsert), and due_time untouched.
+    """
+    dao = QuestInstancesDao(database)
+    keyed = {}
+    for child_id in child_ids:
+        for record in await dao.list_by_date_range(child_id, start, end):
+            key = (
+                record.definition_id,
+                record.child_id,
+                record.window,
+                record.due_date,
+            )
+            keyed[key] = (record.id, record.due_time)
+    return keyed
+
+
+async def _collect_records(database, child_ids, start, end) -> set:
+    """Return the full 7-field instance records over the children/range.
+
+    Includes the ``generated_at`` stamp, so this is only used for children
+    that should NEVER be written (Ada/Bo during Cleo's override): their
+    records are truly byte-for-byte untouched, unlike the idempotency
+    re-run where the stamp legitimately refreshes.
+    """
+    dao = QuestInstancesDao(database)
+    records = set()
+    for child_id in child_ids:
+        for record in await dao.list_by_date_range(child_id, start, end):
+            records.add(
+                (
+                    record.id,
+                    record.definition_id,
+                    record.child_id,
+                    record.window,
+                    record.due_date,
+                    record.due_time,
+                    record.generated_at,
+                )
+            )
+    return records
+
+
+def test_materialize_end_to_end_six_rule_types(tmp_path, monkeypatch) -> None:
+    import custom_components.nestquest.materialize as materialize_module
+
+    # Give each materialize run a DISTINCT batch stamp: production upserts
+    # rewrite generated_at on every re-run, so a shared pinned stamp would
+    # merely hide that rewrite.  The idempotency assertion below therefore
+    # ignores generated_at and checks the stable columns only.
+    stamps = {"n": 0}
+
+    def _distinct_stamp() -> str:
+        stamps["n"] += 1
+        return f"2026-06-01T00:00:{stamps['n']:02d}+00:00"
+
+    monkeypatch.setattr(materialize_module, "_now_stamp", _distinct_stamp)
+
+    async def _body(database):
+        from custom_components.nestquest.dao_presence import (
+            PresenceOverridesDao,
+        )
+        from custom_components.nestquest.presence import PresenceSchedule
+
+        children = ChildrenDao(database)
+        schedules = PresenceSchedulesDao(database)
+        overrides = PresenceOverridesDao(database)
+
+        a = await children.create("Ada", NOW)      # present weeks 0, 2
+        b = await children.create("Bo", NOW)       # present weeks 1, 3
+        c = await children.create("Cleo", NOW)     # no schedule: always present
+
+        anchor = datetime.date.fromisoformat(_E2E_ANCHOR)
+        start_iso = anchor.isoformat()
+        end_iso = (anchor + datetime.timedelta(days=27)).isoformat()
+
+        # Two-week custody with OPPOSITE weeks, encoded through the
+        # PresenceSchedule model on the fixed Monday anchor.
+        all_week = frozenset(range(7))
+        a_schedule = PresenceSchedule(a.id, 2, anchor, {0: all_week, 1: frozenset()})
+        b_schedule = PresenceSchedule(b.id, 2, anchor, {0: frozenset(), 1: all_week})
+        await schedules.upsert_by_child(a.id, 2, start_iso, a_schedule.encode())
+        await schedules.upsert_by_child(b.id, 2, start_iso, b_schedule.encode())
+
+        def_ids = {}
+        def_ids["daily"] = (await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [a.id, c.id],
+            [("morning", "09:00")],
+        )).definition.id
+        def_ids["weekly"] = (await create_quest_definition(
+            database,
+            "Weekly Monday chore",
+            ScheduleRule(
+                rule_type=RuleType.WEEKLY,
+                weekday_set={0},
+                start_date=start_iso,
+            ),
+            [b.id, c.id],
+            [("morning", "07:00"), ("evening", "19:00")],
+        )).definition.id
+        def_ids["month_day"] = (await create_quest_definition(
+            database,
+            "Monthly 15th chore",
+            ScheduleRule(
+                rule_type=RuleType.MONTHLY_DAY,
+                day_of_month=15,
+                start_date=start_iso,
+            ),
+            [c.id],
+            [("morning", "08:00")],
+        )).definition.id
+        def_ids["month_wd"] = (await create_quest_definition(
+            database,
+            "Monthly 2nd-Wednesday chore",
+            ScheduleRule(
+                rule_type=RuleType.MONTHLY_WEEKDAY,
+                nth_weekday=2,
+                nth_weekday_weekday=2,
+                start_date=start_iso,
+            ),
+            [c.id],
+            [("morning", "07:30")],
+        )).definition.id
+        def_ids["yearly"] = (await create_quest_definition(
+            database,
+            "Yearly first-of-June chore",
+            ScheduleRule(
+                rule_type=RuleType.YEARLY,
+                month=anchor.month,
+                day_of_month=1,
+                start_date=start_iso,
+            ),
+            [c.id],
+            [("afternoon", "12:00")],
+        )).definition.id
+        def_ids["custom"] = (await create_quest_definition(
+            database,
+            "Weekend chore",
+            ScheduleRule(
+                rule_type=RuleType.CUSTOM_DAYS,
+                weekday_set={5, 6},
+                start_date=start_iso,
+            ),
+            [a.id, c.id],
+            [("evening", "20:00")],
+        )).definition.id
+
+        child_ids = {"A": a.id, "B": b.id, "C": c.id}
+        expected = _resolve_e2e(_E2E_EXPECTED, def_ids, child_ids)
+        removed = _resolve_e2e(_E2E_REMOVED, def_ids, child_ids)
+        all_children = (a.id, b.id, c.id)
+
+        # First run: every (definition, child, window, date) tuple, exactly.
+        first = await materialize(database, start_iso, end_iso, today=anchor)
+        assert first == len(expected)
+        assert await _collect_instances(
+            database, all_children, start_iso, end_iso
+        ) == expected
+
+        # Re-run contract: the upsert refreshes each existing row IN PLACE,
+        # so the widened key set, the physical ids and each due_time are all
+        # stable (only generated_at may refresh to the new run's stamp).
+        first_keyed = await _collect_keyed(
+            database, all_children, start_iso, end_iso
+        )
+        second = await materialize(database, start_iso, end_iso, today=anchor)
+        assert second == len(expected)
+        assert await _collect_keyed(
+            database, all_children, start_iso, end_iso
+        ) == first_keyed
+
+        # Capture Ada and Bo's complete records BEFORE the override, so we
+        # can prove they are untouched afterward.
+        a_before = await _collect_records(database, (a.id,), start_iso, end_iso)
+        b_before = await _collect_records(database, (b.id,), start_iso, end_iso)
+
+        # Cleo is ABSENT 2026-06-04 .. 2026-06-06 (mid-window).
+        await overrides.create(
+            c.id, "2026-06-04", "2026-06-06", False, note="away"
+        )
+
+        # regenerate_for_child deletes + rebuilds CLEO ONLY (Ada and Bo are
+        # never touched).  It rebuilds a 14-day rolling horizon though, so
+        # the child-scoped materialize below restores the remainder of the
+        # 28-day window without ever writing another child.
+        await regenerate_for_child(database, c.id, today=anchor)
+        await materialize(
+            database, start_iso, end_iso, child_ids=[c.id], today=anchor
+        )
+
+        # Ada and Bo are byte-for-byte untouched: id, snapshot columns and
+        # generated_at alike.
+        assert await _collect_records(
+            database, (a.id,), start_iso, end_iso
+        ) == a_before
+        assert await _collect_records(
+            database, (b.id,), start_iso, end_iso
+        ) == b_before
+
+        # Exactly Cleo's override-covered tuples vanish; every other tuple
+        # survives.
+        remaining = await _collect_instances(
+            database, all_children, start_iso, end_iso
+        )
+        assert remaining == expected - removed
+        assert remaining.isdisjoint(removed)
+        return first
+
+    _with_db(tmp_path, "materialize-e2e.db")(_body)
+
+
 def test_regenerate_for_child_rejects_non_int_child_id(tmp_path) -> None:
     async def _body(database):
         for bad in (True, False, 1.0, "1"):
