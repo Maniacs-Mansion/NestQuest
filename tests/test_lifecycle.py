@@ -8,7 +8,11 @@ import pytest
 from conftest import make_config_entry, make_hass, wire_entry_to_registry
 
 from custom_components.nestquest import DOMAIN, async_setup_entry, async_unload_entry
-from custom_components.nestquest.const import DOMAIN as DOMAIN_CONST
+from custom_components.nestquest.const import (
+    CONF_DAY_ROLLOVER_TIME,
+    DEFAULT_HORIZON_DAYS,
+    DOMAIN as DOMAIN_CONST,
+)
 
 
 def _wire(entry, registry):
@@ -237,6 +241,128 @@ async def test_unload_closes_database_even_when_listener_removal_raises() -> Non
     assert database.connected is False, "database leaked despite remover error"
     assert entry.runtime_data is None
     assert DOMAIN not in hass.data
+    assert hass.time_change.size == 0, "time-change listener leaked"
+
+
+async def test_unload_cancels_time_listener_even_when_update_remover_raises() -> None:
+    """A raising update-listener remover must not skip the time-change cancel.
+
+    Both removers are independent: the update-listener remover raising must
+    still cancel the daily time-change callback, whose action would otherwise
+    fire after unload against a closed database.
+    """
+
+    class _RemoveBoom(Exception):
+        pass
+
+    def _remover():
+        raise _RemoveBoom()
+
+    entry = make_config_entry(entry_id="update-boom-time-cancel")
+    entry.add_update_listener = lambda listener: _remover
+    hass, _registry = make_hass()
+    await async_setup_entry(hass, entry)
+    assert hass.time_change.size == 1
+    with pytest.raises(_RemoveBoom):
+        await async_unload_entry(hass, entry)
+    assert hass.time_change.size == 0, "time-change listener not cancelled"
+    assert entry.runtime_data is None
+    assert DOMAIN not in hass.data
+
+
+async def test_setup_registers_day_rollover_listener(hass, make_entry) -> None:
+    """Setup registers a daily rollover listener and stores its cancel fn."""
+    entry = _wire(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    assert hass.time_change.size == 1
+    registration = hass.time_change.registrations[0]
+    assert registration["hour"] == 0
+    assert registration["minute"] == 0
+    assert callable(entry.runtime_data.remove_time_change_listener)
+
+
+async def test_setup_registers_day_rollover_at_configured_time(hass, make_entry) -> None:
+    """The listener fires at the entry option's rollover time, not the default."""
+    entry = _wire(make_entry(options={CONF_DAY_ROLLOVER_TIME: "06:30"}), hass.registry)
+    await async_setup_entry(hass, entry)
+    registration = hass.time_change.registrations[0]
+    assert registration["hour"] == 6
+    assert registration["minute"] == 30
+
+
+async def test_unload_cancels_day_rollover_listener(hass, make_entry) -> None:
+    """Unload removes the time-change listener alongside the update listener."""
+    entry = _wire(make_entry(), hass.registry)
+    await async_setup_entry(hass, entry)
+    assert hass.time_change.size == 1
+    assert await async_unload_entry(hass, entry) is True
+    assert hass.time_change.size == 0
+
+
+async def test_rollover_time_change_reregisters_listener_at_new_time(
+    hass, make_entry
+) -> None:
+    """A rollover-time options change re-registers the listener at the new time."""
+    entry = _wire(
+        make_entry(options={CONF_DAY_ROLLOVER_TIME: "00:00"}), hass.registry
+    )
+    await async_setup_entry(hass, entry)
+    assert (hass.time_change.registrations[0]["hour"], hass.time_change.registrations[0]["minute"]) == (0, 0)
+
+    # The options flow writes the new rollover time, then HA reloads the
+    # entry: unload tears down the old listener, setup re-registers it.
+    entry.options = {CONF_DAY_ROLLOVER_TIME: "06:30"}
+    await async_unload_entry(hass, entry)
+    assert hass.time_change.size == 0
+
+    assert await async_setup_entry(hass, entry) is True
+    assert hass.time_change.size == 1
+    registration = hass.time_change.registrations[0]
+    assert (registration["hour"], registration["minute"]) == (6, 30)
+
+
+async def test_day_rollover_listener_materializes_ha_local_horizon(
+    hass, make_entry, monkeypatch
+) -> None:
+    """Firing the listener materializes today..today+horizon in HA local time."""
+    import datetime
+    from unittest.mock import AsyncMock
+    from zoneinfo import ZoneInfo
+
+    import custom_components.nestquest as nestquest
+
+    entry = _wire(make_entry(), hass.registry)
+    await async_setup_entry(hass, entry)
+    database = entry.runtime_data.database
+
+    fake = AsyncMock()
+    monkeypatch.setattr(nestquest, "_materialize_run", fake)
+
+    time_zone = ZoneInfo(hass.config.time_zone)
+    today = datetime.datetime.now(time_zone).date()
+    expected_start = today.isoformat()
+    expected_end = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+
+    await hass.time_change.fire()
+
+    fake.assert_awaited_once_with(database, expected_start, expected_end)
+
+
+def test_day_rollover_time_change_tracker_rejects_local_kwarg() -> None:
+    """The fake async_track_time_change mirrors HA 2024.6 (no ``local`` kwarg).
+
+    Setup drives the local-time wrapper directly, so passing ``local=`` must
+    raise TypeError — otherwise a regression in the production call would be
+    silently masked by the fake.
+    """
+    import inspect as _inspect
+
+    from homeassistant.helpers.event import async_track_time_change
+
+    params = _inspect.signature(async_track_time_change).parameters
+    assert list(params) == ["hass", "action", "hour", "minute", "second"]
+    with pytest.raises(TypeError):
+        async_track_time_change(None, lambda _now: None, hour=0, minute=0, local=True)
 
 
 async def test_setup_applies_all_v1_tables(hass, make_entry) -> None:
