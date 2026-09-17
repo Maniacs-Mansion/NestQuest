@@ -44,6 +44,7 @@ _HA_MODULES = (
     "homeassistant.exceptions",
     "homeassistant.helpers",
     "homeassistant.helpers.config_validation",
+    "homeassistant.helpers.event",
 )
 
 def _find_spec(name: str):
@@ -83,6 +84,7 @@ for _parent, _child in (
     ("homeassistant", "exceptions"),
     ("homeassistant", "helpers"),
     ("homeassistant.helpers", "config_validation"),
+    ("homeassistant.helpers", "event"),
 ):
     setattr(sys.modules[_parent], _child, sys.modules[f"{_parent}.{_child}"])
 
@@ -242,6 +244,68 @@ class ListenerRegistry:
         return sum(len(listeners) for listeners in self._listeners.values())
 
 
+class TimeChangeRegistry:
+    """Models HA's time-change listener bookkeeping.
+
+    ``track`` mirrors ``homeassistant.helpers.event.async_track_time_change``:
+    each call appends a record (action + hour/minute/second/local) and returns
+    a remove callable that reverses the registration.  Tests inspect
+    ``registrations`` and exercise the newest action through :meth:`fire`.
+    """
+
+    def __init__(self, hass=None):
+        self._hass = hass
+        self._registrations: list[dict] = []
+
+    def track(self, action, hour=None, minute=None, second=None, local=False):
+        record = {
+            "action": action,
+            "hour": hour,
+            "minute": minute,
+            "second": second,
+            "local": local,
+        }
+
+        def _remove():
+            self._registrations.remove(record)
+
+        record["remove"] = _remove
+        self._registrations.append(record)
+        return _remove
+
+    @property
+    def registrations(self):
+        """Return a copy of the live registrations."""
+        return list(self._registrations)
+
+    @property
+    def size(self) -> int:
+        """Number of live registrations."""
+        return len(self._registrations)
+
+    async def fire(self, now=None, index: int = -1):
+        """Run a registered action as HA's scheduler would, awaiting coroutines."""
+        result = self._registrations[index]["action"](now)
+        if inspect.isawaitable(result):
+            await result
+
+
+def _async_track_time_change(hass, action, hour=None, minute=None, second=None, local=False):
+    """Mirror homeassistant.helpers.event.async_track_time_change.
+
+    Routes to the registry attached to ``hass`` (created on demand), so
+    tests reach the registrations via ``hass.time_change``.
+    """
+    registry = getattr(hass, "time_change", None)
+    if registry is None:
+        registry = TimeChangeRegistry(hass)
+        hass.time_change = registry
+    return registry.track(action, hour=hour, minute=minute, second=second, local=local)
+
+
+_ha_mock("homeassistant.helpers.event").async_track_time_change = _async_track_time_change
+
+
 def make_config_entry(
     entry_id: str = "test_entry",
     options: dict | None = None,
@@ -303,6 +367,10 @@ def make_hass() -> tuple:
 
     hass.async_add_executor_job = _run_executor_job
     registry = ListenerRegistry(hass)
+    hass.time_change = TimeChangeRegistry(hass)
+    # A valid IANA time zone (the day-rollover listener reads it to
+    # compute "today" in HA local time).
+    hass.config.time_zone = "UTC"
 
     async def _async_reload(entry_id: str) -> None:
         registry.reloaded.append(entry_id)

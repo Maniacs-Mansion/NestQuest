@@ -2,19 +2,30 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import inspect
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.event import async_track_time_change
 
-from .const import CONF_ADMIN_USER_IDS, DOMAIN, LOGGER
+from .const import (
+    CONF_ADMIN_USER_IDS,
+    CONF_DAY_ROLLOVER_TIME,
+    DEFAULT_DAY_ROLLOVER_TIME,
+    DEFAULT_HORIZON_DAYS,
+    DOMAIN,
+    LOGGER,
+)
 from .db import NestQuestDatabase
+from .materialize import materialize as _materialize_run
 from .migrations import apply_migrations
 from .store import async_get_db_path
 from .admin_allowlist import seed_setup_admin
@@ -224,6 +235,7 @@ class NestQuestRuntimeData:
     options: dict[str, Any]
     database: NestQuestDatabase
     remove_update_listener: Callable[[], Any]
+    remove_time_change_listener: Callable[[], Any]
 
 
 async def _async_owner_user_ids(hass: HomeAssistant) -> list[str]:
@@ -246,6 +258,48 @@ async def _async_owner_user_ids(hass: HomeAssistant) -> list[str]:
         if getattr(user, "is_owner", False) and getattr(user, "id", None)
     ]
     return owners
+
+
+def _day_rollover_hour_minute(options: dict[str, Any]) -> tuple[int, int]:
+    """Return the (hour, minute) the daily rollover fires at from ``options``.
+
+    The options flow validates ``day_rollover_time`` as a strict ``HH:MM``
+    string, so a stored value never needs re-validation here; a missing key
+    falls back to :data:`~.const.DEFAULT_DAY_ROLLOVER_TIME`.
+    """
+    rollover = options.get(CONF_DAY_ROLLOVER_TIME, DEFAULT_DAY_ROLLOVER_TIME)
+    hour, _, minute = rollover.partition(":")
+    return int(hour), int(minute)
+
+
+def _register_day_rollover_listener(
+    hass: HomeAssistant,
+    database: NestQuestDatabase,
+    options: dict[str, Any],
+) -> Callable[[], Any]:
+    """Register the daily materialization listener and return its remover.
+
+    Fires once per day at the configured local ``day_rollover_time`` and
+    materializes the rolling horizon ``[today, today + DEFAULT_HORIZON_DAYS]``.
+    "today" is computed in HA local time (``hass.config.time_zone``) rather
+    than the system clock, so the horizon tracks the household's own day.
+    The walk itself runs through :func:`~.materialize.materialize`, whose DB
+    access is executor-only.
+    """
+    hour, minute = _day_rollover_hour_minute(options)
+
+    async def _run_materialization(_now: datetime.datetime) -> None:
+        time_zone = ZoneInfo(hass.config.time_zone)
+        today = datetime.datetime.now(time_zone).date()
+        start_date = today.isoformat()
+        end_date = (
+            today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+        ).isoformat()
+        await _materialize_run(database, start_date, end_date)
+
+    return async_track_time_change(
+        hass, _run_materialization, hour=hour, minute=minute, local=True
+    )
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
@@ -330,6 +384,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             owner_ids=owner_ids,
         )
         remove_update_listener = entry.add_update_listener(_async_update_listener)
+        remove_time_change_listener = _register_day_rollover_listener(
+            hass, database, dict(entry.options)
+        )
     except BaseException:
         await database.close()
         raise
@@ -338,6 +395,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         options=dict(entry.options),
         database=database,
         remove_update_listener=remove_update_listener,
+        remove_time_change_listener=remove_time_change_listener,
     )
     entry.runtime_data = runtime_data
     hass.data[DOMAIN][entry.entry_id] = runtime_data
@@ -354,10 +412,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtime_data = getattr(entry, "runtime_data", None)
     if runtime_data is not None:
         remove_update_listener = getattr(runtime_data, "remove_update_listener", None)
+        remove_time_change_listener = getattr(
+            runtime_data, "remove_time_change_listener", None
+        )
         unload_error: BaseException | None = None
         try:
-            if remove_update_listener is not None:
-                result = remove_update_listener()
+            for remove_listener in (
+                remove_update_listener,
+                remove_time_change_listener,
+            ):
+                if remove_listener is None:
+                    continue
+                result = remove_listener()
                 if inspect.isawaitable(result):
                     await result
         except BaseException as err:
