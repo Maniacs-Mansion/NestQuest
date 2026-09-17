@@ -1,0 +1,12 @@
+# Service declarations for the NestQuest integration (Home Assistant
+# services.yaml metadata). Services are domain-scoped: nested under the
+# "nestquest" domain, not repeated per config entry.
+
+regenerate:
+  name: Regenerate quest instances
+  description: >-
+    Regenerate every future quest instance for the household over the rolling
+    horizon, using the same idempotent materialization as the daily rollover
+    and the startup backfill. Safe to call at any time: a re-run refreshes the
+    same rows instead of duplicating them, and completed instances are never
+    touched.

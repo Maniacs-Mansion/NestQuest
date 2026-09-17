@@ -951,6 +951,21 @@ class QuestDefinitionsDao:
                 definitions = await self.list_active()
                 return await self._snapshots_for(definitions)
 
+    async def read_snapshots_active(self) -> list[QuestDefinitionSnapshot]:
+        """Return every active definition's snapshot WITHOUT locking.
+
+        Mirrors :meth:`list_snapshots_active` minus the lock and
+        transaction: the definitions and their rules, assignees and
+        windows are read on the caller's connection under whatever
+        transaction the caller is already holding, so they stay coherent
+        with every OTHER table the caller reads inside that same
+        transaction.  MUST be called inside the connection lock and an
+        open transaction (the single-transaction input snapshot the
+        materialization walk uses is that caller).
+        """
+        definitions = await self.list_active()
+        return await self._snapshots_for(definitions)
+
     async def list_snapshots_by_child(
         self, child_id: int
     ) -> list[QuestDefinitionSnapshot]:
@@ -1190,3 +1205,46 @@ class QuestDefinitionsDao:
             raise ValueError(
                 f"child {child_id} is inactive and cannot be assigned"
             )
+
+
+async def load_materialization_input(
+    database: NestQuestDatabase,
+    range_start: str,
+    range_end: str,
+):
+    """Read every materialization input in ONE locked transaction.
+
+    Returns ``(snapshots, schedules, overrides)``:
+
+    - ``snapshots``: every active definition with its rule, assignees and
+      windows (the :class:`QuestDefinitionSnapshot` shape).
+    - ``schedules`` / ``overrides``: the presence schedules and
+      range-scoped overrides of every assignee child, in
+      :mod:`.dao_presence`'s record shapes.
+
+    The whole read — definitions, rules, assignees, windows, and the
+    assignees' presence schedules and overrides — runs inside a single
+    BEGIN..COMMIT span under the connection lock, so a concurrent edit
+    (definition, assignment, window, or presence) cannot interleave
+    between the parts and the walk never sees a mixed-time view.  Each
+    table's SQL stays in its own DAO module: the presence portion is
+    delegated to :mod:`.dao_presence` (a lazy import here, since that
+    module imports this one).
+    """
+    definitions_dao = QuestDefinitionsDao(database)
+    async with _connection_lock(database):
+        async with database.transaction():
+            snapshots = await definitions_dao.read_snapshots_active()
+            child_ids = sorted(
+                {
+                    child.id
+                    for snapshot in snapshots
+                    for child in snapshot.assignees
+                }
+            )
+            from . import dao_presence  # lazy: dao_presence imports us
+
+            schedules, overrides = await dao_presence.read_snapshot_unlocked(
+                database, child_ids, range_start, range_end
+            )
+    return snapshots, schedules, overrides

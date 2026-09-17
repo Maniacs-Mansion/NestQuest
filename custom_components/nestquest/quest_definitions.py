@@ -58,6 +58,7 @@ from .dao_rules import (
     schedule_rule_to_storage,
 )
 from .db import NestQuestDatabase
+from .materialize import regenerate_for_definition
 from .recurrence import ScheduleRule, occurs_on
 
 
@@ -270,6 +271,8 @@ async def edit_quest_definition(
     icon: str | None | object = _UNSET,
     rule: ScheduleRule | object = _UNSET,
     windows: list[str | tuple[str, str | None]] | object = _UNSET,
+    today: datetime.date | None = None,
+    horizon_days: int | None = None,
 ) -> CreatedQuestDefinition:
     """Edit a quest definition's metadata, rule and windows atomically.
 
@@ -291,6 +294,16 @@ async def edit_quest_definition(
     so the returned bundle is a consistent edit snapshot.  Edits change
     future instances only; no ``quest_instances`` or
     ``completion_events`` row is touched.
+
+    ``today`` optionally pins the caller-resolved HA-local date the
+    regeneration's no-past guard and horizon are anchored to (threaded
+    into :func:`~.materialize.regenerate_for_definition`); it is a plain
+    ``datetime.date`` with no HA import here — the Feature 09 service
+    supplies the hass-derived value.  When omitted, regeneration falls
+    back to the host clock, same as before.  ``horizon_days`` sizes the
+    regeneration's re-materialization window the same way (threaded into
+    :func:`~.materialize.regenerate_for_definition`); it defaults to
+    :data:`~.const.DEFAULT_HORIZON_DAYS` when omitted.
     """
     _validate_definition_id(definition_id)
 
@@ -341,6 +354,10 @@ async def edit_quest_definition(
         schedule_rule_storage_from_record(snapshot.rule)
     )
 
+    await regenerate_for_definition(
+        database, definition_id, today=today, horizon_days=horizon_days
+    )
+
     return CreatedQuestDefinition(
         definition=snapshot.definition,
         rule=decoded_rule,
@@ -353,6 +370,9 @@ async def assign_child(
     database: NestQuestDatabase,
     definition_id: int,
     child_id: int,
+    *,
+    today: datetime.date | None = None,
+    horizon_days: int | None = None,
 ) -> list[ChildRecord]:
     """Assign ``child_id`` to the definition (idempotent).
 
@@ -366,12 +386,17 @@ async def assign_child(
     write).  Raises ValueError on any rejected argument.  Only the
     ``quest_definition_assignees`` link is written; existing instances
     and completion history are never touched.
+
+    ``today`` optionally pins the caller-resolved HA-local date threaded
+    into the assignment's regeneration (see :func:`edit_quest_definition`).
+    ``horizon_days`` optionally sizes the regeneration's re-materialization
+    window the same way.
     """
     _validate_definition_id(definition_id)
     _validate_child_id(child_id)
     dao = QuestDefinitionsDao(database)
     try:
-        return await dao.add_assignee(definition_id, child_id)
+        assignees = await dao.add_assignee(definition_id, child_id)
     except ValueError as error:
         # The DAO names only the child/definition; re-raise so the
         # public contract names the field the caller actually passed.
@@ -381,12 +406,19 @@ async def assign_child(
         if message.startswith("quest definition "):
             raise ValueError(f"definition_id: {message}") from error
         raise
+    await regenerate_for_definition(
+        database, definition_id, today=today, horizon_days=horizon_days
+    )
+    return assignees
 
 
 async def unassign_child(
     database: NestQuestDatabase,
     definition_id: int,
     child_id: int,
+    *,
+    today: datetime.date | None = None,
+    horizon_days: int | None = None,
 ) -> bool:
     """Unassign ``child_id`` from the definition; True when removed.
 
@@ -396,6 +428,11 @@ async def unassign_child(
     was not currently assigned.  Raises ValueError on a rejected
     argument.  Only the ``quest_definition_assignees`` link is written;
     existing instances and completion history are never touched.
+
+    ``today`` optionally pins the caller-resolved HA-local date threaded
+    into the unassignment's regeneration (see :func:`edit_quest_definition`).
+    ``horizon_days`` optionally sizes the regeneration's re-materialization
+    window the same way.
     """
     _validate_definition_id(definition_id)
     _validate_child_id(child_id)
@@ -405,13 +442,20 @@ async def unassign_child(
         raise ValueError(
             f"definition_id: quest definition {definition_id} does not exist"
         )
-    return await dao.remove_assignee(definition_id, child_id)
+    removed = await dao.remove_assignee(definition_id, child_id)
+    await regenerate_for_definition(
+        database, definition_id, today=today, horizon_days=horizon_days
+    )
+    return removed
 
 
 async def set_quest_definition_active(
     database: NestQuestDatabase,
     definition_id: int,
     is_active: bool,
+    *,
+    today: datetime.date | None = None,
+    horizon_days: int | None = None,
 ) -> CreatedQuestDefinition:
     """Deactivate or reactivate a definition; returns the updated view.
 
@@ -434,6 +478,11 @@ async def set_quest_definition_active(
     definition, its rule, assignees and windows all run inside the
     connection-scoped lock, so the returned bundle is a consistent
     snapshot that a concurrent mutation cannot race.
+
+    ``today`` optionally pins the caller-resolved HA-local date threaded
+    into the activation change's regeneration (see
+    :func:`edit_quest_definition`).  ``horizon_days`` optionally sizes the
+    regeneration's re-materialization window the same way.
     """
     _validate_definition_id(definition_id)
     if not isinstance(is_active, bool):
@@ -456,6 +505,9 @@ async def set_quest_definition_active(
         windows = await dao.list_windows(definition_id)
     rule = schedule_rule_from_storage(
         schedule_rule_storage_from_record(rule_record)
+    )
+    await regenerate_for_definition(
+        database, definition_id, today=today, horizon_days=horizon_days
     )
     return CreatedQuestDefinition(
         definition=updated,

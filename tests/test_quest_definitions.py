@@ -8,6 +8,7 @@ import re
 import pytest
 
 from custom_components.nestquest.dao_children import ChildrenDao
+from custom_components.nestquest.const import DEFAULT_HORIZON_DAYS
 from custom_components.nestquest.dao_instances import (
     CompletionEventsDao,
     QuestInstancesDao,
@@ -1279,11 +1280,19 @@ def test_set_quest_definition_active_nonexistent_definition_names_field(
     _with_db(tmp_path, "set-active-missing-definition.db")(_body)
 
 
-def test_set_quest_definition_active_never_deletes_or_touches_instances(
+def test_set_quest_definition_active_preserves_completed_and_history(
     tmp_path,
 ) -> None:
-    """Deactivation hides the definition but deletes nothing, and
-    pre-existing instances and completion history survive unchanged."""
+    """Deactivation stops future generation; reactivation resumes it.
+
+    The Feature 07 wiring makes both transitions regenerate the
+    definition's rolling horizon: future OPEN instances are removed on
+    deactivation and re-materialized on reactivation.  A pre-existing
+    COMPLETED instance and its completion events always survive both
+    transitions unchanged (regeneration never touches completed rows or
+    the past), and the append-only completion-events table is never
+    rewritten.
+    """
     async def _body(database, children, rules, definitions, child):
         created = await create_quest_definition(
             database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
@@ -1310,9 +1319,6 @@ def test_set_quest_definition_active_never_deletes_or_touches_instances(
             actor_user_id="admin-1",
         )
 
-        instance_count = await database.fetch_one(
-            "SELECT COUNT(*) FROM quest_instances"
-        )
         event_count = await database.fetch_one(
             "SELECT COUNT(*) FROM completion_events"
         )
@@ -1332,29 +1338,25 @@ def test_set_quest_definition_active_never_deletes_or_touches_instances(
             definition_id
         )] == ["morning"]
         # The pre-existing instance and completion event survive with
-        # unchanged ids and contents, and no new rows appeared.
+        # unchanged ids and contents, and no new event rows appeared.
         assert await instances.get_by_id(instance.id) == instance
         assert await events.list_by_instance(instance.id) == [event]
-        assert await database.fetch_one(
-            "SELECT COUNT(*) FROM quest_instances"
-        ) == instance_count
         assert await database.fetch_one(
             "SELECT COUNT(*) FROM completion_events"
         ) == event_count
 
         await set_quest_definition_active(database, definition_id, True)
         assert (await definitions.get(definition_id)).is_active is True
+        # Reactivation regenerates future OPEN instances, but the
+        # completed instance and its history survive the sweep unchanged.
         assert await instances.get_by_id(instance.id) == instance
         assert await events.list_by_instance(instance.id) == [event]
-        assert await database.fetch_one(
-            "SELECT COUNT(*) FROM quest_instances"
-        ) == instance_count
         assert await database.fetch_one(
             "SELECT COUNT(*) FROM completion_events"
         ) == event_count
         return None
 
-    _with_db(tmp_path, "set-active-never-deletes.db")(_body)
+    _with_db(tmp_path, "set-active-preserves-completed.db")(_body)
 
 
 def _gated_hass(
@@ -1841,16 +1843,15 @@ def test_list_active_definitions_snapshot_coherent_under_racing_edit(
 # ---------------------------------------------------------------------------
 
 
-def test_full_lifecycle_never_touches_instances_or_history(tmp_path) -> None:
-    """End-to-end lifecycle on one definition writes only the four
-    definition tables; ``quest_instances`` and ``completion_events`` are
-    left exactly as they were at every stage.
+def test_full_lifecycle_preserves_completed_and_history(tmp_path) -> None:
+    """End-to-end lifecycle preserves completed rows and append-only history.
 
-    A real instance and completion event are seeded before the lifecycle
-    begins, so each stage is checked against pre-existing data being
-    mutated (not an empty table staying empty): create -> edit
-    rule/windows -> assign a second child -> unassign the original child
-    -> deactivate -> reactivate.
+    Each stage (create -> edit rule/windows -> assign a second child ->
+    unassign the original child -> deactivate -> reactivate) now
+    regenerates the definition's future OPEN instances (Feature 07
+    wiring), but a pre-existing COMPLETED instance and its completion
+    events survive every stage unchanged — the completed row keeps its
+    id and snapshot columns, the completion-events table stays append-only.
     """
     async def _body(database, children, rules, definitions, child):
         created = await create_quest_definition(
@@ -1876,24 +1877,18 @@ def test_full_lifecycle_never_touches_instances_or_history(tmp_path) -> None:
             True,
             actor_user_id="admin-1",
         )
-        instance_count = await database.fetch_one(
-            "SELECT COUNT(*) FROM quest_instances"
-        )
         event_count = await database.fetch_one(
             "SELECT COUNT(*) FROM completion_events"
         )
 
-        async def _assert_history_untouched():
+        async def _assert_history_preserved():
             assert await instances.get_by_id(instance.id) == instance
             assert await events.list_by_instance(instance.id) == [event]
-            assert await database.fetch_one(
-                "SELECT COUNT(*) FROM quest_instances"
-            ) == instance_count
             assert await database.fetch_one(
                 "SELECT COUNT(*) FROM completion_events"
             ) == event_count
 
-        await _assert_history_untouched()
+        await _assert_history_preserved()
 
         # Edit rule and windows together; the definition's rule row is
         # rewritten in place and its window set replaced.
@@ -1914,33 +1909,101 @@ def test_full_lifecycle_never_touches_instances_or_history(tmp_path) -> None:
         )
         by_name = {w.window: w.due_time for w in edited.windows}
         assert by_name == {"morning": "08:00", "evening": "19:30"}
-        await _assert_history_untouched()
+        await _assert_history_preserved()
 
         # Assign a second child: multi-assignee, both present.
         bo = await children.create("Bo", NOW)
         roster = await assign_child(database, definition_id, bo.id)
         assert sorted(c.id for c in roster) == sorted([child.id, bo.id])
-        await _assert_history_untouched()
+        await _assert_history_preserved()
 
         # Unassign the original child: only the link drops.
         assert await unassign_child(database, definition_id, child.id) is True
         assert [
             c.id for c in await definitions.list_assignees(definition_id)
         ] == [bo.id]
-        await _assert_history_untouched()
+        await _assert_history_preserved()
 
         # Deactivate, then reactivate: the definition survives both.
         deactivated = await set_quest_definition_active(
             database, definition_id, False
         )
         assert deactivated.definition.is_active is False
-        await _assert_history_untouched()
+        await _assert_history_preserved()
         reactivated = await set_quest_definition_active(
             database, definition_id, True
         )
         assert reactivated.definition.is_active is True
-        await _assert_history_untouched()
+        await _assert_history_preserved()
 
         return reactivated
 
     _with_db(tmp_path, "full-lifecycle.db")(_body)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["edit", "assign", "unassign", "set_active"],
+)
+def test_wrappers_forward_horizon_days(tmp_path, mode) -> None:
+    """The four change wrappers forward a non-default horizon_days.
+
+    Each wrapper threads ``horizon_days`` into the regeneration it triggers;
+    passing 5 here must bound the regenerated window to today..today+5 —
+    proving the forwarding argument is actually honored, not dropped.
+    """
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database,
+            "Chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=_today_iso()),
+            [child.id],
+            ["morning"],
+        )
+        definition_id = created.definition.id
+        instances = QuestInstancesDao(database)
+
+        if mode == "edit":
+            await edit_quest_definition(
+                database,
+                definition_id,
+                windows=[("morning", "10:30")],
+                horizon_days=5,
+            )
+            tracked = child
+        elif mode == "assign":
+            bo = await children.create("Bo", NOW)
+            await assign_child(database, definition_id, bo.id, horizon_days=5)
+            tracked = bo
+        elif mode == "unassign":
+            # The remaining assignee (``child``) must be regenerated over
+            # the 5-day window after ``bo`` is removed.
+            bo = await children.create("Bo", NOW)
+            await assign_child(database, definition_id, bo.id)
+            await unassign_child(
+                database, definition_id, bo.id, horizon_days=5
+            )
+            tracked = child
+        else:  # set_active
+            await set_quest_definition_active(
+                database, definition_id, True, horizon_days=5
+            )
+            tracked = child
+
+        today = datetime.date.today()
+        end = (today + datetime.timedelta(days=5)).isoformat()
+        records = await instances.list_by_date_range(
+            tracked.id, today.isoformat(), end
+        )
+        assert len(records) == 6
+
+        beyond = (today + datetime.timedelta(days=6)).isoformat()
+        beyond_end = (
+            today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+        ).isoformat()
+        assert await instances.list_by_date_range(
+            tracked.id, beyond, beyond_end
+        ) == []
+        return None
+
+    _with_db(tmp_path, f"wrapper-horizon-{mode}.db")(_body)
