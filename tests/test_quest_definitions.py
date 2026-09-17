@@ -16,8 +16,10 @@ from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.migrations import apply_migrations
 from custom_components.nestquest.quest_definitions import (
     CreatedQuestDefinition,
+    assign_child,
     create_quest_definition,
     edit_quest_definition,
+    unassign_child,
 )
 from custom_components.nestquest.recurrence import RuleType, ScheduleRule
 
@@ -880,3 +882,271 @@ def test_edit_post_write_failure_rolls_back_everything(tmp_path) -> None:
         return None
 
     _with_db(tmp_path, "edit-post-write-rollback.db")(_body)
+
+
+# ---------------------------------------------------------------------------
+# assign_child / unassign_child: the assignment business-layer paths
+# ---------------------------------------------------------------------------
+
+
+def test_assign_child_multi_assignee_success(tmp_path) -> None:
+    """Assigning a second child leaves both as assignees (D-008)."""
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        bo = await children.create("Bo", NOW)
+        assignees = await assign_child(database, created.definition.id, bo.id)
+        assert sorted(c.id for c in assignees) == sorted([child.id, bo.id])
+        return assignees
+
+    _with_db(tmp_path, "assign-multi.db")(_body)
+
+
+def test_assign_child_duplicate_is_noop(tmp_path) -> None:
+    """Assigning an already-assigned child adds no duplicate row."""
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        assignees = await assign_child(
+            database, created.definition.id, child.id
+        )
+        assert [c.id for c in assignees] == [child.id]
+        again = await assign_child(
+            database, created.definition.id, child.id
+        )
+        assert [c.id for c in again] == [child.id]
+        return assignees
+
+    _with_db(tmp_path, "assign-duplicate.db")(_body)
+
+
+def test_assign_child_unknown_child_names_field(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        with pytest.raises(
+            ValueError, match="child_id.*does not exist"
+        ):
+            await assign_child(database, created.definition.id, 999)
+        return None
+
+    _with_db(tmp_path, "assign-unknown-child.db")(_body)
+
+
+def test_assign_child_inactive_child_names_field(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        bo = await children.create("Bo", NOW)
+        await children.set_active(bo.id, False)
+        with pytest.raises(ValueError, match="child_id.*inactive"):
+            await assign_child(database, created.definition.id, bo.id)
+        # The failed assignment leaves the roster unchanged.
+        assert [c.id for c in await definitions.list_assignees(
+            created.definition.id
+        )] == [child.id]
+        return None
+
+    _with_db(tmp_path, "assign-inactive-child.db")(_body)
+
+
+def test_assign_child_nonexistent_definition_names_field(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(
+            ValueError, match="definition_id.*does not exist"
+        ):
+            await assign_child(database, 999, child.id)
+        return None
+
+    _with_db(tmp_path, "assign-missing-definition.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [True, 1.5, "1", None])
+def test_assign_child_rejects_non_int_definition_id(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(
+            ValueError, match="definition_id must be an integer"
+        ):
+            await assign_child(database, bad, child.id)
+        return None
+
+    _with_db(tmp_path, "assign-bad-definition-id.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [True, 1.5, "1", None])
+def test_assign_child_rejects_non_int_child_id(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        with pytest.raises(ValueError, match="child_id must be an integer"):
+            await assign_child(database, created.definition.id, bad)
+        return None
+
+    _with_db(tmp_path, "assign-bad-child-id.db")(_body)
+
+
+def test_unassign_child_success_returns_true(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        bo = await children.create("Bo", NOW)
+        created = await create_quest_definition(
+            database,
+            "Brush teeth",
+            _daily_rule(),
+            [child.id, bo.id],
+            ["morning"],
+        )
+        assert await unassign_child(
+            database, created.definition.id, bo.id
+        ) is True
+        assert [c.id for c in await definitions.list_assignees(
+            created.definition.id
+        )] == [child.id]
+        return None
+
+    _with_db(tmp_path, "unassign-success.db")(_body)
+
+
+def test_unassign_child_not_assigned_returns_false(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        assert await unassign_child(
+            database, created.definition.id, 999
+        ) is False
+        return None
+
+    _with_db(tmp_path, "unassign-not-assigned.db")(_body)
+
+
+def test_unassign_child_nonexistent_definition_names_field(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(
+            ValueError, match="definition_id.*does not exist"
+        ):
+            await unassign_child(database, 999, child.id)
+        return None
+
+    _with_db(tmp_path, "unassign-missing-definition.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [True, 1.5, "1", None])
+def test_unassign_child_rejects_non_int_definition_id(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(
+            ValueError, match="definition_id must be an integer"
+        ):
+            await unassign_child(database, bad, child.id)
+        return None
+
+    _with_db(tmp_path, "unassign-bad-definition-id.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [True, 1.5, "1", None])
+def test_unassign_child_rejects_non_int_child_id(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        with pytest.raises(ValueError, match="child_id must be an integer"):
+            await unassign_child(database, created.definition.id, bad)
+        return None
+
+    _with_db(tmp_path, "unassign-bad-child-id.db")(_body)
+
+
+def test_assign_and_unassign_leave_instances_and_history_alone(
+    tmp_path,
+) -> None:
+    """Assign/unassign write the assignees table only.
+
+    An already-generated instance keeps its generation-time child_id, and
+    no completion event appears — the assignment paths touch neither
+    ``quest_instances`` nor ``completion_events``.
+    """
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        bo = await children.create("Bo", NOW)
+        await database.execute(
+            "INSERT INTO quest_instances (definition_id, child_id, "
+            "window, due_date, generated_at) VALUES (?, ?, 'morning', ?, ?)",
+            (created.definition.id, child.id, "2026-09-15", NOW),
+        )
+        await assign_child(database, created.definition.id, bo.id)
+        await unassign_child(database, created.definition.id, child.id)
+        row = await database.fetch_one(
+            "SELECT child_id FROM quest_instances WHERE definition_id = ?",
+            (created.definition.id,),
+        )
+        assert row == (child.id,)
+        events = await database.fetch_one(
+            "SELECT COUNT(*) FROM completion_events"
+        )
+        assert events == (0,)
+        return None
+
+    _with_db(tmp_path, "assign-unassign-history.db")(_body)
+
+
+def test_concurrent_assign_unassign_returns_consistent_roster(
+    tmp_path,
+) -> None:
+    """A concurrent unassign cannot strip the just-assigned child from
+    the roster that ``assign_child`` returns.
+
+    ``assign_child`` returns the roster read inside the same locked
+    transaction as the INSERT, so the child it assigned is always present
+    in its result — even when an unassign of that same child races.  The
+    pause hook holds ``list_assignees`` mid-flight so the unassign is
+    deterministically queued against the assignment's lock.
+    """
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        bo = await children.create("Bo", NOW)
+
+        import custom_components.nestquest.dao_rules as dao_rules
+
+        original_list = dao_rules.QuestDefinitionsDao.list_assignees
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _pausing_list(self, definition_id):
+            if not started.is_set():
+                started.set()
+                await release.wait()
+            return await original_list(self, definition_id)
+
+        dao_rules.QuestDefinitionsDao.list_assignees = _pausing_list
+        try:
+            assign_task = asyncio.ensure_future(
+                assign_child(database, created.definition.id, bo.id)
+            )
+            await started.wait()
+            unassign_task = asyncio.ensure_future(
+                unassign_child(database, created.definition.id, bo.id)
+            )
+            await asyncio.sleep(0)
+            release.set()
+            assignees, removed = await asyncio.gather(
+                assign_task, unassign_task
+            )
+        finally:
+            dao_rules.QuestDefinitionsDao.list_assignees = original_list
+
+        assert bo.id in [c.id for c in assignees], (
+            "assign_child must return a roster containing the child it "
+            "just assigned, even under a concurrent unassign"
+        )
+        assert removed is True
+        return assignees
+
+    _with_db(tmp_path, "assign-unassign-concurrent.db")(_body)

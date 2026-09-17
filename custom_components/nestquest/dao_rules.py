@@ -962,14 +962,18 @@ class QuestDefinitionsDao:
 
     async def add_assignee(
         self, definition_id: int, child_id: int
-    ) -> None:
+    ) -> list[ChildRecord]:
         """Assign ``child_id`` to the definition (idempotent).
 
         Validates the assignee inside the same serialized transaction
         as the INSERT (existing and active AT ASSIGNMENT TIME), so a
         child deactivated concurrently cannot become an assignee.
         Assigning an already-assigned child is a no-op, mirroring the
-        composite primary key's storage-level guarantee.  Changes
+        composite primary key's storage-level guarantee.  Returns the
+        definition's assignees read back INSIDE the same transaction
+        that performed the write, so the returned roster is a
+        consistent post-assignment snapshot — a concurrent assign or
+        unassign cannot race it after the write commits.  Changes
         future instances only: already-generated instances and
         completion history are never rewritten here.
         """
@@ -990,6 +994,7 @@ class QuestDefinitionsDao:
                     "ON CONFLICT (definition_id, child_id) DO NOTHING",
                     (definition_id, child_id),
                 )
+                return await self.list_assignees(definition_id)
 
     async def remove_assignee(
         self, definition_id: int, child_id: int

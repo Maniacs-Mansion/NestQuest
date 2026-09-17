@@ -4,7 +4,8 @@ Sits between the Feature 09 service gate and the typed
 :class:`~.dao_rules.QuestDefinitionsDao`: callers get validation and the
 all-or-nothing create/edit here, and never touch the DAO SQL directly.
 :func:`create_quest_definition` is the create path and
-:func:`edit_quest_definition` the edit path; there is no permission
+:func:`edit_quest_definition` the edit path; :func:`assign_child` and
+:func:`unassign_child` are the assignment paths.  There is no permission
 check here (that is Feature 09).
 
 Validation policy mirrors :mod:`.children`:
@@ -185,6 +186,18 @@ def _validate_definition_id(value: object) -> int:
     return value
 
 
+def _validate_child_id(value: object) -> int:
+    """Reject non-int child ids (bools included) before any lookup.
+
+    SQLite binds Python bools as integers, so ``True`` would silently
+    address child 1 and a float would round — malformed service input
+    must never mutate the wrong profile.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"child_id must be an integer, got {value!r}")
+    return value
+
+
 async def create_quest_definition(
     database: NestQuestDatabase,
     title: str,
@@ -321,3 +334,62 @@ async def edit_quest_definition(
         assignees=snapshot.assignees,
         windows=snapshot.windows,
     )
+
+
+async def assign_child(
+    database: NestQuestDatabase,
+    definition_id: int,
+    child_id: int,
+) -> list[ChildRecord]:
+    """Assign ``child_id`` to the definition (idempotent).
+
+    Validates that both ids are plain ints (bools and floats rejected)
+    and that the child exists and is active — the DAO enforces the
+    active/exists check inside its transaction, and also confirms the
+    definition exists.  Assigning an already-assigned child is a no-op
+    (no duplicate row).  Returns the definition's assignees read back
+    inside the DAO's same transaction, a consistent post-assignment
+    roster (a concurrent assign/unassign cannot race it after the
+    write).  Raises ValueError on any rejected argument.  Only the
+    ``quest_definition_assignees`` link is written; existing instances
+    and completion history are never touched.
+    """
+    _validate_definition_id(definition_id)
+    _validate_child_id(child_id)
+    dao = QuestDefinitionsDao(database)
+    try:
+        return await dao.add_assignee(definition_id, child_id)
+    except ValueError as error:
+        # The DAO names only the child/definition; re-raise so the
+        # public contract names the field the caller actually passed.
+        message = str(error)
+        if message.startswith("child "):
+            raise ValueError(f"child_id: {message}") from error
+        if message.startswith("quest definition "):
+            raise ValueError(f"definition_id: {message}") from error
+        raise
+
+
+async def unassign_child(
+    database: NestQuestDatabase,
+    definition_id: int,
+    child_id: int,
+) -> bool:
+    """Unassign ``child_id`` from the definition; True when removed.
+
+    Validates both ids are plain ints (bools and floats rejected) and
+    that the definition exists, then removes the (definition, child)
+    link.  Returns True when a row was removed and False when the child
+    was not currently assigned.  Raises ValueError on a rejected
+    argument.  Only the ``quest_definition_assignees`` link is written;
+    existing instances and completion history are never touched.
+    """
+    _validate_definition_id(definition_id)
+    _validate_child_id(child_id)
+    dao = QuestDefinitionsDao(database)
+    definition = await dao.get(definition_id)
+    if definition is None:
+        raise ValueError(
+            f"definition_id: quest definition {definition_id} does not exist"
+        )
+    return await dao.remove_assignee(definition_id, child_id)
