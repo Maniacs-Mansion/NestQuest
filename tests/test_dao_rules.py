@@ -608,6 +608,72 @@ def test_schedule_rule_from_storage_rejects_malformed_weekday_csv() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "storage",
+    [
+        # DAILY carrying shape columns it must not hold.
+        ScheduleRuleStorage(
+            "daily", 1, "0", None, None, None, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "daily", 1, None, 15, None, None, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "daily", 1, None, None, 2, None, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "daily", 1, None, None, None, 6, "2026-09-01", None
+        ),
+        # WEEKLY carrying shape columns it must not hold.
+        ScheduleRuleStorage(
+            "weekly", 1, "0,2", 15, None, None, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "weekly", 1, "0,2", None, None, 6, "2026-09-01", None
+        ),
+        # CUSTOM_DAYS carrying shape columns it must not hold.
+        ScheduleRuleStorage(
+            "custom", 1, "0,2", 15, None, None, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "custom", 1, "0,2", None, None, 6, "2026-09-01", None
+        ),
+        # MONTHLY_DAY carrying weekday_set (folded-only column) or month.
+        ScheduleRuleStorage(
+            "monthly", 1, "1", 15, None, None, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "monthly", 1, None, 15, None, 6, "2026-09-01", None
+        ),
+        # MONTHLY_WEEKDAY carrying a forbidden month.
+        ScheduleRuleStorage(
+            "monthly", 1, "1", None, 2, 6, "2026-09-01", None
+        ),
+        # YEARLY carrying weekday_set or nth_weekday.
+        ScheduleRuleStorage(
+            "yearly", 1, "0", None, None, 6, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "yearly", 1, None, None, 2, 6, "2026-09-01", None
+        ),
+    ],
+)
+def test_schedule_rule_from_storage_rejects_forbidden_fields(storage) -> None:
+    with pytest.raises(RuleValidationError):
+        schedule_rule_from_storage(storage)
+
+
+def test_schedule_rule_from_storage_rejects_duplicate_weekday_token() -> None:
+    """A MONTHLY_WEEKDAY with a duplicate CSV token ("1,1") must raise,
+    never silently canonicalize to a single weekday on re-storage."""
+    with pytest.raises(RuleValidationError):
+        schedule_rule_from_storage(
+            ScheduleRuleStorage(
+                "monthly", 1, "1,1", None, 2, None, "2026-09-01", None
+            )
+        )
+
+
 # ---------------------------------------------------------------------------
 # quest_definitions: create / get
 # ---------------------------------------------------------------------------

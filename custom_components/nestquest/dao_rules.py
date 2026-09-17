@@ -209,6 +209,36 @@ def _window_from_row(row: tuple) -> QuestDefinitionWindowRecord:
     )
 
 
+#: Storage columns that are forbidden for each rule type.  A populated
+#: forbidden column means the row's shape is invalid and must raise on
+#: read, never be silently dropped.  ``weekday_set`` is absent for
+#: DAILY/MONTHLY_DAY/YEARLY; MONTHLY_WEEKDAY is the only shape allowed a
+#: non-NULL ``nth_weekday``; YEARLY is the only shape allowed ``month``.
+_FORBIDDEN_STORAGE_FIELDS: dict[str, tuple[RuleType, ...]] = {
+    "weekday_set": (RuleType.DAILY, RuleType.MONTHLY_DAY, RuleType.YEARLY),
+    "day_of_month": (
+        RuleType.DAILY,
+        RuleType.WEEKLY,
+        RuleType.CUSTOM_DAYS,
+        RuleType.MONTHLY_WEEKDAY,
+    ),
+    "nth_weekday": (
+        RuleType.DAILY,
+        RuleType.WEEKLY,
+        RuleType.CUSTOM_DAYS,
+        RuleType.MONTHLY_DAY,
+        RuleType.YEARLY,
+    ),
+    "month": (
+        RuleType.DAILY,
+        RuleType.WEEKLY,
+        RuleType.CUSTOM_DAYS,
+        RuleType.MONTHLY_DAY,
+        RuleType.MONTHLY_WEEKDAY,
+    ),
+}
+
+
 def schedule_rule_to_storage(rule: ScheduleRule) -> ScheduleRuleStorage:
     """Map a validated ScheduleRule onto its storage columns.
 
@@ -261,6 +291,8 @@ def schedule_rule_from_storage(storage: ScheduleRuleStorage) -> ScheduleRule:
             f"unknown storage rule_type {rule_type!r}"
         )
 
+    _reject_forbidden_storage_fields(storage, shape)
+
     weekday_set = None
     nth_weekday_weekday = None
     if shape is RuleType.WEEKLY or shape is RuleType.CUSTOM_DAYS:
@@ -279,6 +311,28 @@ def schedule_rule_from_storage(storage: ScheduleRuleStorage) -> ScheduleRule:
         start_date=storage.start_date,
         end_date=storage.end_date,
     )
+
+
+def _reject_forbidden_storage_fields(
+    storage: ScheduleRuleStorage, shape: RuleType
+) -> None:
+    """Raise unless every populated column is permitted for ``shape``.
+
+    The model constructor rejects a forbidden ``day_of_month``,
+    ``nth_weekday``, or ``month``, but ``weekday_set`` never reaches it
+    (it is folded for MONTHLY_WEEKDAY and dropped otherwise), so a daily
+    row carrying ``weekday_set="0"`` would otherwise decode as a valid
+    daily rule and silently lose the stored data.  This validates every
+    shape column explicitly so a populated-forbidden column raises
+    instead of being discarded.
+    """
+    for field, forbidden_shapes in _FORBIDDEN_STORAGE_FIELDS.items():
+        value = getattr(storage, field)
+        if value is not None and shape in forbidden_shapes:
+            raise RuleValidationError(
+                f"{shape.value} storage rows must not set {field}, "
+                f"got {value!r}"
+            )
 
 
 def _disambiguate_monthly(storage: ScheduleRuleStorage) -> RuleType:
@@ -321,16 +375,29 @@ def _weekdays_from_csv(value: str | None) -> frozenset[int]:
 def _single_weekday_from_csv(value: str | None) -> int:
     """The one weekday a MONTHLY_WEEKDAY stores in weekday_set.
 
-    Raises RuleValidationError when the column is empty or holds more
-    than one weekday — the position's weekday must be unambiguous.
+    Parses the CSV into tokens FIRST and requires exactly one token,
+    so a duplicate pair like ``"1,1"`` is rejected rather than silently
+    canonicalized to a single weekday on re-storage.  An empty or
+    multi-element column raises RuleValidationError.
     """
-    entries = _weekdays_from_csv(value)
-    if len(entries) != 1:
+    if value is None or value == "":
         raise RuleValidationError(
             "MONTHLY_WEEKDAY storage weekday_set must hold exactly one "
             f"weekday, got {value!r}"
         )
-    return next(iter(entries))
+    tokens = value.split(",")
+    if len(tokens) != 1:
+        raise RuleValidationError(
+            "MONTHLY_WEEKDAY storage weekday_set must hold exactly one "
+            f"weekday, got {value!r}"
+        )
+    try:
+        return int(tokens[0])
+    except ValueError:
+        raise RuleValidationError(
+            "MONTHLY_WEEKDAY storage weekday_set must be an integer, "
+            f"got {value!r}"
+        ) from None
 
 
 class ScheduleRulesDao:
