@@ -314,9 +314,13 @@ class QuestInstancesDao:
         Returns the stored instance, or ``None`` when a precondition
         failed — the tuple no longer materializable, which the walk SKIPS
         rather than raising, so the rest of the batch is unaffected.  The
-        no-past rule and the immutable-completed-instance refusal are
-        preserved from :meth:`upsert` (those are not configuration
-        invalidations and still raise ValueError).
+        no-past rule (instances are never generated in the past) is
+        preserved from :meth:`upsert` and still raises ValueError.  An
+        instance that ALREADY has a completion event is also skipped
+        (returns ``None``) rather than raised: it is immutable, so the
+        walk leaves it untouched instead of failing the batch — the
+        generic :meth:`upsert` keeps its hard refusal for the
+        delete/regenerate path.
         """
         _validate_date(due_date, "due_date")
         _validate_window(window)
@@ -359,12 +363,12 @@ class QuestInstancesDao:
                     (definition_id, child_id, due_date, window),
                 )
                 if existing is not None:
-                    raise ValueError(
-                        f"instance for (definition {definition_id}, "
-                        f"child {child_id}, due_date {due_date!r}, "
-                        f"window {window!r}) already has a completion "
-                        "event and is immutable; it cannot be regenerated"
-                    )
+                    # The instance is already completed and therefore
+                    # immutable: the walk SKIPS it (no-op) rather than
+                    # rewriting its snapshot columns or failing the
+                    # batch.  This is the materialization walk's skip,
+                    # distinct from the generic :meth:`upsert` refusal.
+                    return None
                 await self._database.execute(
                     "INSERT INTO quest_instances (definition_id, child_id, "
                     "window, due_date, due_time, generated_at) "
