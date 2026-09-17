@@ -200,15 +200,25 @@ async def create_quest_definition(
 
     storage = schedule_rule_to_storage(rule)
     dao = QuestDefinitionsDao(database)
-    snapshot = await dao.create_with_rule_and_windows(
-        name,
-        storage,
-        _now_stamp(),
-        assignee_ids,
-        window_specs,
-        description=description_value,
-        icon=icon_value,
-    )
+    try:
+        snapshot = await dao.create_with_rule_and_windows(
+            name,
+            storage,
+            _now_stamp(),
+            assignee_ids,
+            window_specs,
+            description=description_value,
+            icon=icon_value,
+        )
+    except ValueError as error:
+        # The DAO's assignee check names only the child; re-raise so the
+        # public contract names the field the caller actually passed.
+        message = str(error)
+        if message.startswith("child "):
+            raise ValueError(
+                f"assignee_child_ids: {message}"
+            ) from error
+        raise
     decoded_rule = schedule_rule_from_storage(storage)
     return CreatedQuestDefinition(
         definition=snapshot.definition,

@@ -249,7 +249,9 @@ def test_create_rejects_inactive_child(tmp_path) -> None:
     async def _body(database, children, rules, definitions, child):
         inactive = await children.create("Bo", NOW)
         await children.set_active(inactive.id, False)
-        with pytest.raises(ValueError, match="inactive"):
+        with pytest.raises(
+            ValueError, match="assignee_child_ids.*inactive"
+        ):
             await create_quest_definition(
                 database,
                 "Brush teeth",
@@ -264,7 +266,9 @@ def test_create_rejects_inactive_child(tmp_path) -> None:
 
 def test_create_rejects_unknown_child(tmp_path) -> None:
     async def _body(database, children, rules, definitions, child):
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(
+            ValueError, match="assignee_child_ids.*does not exist"
+        ):
             await create_quest_definition(
                 database, "Brush teeth", _daily_rule(), [999], ["morning"]
             )
