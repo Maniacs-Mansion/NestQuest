@@ -352,6 +352,39 @@ async def test_day_rollover_listener_materializes_ha_local_horizon(
     )
 
 
+async def test_day_rollover_uses_configured_horizon_days(hass, make_entry) -> None:
+    """The daily run materializes only the configured horizon window."""
+    import datetime
+
+    from custom_components.nestquest.dao_instances import QuestInstancesDao
+
+    entry = _wire(make_entry(options={CONF_HORIZON_DAYS: 5}), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    database = entry.runtime_data.database
+
+    # A definition created AFTER setup has no instances yet (create does not
+    # materialize); firing the daily listener must generate only the horizon.
+    child_id = await _seed_daily_child_and_definition(
+        database, _local_today(hass)
+    )
+    await hass.time_change.fire()
+
+    today = _local_today(hass)
+    end = (today + datetime.timedelta(days=5)).isoformat()
+    records = await QuestInstancesDao(database).list_by_date_range(
+        child_id, today.isoformat(), end
+    )
+    assert len(records) == 6
+
+    beyond = (today + datetime.timedelta(days=6)).isoformat()
+    beyond_end = (
+        today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+    ).isoformat()
+    assert await QuestInstancesDao(database).list_by_date_range(
+        child_id, beyond, beyond_end
+    ) == []
+
+
 def test_day_rollover_time_change_tracker_rejects_local_kwarg() -> None:
     """The fake async_track_time_change mirrors HA 2024.6 (no ``local`` kwarg).
 
@@ -471,10 +504,18 @@ async def test_setup_backfills_configured_horizon_days(hass, make_entry) -> None
 
     today = _local_today(hass)
     end = (today + datetime.timedelta(days=5)).isoformat()
-    records = await QuestInstancesDao(entry.runtime_data.database).list_by_date_range(
-        child_id, today.isoformat(), end
-    )
+    records = await QuestInstancesDao(
+        entry.runtime_data.database
+    ).list_by_date_range(child_id, today.isoformat(), end)
     assert len(records) == 6
+
+    beyond = (today + datetime.timedelta(days=6)).isoformat()
+    beyond_end = (
+        today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+    ).isoformat()
+    assert await QuestInstancesDao(
+        entry.runtime_data.database
+    ).list_by_date_range(child_id, beyond, beyond_end) == []
 
 
 def test_configured_horizon_days_validates_and_falls_back() -> None:
@@ -548,6 +589,14 @@ async def test_regenerate_service_uses_configured_horizon_days(
         child_id, today.isoformat(), end
     )
     assert len(records) == 6
+
+    beyond = (today + datetime.timedelta(days=6)).isoformat()
+    beyond_end = (
+        today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+    ).isoformat()
+    assert await QuestInstancesDao(database).list_by_date_range(
+        child_id, beyond, beyond_end
+    ) == []
 
 
 async def test_unload_deregisters_regenerate_service(hass, make_entry) -> None:

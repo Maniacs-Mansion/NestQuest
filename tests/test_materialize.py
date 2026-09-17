@@ -7,6 +7,7 @@ import datetime
 import pytest
 
 from custom_components.nestquest.dao_children import ChildrenDao
+from custom_components.nestquest.const import DEFAULT_HORIZON_DAYS
 from custom_components.nestquest.dao_instances import (
     CompletionEventsDao,
     QuestInstancesDao,
@@ -1142,6 +1143,14 @@ def test_regenerate_for_definition_respects_horizon_days(tmp_path) -> None:
             child.id, start_iso, horizon_end.isoformat()
         )
         assert len(records) == 6
+
+        # The window is BOUNDED: nothing must exist at day 6 or later (a
+        # hard-coded 14-day default would still emit rows there).
+        beyond = (today + datetime.timedelta(days=6)).isoformat()
+        beyond_end = (
+            today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+        ).isoformat()
+        assert await dao.list_by_date_range(child.id, beyond, beyond_end) == []
         return None
 
     _with_db(tmp_path, "regenerate-def-horizon.db")(_body)
@@ -1172,6 +1181,13 @@ def test_regenerate_for_child_respects_horizon_days(tmp_path) -> None:
             child.id, start_iso, horizon_end.isoformat()
         )
         assert len(records) == 6
+
+        # Bounded window: nothing must exist at day 6 or later.
+        beyond = (today + datetime.timedelta(days=6)).isoformat()
+        beyond_end = (
+            today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+        ).isoformat()
+        assert await dao.list_by_date_range(child.id, beyond, beyond_end) == []
         return None
 
     _with_db(tmp_path, "regenerate-child-horizon.db")(_body)
