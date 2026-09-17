@@ -3,8 +3,8 @@
 :func:`materialize` turns the schedule rules + custody presence of the
 active quest definitions into concrete ``quest_instances`` rows over a
 date range.  It is the pure walk over definitions x dates x assignees x
-windows; HA scheduling (day-rollover triggers) and skip-completed
-generation are separate later tasks and live elsewhere.
+windows; HA scheduling (day-rollover triggers) is a separate later
+task and lives elsewhere.
 
 The walk is deterministic and idempotent:
 
@@ -32,9 +32,11 @@ live assignment, declared window, and its CURRENT ``due_time``) inside
 the SAME transaction as the INSERT, so the check and the write cannot be
 split by a racing config edit.
 
-The upsert is idempotent on (definition_id, child_id, due_date, window),
-so re-running the materialization over the same range never duplicates a
-row; skipped-completed handling is deliberately NOT done here.
+The upsert is idempotent on (definition_id, child_id, due_date,
+window), so re-running the materialization over the same range never
+duplicates a row; a tuple whose instance is already completed is SKIPPED
+(never rewritten, never raised) by
+:meth:`~.dao_instances.QuestInstancesDao.upsert_if_valid`.
 """
 from __future__ import annotations
 

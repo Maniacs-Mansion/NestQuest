@@ -7,7 +7,10 @@ import datetime
 import pytest
 
 from custom_components.nestquest.dao_children import ChildrenDao
-from custom_components.nestquest.dao_instances import QuestInstancesDao
+from custom_components.nestquest.dao_instances import (
+    CompletionEventsDao,
+    QuestInstancesDao,
+)
 from custom_components.nestquest.dao_presence import PresenceSchedulesDao
 from custom_components.nestquest.dao_rules import QuestDefinitionsDao
 from custom_components.nestquest.db import NestQuestDatabase
@@ -15,6 +18,7 @@ from custom_components.nestquest.materialize import materialize
 from custom_components.nestquest.migrations import apply_migrations
 from custom_components.nestquest.quest_definitions import (
     create_quest_definition,
+    edit_quest_definition,
 )
 from custom_components.nestquest.recurrence import RuleType, ScheduleRule
 
@@ -243,6 +247,65 @@ def test_materialize_is_idempotent(tmp_path) -> None:
         return first
 
     _with_db(tmp_path, "materialize-idempotent.db")(_body)
+
+
+def test_materialize_skips_completed_instance_on_re_run(tmp_path) -> None:
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=2)).isoformat()
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            [("morning", "09:00")],
+        )
+
+        await materialize(database, start_iso, end_iso)
+        dao = QuestInstancesDao(database)
+        records = await dao.list_by_date_range(child.id, start_iso, end_iso)
+        assert len(records) == 3
+        completed = records[0]
+
+        await CompletionEventsDao(database).append(
+            completed.id,
+            child.id,
+            "completed",
+            "user",
+            f"{start_iso}T08:00:00+00:00",
+            True,
+            actor_user_id="user-1",
+        )
+
+        # Change the definition so the tuple would otherwise regenerate:
+        # the morning window's due time moves from 09:00 to 10:15.
+        await edit_quest_definition(
+            database,
+            created.definition.id,
+            windows=[("morning", "10:15")],
+        )
+
+        # Re-running must skip the completed instance (no exception) and
+        # leave it untouched, while the open days regenerate to 10:15.
+        count = await materialize(database, start_iso, end_iso)
+        assert count == 2
+
+        refreshed = await dao.list_by_date_range(child.id, start_iso, end_iso)
+        by_due_date = {r.due_date: r for r in refreshed}
+        survived = by_due_date[completed.due_date]
+        assert survived.id == completed.id
+        assert survived.due_time == "09:00"
+        assert survived.generated_at == completed.generated_at
+
+        others = [r for r in refreshed if r.id != completed.id]
+        assert len(others) == 2
+        assert {r.due_time for r in others} == {"10:15"}
+        return count
+
+    _with_db(tmp_path, "materialize-skip-completed.db")(_body)
 
 
 async def _materialize_with_change(
