@@ -887,3 +887,78 @@ def test_regenerate_for_child_rebuilds_horizon_preserves_history(
         return None
 
     _with_db(tmp_path, "regenerate-child.db")(_body)
+
+
+def test_regenerate_for_child_uses_single_anchor_across_midnight(
+    tmp_path, monkeypatch
+) -> None:
+    """A call queued across midnight must not delete-then-fail-to-rebuild.
+
+    ``regenerate_for_child`` reads "today" once as a cutoff hint, but the
+    delete clamps that cutoff to the execution-day under its own lock and
+    RETURNS the effective cutoff; the re-materialization window is then
+    anchored to the same returned day.  This test fakes a midnight rollover
+    between the two reads: the caller's hint is day0 while the delete
+    executes on day1.  The rebuild must start on day1 (so the walk's
+    no-past guard never fires) and the now-past day0 instance must survive.
+    """
+    day0 = datetime.date.today() + datetime.timedelta(days=30)
+    day1 = day0 + datetime.timedelta(days=1)
+
+    clock = {"rolled": False, "reads": 0}
+
+    def _fake_today() -> datetime.date:
+        if not clock["rolled"]:
+            return day0
+        clock["reads"] += 1
+        return day0 if clock["reads"] == 1 else day1
+
+    import custom_components.nestquest.dao_instances as dao_instances_module
+    import custom_components.nestquest.materialize as materialize_module
+
+    monkeypatch.setattr(dao_instances_module, "_today", _fake_today)
+    monkeypatch.setattr(materialize_module, "_today", _fake_today)
+
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+
+        day0_iso = day0.isoformat()
+        horizon_end = day0 + datetime.timedelta(days=14)
+
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=day0_iso),
+            [child.id],
+            [("morning", "09:00")],
+        )
+        dao = QuestInstancesDao(database)
+
+        # Seed the horizon while the clock reads day0.
+        await materialize(database, day0_iso, horizon_end.isoformat())
+
+        # Roll the clock forward: every read after the caller's single
+        # cutoff hint now returns day1 (the delete's execution-day).
+        clock["rolled"] = True
+        clock["reads"] = 0
+
+        rebuilt = await regenerate_for_child(database, child.id)
+
+        # No raise occurred; the rebuilt window is anchored on the delete's
+        # execution-day (day1), so day1..day1+14 all exist.
+        assert rebuilt == 15
+        day1_iso = day1.isoformat()
+        day1_horizon_end = day1 + datetime.timedelta(days=14)
+        assert len(await dao.list_by_date_range(
+            child.id, day1_iso, day1_horizon_end.isoformat()
+        )) == 15
+
+        # day0 was the caller's "today" but rolled over to the past by the
+        # time the delete ran; it must survive (never delete the past).
+        assert await dao.get(
+            created.definition.id, child.id, day0_iso, "morning"
+        ) is not None
+        return rebuilt
+
+    _with_db(tmp_path, "regenerate-child-midnight.db")(_body)

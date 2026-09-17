@@ -64,7 +64,7 @@ from __future__ import annotations
 import datetime
 
 from .const import DEFAULT_HORIZON_DAYS
-from .dao_instances import QuestInstancesDao
+from .dao_instances import QuestInstancesDao, _today
 from .dao_rules import (
     _validate_date,
     load_materialization_input,
@@ -207,14 +207,14 @@ async def regenerate_for_definition(
     assignee set and windows re-materialize against today's state.
 
     "today" is computed the same way the walk computes it —
-    ``datetime.date.today()`` — so the delete cutoff and the
+    :func:`~.dao_instances._today` — so the delete cutoff and the
     re-materialization range share one anchor, and the walk's
     ``upsert_if_valid`` no-past guard never rejects the regenerated
     range.  Returns the number of instances the re-materialization
     upserted across the whole snapshot (idempotent — other active
     definitions' tuples refresh in place, never duplicate).
     """
-    today = datetime.date.today()
+    today = _today()
     start_date = today.isoformat()
     end_date = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
 
@@ -256,16 +256,27 @@ async def regenerate_for_child(
     now-absent/present dates re-materialize against today's presence.
 
     "today" is computed the same way the walk computes it —
-    ``datetime.date.today()`` — so the delete cutoff and the
-    re-materialization range share one anchor.  Returns the number of
-    instances the re-materialization upserted across the whole snapshot
-    (idempotent — other children's and unaffected definitions' tuples
-    refresh in place, never duplicate).
+    :func:`~.dao_instances._today` — and the re-materialization range uses the
+    delete's returned effective cutoff (see
+    :meth:`~.dao_instances.QuestInstancesDao.delete_future_uncompleted_for_child`),
+    so the delete cutoff and the re-materialization window share ONE
+    execution-day anchor even when the call is queued across midnight.
+    Returns the number of instances the re-materialization upserted
+    across the whole snapshot (idempotent — other children's and
+    unaffected definitions' tuples refresh in place, never duplicate).
     """
-    today = datetime.date.today()
-    start_date = today.isoformat()
-    end_date = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+    today = _today()
 
     instances = QuestInstancesDao(database)
-    await instances.delete_future_uncompleted_for_child(child_id, start_date)
-    return await materialize(database, start_date, end_date)
+    # Use the delete's returned effective cutoff as the materialize anchor,
+    # NOT the independently-computed "today" above.  If the call is queued
+    # across midnight the delete clamps its cutoff to the execution-day;
+    # materializing from the stale "today" (now yesterday) would trip the
+    # walk's no-past guard and leave the child's future instances deleted
+    # but not rebuilt.  One anchor for both keeps them consistent.
+    _, effective_cutoff = await instances.delete_future_uncompleted_for_child(
+        child_id, today.isoformat()
+    )
+    start = datetime.date.fromisoformat(effective_cutoff)
+    end_date = (start + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+    return await materialize(database, start.isoformat(), end_date)
