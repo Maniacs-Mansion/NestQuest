@@ -9,6 +9,7 @@ import pytest
 from custom_components.nestquest.dao_children import ChildrenDao
 from custom_components.nestquest.dao_instances import QuestInstancesDao
 from custom_components.nestquest.dao_presence import PresenceSchedulesDao
+from custom_components.nestquest.dao_rules import QuestDefinitionsDao
 from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.materialize import materialize
 from custom_components.nestquest.migrations import apply_migrations
@@ -209,9 +210,241 @@ def test_materialize_is_idempotent(tmp_path) -> None:
         first = await materialize(database, start_iso, end_iso)
         second = await materialize(database, start_iso, end_iso)
         assert first == second == 7
+        # Running twice refreshes the SAME seven rows: exactly one
+        # physical row per (definition_id, child_id, due_date, window)
+        # key, never a duplicate.
+        records = await QuestInstancesDao(database).list_by_date_range(
+            child.id, start_iso, end_iso
+        )
+        keys = [
+            (r.definition_id, r.child_id, r.due_date, r.window)
+            for r in records
+        ]
+        assert len(keys) == 7
+        assert len(set(keys)) == 7
         return first
 
     _with_db(tmp_path, "materialize-idempotent.db")(_body)
+
+
+async def _materialize_with_change(
+    database, start_iso, end_iso, change
+) -> int:
+    """Run materialize, pause before its first per-tuple re-check, apply
+    ``change``, then release.  Returns the materialize count.
+
+    The gate parks the walk AFTER the single input snapshot is read but
+    BEFORE the first :meth:`QuestDefinitionsDao.still_materializable`
+    re-check acquires the connection lock, so ``change`` commits against
+    the live state and the walk's per-tuple re-check then skips the
+    tuples it invalidated (or, for a presence-only change, continues with
+    the snapped presence).  This deterministically exercises the
+    snapshot-to-upsert gap that a config edit can interleave into.
+    """
+    original_check = QuestDefinitionsDao.still_materializable
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    seen = {"n": 0}
+
+    async def _gated_check(self, definition_id, child_id, window):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            seen["first"] = (definition_id, child_id, window)
+            entered.set()
+            await release.wait()
+        return await original_check(self, definition_id, child_id, window)
+
+    QuestDefinitionsDao.still_materializable = _gated_check
+    try:
+        task = asyncio.ensure_future(
+            materialize(database, start_iso, end_iso)
+        )
+        await entered.wait()
+        await change()
+        release.set()
+        return await task
+    finally:
+        QuestDefinitionsDao.still_materializable = original_check
+
+
+def test_materialize_skips_removed_assignee_mid_walk(tmp_path) -> None:
+    async def _body(database):
+        children = ChildrenDao(database)
+        a = await children.create("Ada", NOW)
+        c = await children.create("Cleo", NOW)
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=2)).isoformat()
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [a.id, c.id],
+            ["morning"],
+        )
+
+        async def _remove_assignee():
+            await QuestDefinitionsDao(database).remove_assignee(
+                created.definition.id, a.id
+            )
+
+        count = await _materialize_with_change(
+            database, start_iso, end_iso, _remove_assignee
+        )
+        assert count == 3  # Cleo's three days survive
+        assert await QuestInstancesDao(database).list_by_date_range(
+            a.id, start_iso, end_iso
+        ) == []
+        assert len(await QuestInstancesDao(database).list_by_date_range(
+            c.id, start_iso, end_iso
+        )) == 3
+        return count
+
+    _with_db(tmp_path, "materialize-removed-assignee.db")(_body)
+
+
+def test_materialize_skips_deactivated_definition_mid_walk(tmp_path) -> None:
+    async def _body(database):
+        children = ChildrenDao(database)
+        a = await children.create("Ada", NOW)
+        c = await children.create("Cleo", NOW)
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=2)).isoformat()
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [a.id, c.id],
+            ["morning"],
+        )
+
+        async def _deactivate():
+            await QuestDefinitionsDao(database).set_active(
+                created.definition.id, False
+            )
+
+        count = await _materialize_with_change(
+            database, start_iso, end_iso, _deactivate
+        )
+        assert count == 0
+        assert await QuestInstancesDao(database).list_by_date_range(
+            a.id, start_iso, end_iso
+        ) == []
+        assert await QuestInstancesDao(database).list_by_date_range(
+            c.id, start_iso, end_iso
+        ) == []
+        return count
+
+    _with_db(tmp_path, "materialize-deactivated-definition.db")(_body)
+
+
+def test_materialize_skips_removed_window_mid_walk(tmp_path) -> None:
+    async def _body(database):
+        children = ChildrenDao(database)
+        a = await children.create("Ada", NOW)
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=2)).isoformat()
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [a.id],
+            [("morning", "09:00")],
+        )
+
+        async def _remove_window():
+            await QuestDefinitionsDao(database).remove_window(
+                created.definition.id, "morning"
+            )
+
+        count = await _materialize_with_change(
+            database, start_iso, end_iso, _remove_window
+        )
+        assert count == 0
+        assert await QuestInstancesDao(database).list_by_date_range(
+            a.id, start_iso, end_iso
+        ) == []
+        return count
+
+    _with_db(tmp_path, "materialize-removed-window.db")(_body)
+
+
+def test_materialize_skips_deactivated_child_mid_walk(tmp_path) -> None:
+    async def _body(database):
+        children = ChildrenDao(database)
+        a = await children.create("Ada", NOW)
+        c = await children.create("Cleo", NOW)
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=2)).isoformat()
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [a.id, c.id],
+            ["morning"],
+        )
+
+        async def _deactivate_child():
+            await ChildrenDao(database).set_active(a.id, False)
+
+        count = await _materialize_with_change(
+            database, start_iso, end_iso, _deactivate_child
+        )
+        assert count == 3  # Cleo's three days survive
+        assert await QuestInstancesDao(database).list_by_date_range(
+            a.id, start_iso, end_iso
+        ) == []
+        assert len(await QuestInstancesDao(database).list_by_date_range(
+            c.id, start_iso, end_iso
+        )) == 3
+        return count
+
+    _with_db(tmp_path, "materialize-deactivated-child.db")(_body)
+
+
+def test_materialize_uses_single_presence_snapshot_mid_walk(tmp_path) -> None:
+    async def _body(database):
+        from custom_components.nestquest.dao_presence import (
+            PresenceOverridesDao,
+        )
+
+        children = ChildrenDao(database)
+        overrides = PresenceOverridesDao(database)
+        child = await children.create("Ada", NOW)
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=2)).isoformat()
+        await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            ["morning"],
+        )
+
+        async def _add_blocking_override():
+            await overrides.create(
+                child.id, start_iso, end_iso, False, note="away"
+            )
+
+        # Presence is read once, inside the input snapshot; a blocking
+        # override landing AFTER that read must not make the walk panic
+        # or half-apply it.  The walk stays fully governed by the
+        # snapshot it read: Ada was present every day there, so all
+        # three days still materialize, deterministically.
+        count = await _materialize_with_change(
+            database, start_iso, end_iso, _add_blocking_override
+        )
+        assert count == 3
+        assert len(await QuestInstancesDao(database).list_by_date_range(
+            child.id, start_iso, end_iso
+        )) == 3
+        return count
+
+    _with_db(tmp_path, "materialize-presence-snapshot.db")(_body)
 
 
 def test_materialize_honours_overrides(tmp_path) -> None:

@@ -951,6 +951,21 @@ class QuestDefinitionsDao:
                 definitions = await self.list_active()
                 return await self._snapshots_for(definitions)
 
+    async def read_snapshots_active(self) -> list[QuestDefinitionSnapshot]:
+        """Return every active definition's snapshot WITHOUT locking.
+
+        Mirrors :meth:`list_snapshots_active` minus the lock and
+        transaction: the definitions and their rules, assignees and
+        windows are read on the caller's connection under whatever
+        transaction the caller is already holding, so they stay coherent
+        with every OTHER table the caller reads inside that same
+        transaction.  MUST be called inside the connection lock and an
+        open transaction (the single-transaction input snapshot the
+        materialization walk uses is that caller).
+        """
+        definitions = await self.list_active()
+        return await self._snapshots_for(definitions)
+
     async def list_snapshots_by_child(
         self, child_id: int
     ) -> list[QuestDefinitionSnapshot]:
@@ -1175,6 +1190,37 @@ class QuestDefinitionsDao:
             )
         return result.rowcount > 0
 
+    async def still_materializable(
+        self, definition_id: int, child_id: int, window: str
+    ) -> bool:
+        """Return True when the (definition, child, window) tuple is still
+        a valid materialization target.
+
+        Checks, in one query under the connection lock, that the
+        definition exists AND is active, the child exists AND is active,
+        the (definition, child) assignment link is still present, and the
+        window is still declared on the definition.  The materialization
+        walk re-checks each tuple against this verdict right before its
+        upsert so a config change landed between the input snapshot and
+        the upsert (an assignment removed, a definition or child
+        deactivated, a window removed) causes that tuple to be SKIPPED
+        instead of aborting the batch.  This is a point read under the
+        lock; the walk additionally treats the upsert's own "does not
+        exist" / "not assigned" rejections as skippable, closing the
+        assignment/existence gap.
+        """
+        async with _connection_lock(self._database):
+            row = await self._database.fetch_one(
+                "SELECT 1 FROM quest_definitions d "
+                "JOIN quest_definition_assignees a ON a.definition_id = d.id "
+                "JOIN children c ON c.id = a.child_id "
+                "JOIN quest_definition_windows w ON w.definition_id = d.id "
+                "WHERE d.id = ? AND a.child_id = ? AND w.window = ? "
+                "AND d.is_active = 1 AND c.is_active = 1 LIMIT 1",
+                (definition_id, child_id, window),
+            )
+        return row is not None
+
     async def _validate_assignable_child(self, child_id: int) -> None:
         """Raise ValueError unless the child exists and is active.
 
@@ -1190,3 +1236,46 @@ class QuestDefinitionsDao:
             raise ValueError(
                 f"child {child_id} is inactive and cannot be assigned"
             )
+
+
+async def load_materialization_input(
+    database: NestQuestDatabase,
+    range_start: str,
+    range_end: str,
+):
+    """Read every materialization input in ONE locked transaction.
+
+    Returns ``(snapshots, schedules, overrides)``:
+
+    - ``snapshots``: every active definition with its rule, assignees and
+      windows (the :class:`QuestDefinitionSnapshot` shape).
+    - ``schedules`` / ``overrides``: the presence schedules and
+      range-scoped overrides of every assignee child, in
+      :mod:`.dao_presence`'s record shapes.
+
+    The whole read — definitions, rules, assignees, windows, and the
+    assignees' presence schedules and overrides — runs inside a single
+    BEGIN..COMMIT span under the connection lock, so a concurrent edit
+    (definition, assignment, window, or presence) cannot interleave
+    between the parts and the walk never sees a mixed-time view.  Each
+    table's SQL stays in its own DAO module: the presence portion is
+    delegated to :mod:`.dao_presence` (a lazy import here, since that
+    module imports this one).
+    """
+    definitions_dao = QuestDefinitionsDao(database)
+    async with _connection_lock(database):
+        async with database.transaction():
+            snapshots = await definitions_dao.read_snapshots_active()
+            child_ids = sorted(
+                {
+                    child.id
+                    for snapshot in snapshots
+                    for child in snapshot.assignees
+                }
+            )
+            from . import dao_presence  # lazy: dao_presence imports us
+
+            schedules, overrides = await dao_presence.read_snapshot_unlocked(
+                database, child_ids, range_start, range_end
+            )
+    return snapshots, schedules, overrides
