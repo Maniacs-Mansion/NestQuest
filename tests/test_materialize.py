@@ -19,6 +19,7 @@ from custom_components.nestquest.dao_rules import (
 from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.materialize import (
     materialize,
+    regenerate_for_child,
     regenerate_for_definition,
 )
 from custom_components.nestquest.migrations import apply_migrations
@@ -773,3 +774,270 @@ def test_edit_quest_definition_regenerates_future_instances(tmp_path) -> None:
         return None
 
     _with_db(tmp_path, "edit-regenerates.db")(_body)
+
+
+def test_regenerate_for_child_rebuilds_horizon_preserves_history(
+    tmp_path,
+) -> None:
+    async def _body(database):
+        from custom_components.nestquest.dao_presence import (
+            PresenceOverridesDao,
+        )
+
+        children = ChildrenDao(database)
+        overrides = PresenceOverridesDao(database)
+        child = await children.create("Ada", NOW)
+
+        today = datetime.date.today()
+        horizon_end = today + datetime.timedelta(days=14)
+        start_iso = today.isoformat()
+
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            [("morning", "09:00")],
+        )
+
+        dao = QuestInstancesDao(database)
+        events = CompletionEventsDao(database)
+
+        # Instances across the full horizon: 15 daily rows.
+        await materialize(database, start_iso, horizon_end.isoformat())
+        all_future = await dao.list_by_date_range(
+            child.id, start_iso, horizon_end.isoformat()
+        )
+        assert len(all_future) == 15
+
+        # A completed instance on tomorrow: immutable, must be spared.
+        completed_due = (today + datetime.timedelta(days=1)).isoformat()
+        completed = next(r for r in all_future if r.due_date == completed_due)
+        await events.append(
+            completed.id,
+            child.id,
+            "completed",
+            "user",
+            f"{completed_due}T08:00:00+00:00",
+            True,
+            actor_user_id="user-1",
+        )
+
+        # A past instance (yesterday): raw insert bypasses the walk's
+        # no-past guard so the child-scoped delete has history to spare.
+        past_due = (today - datetime.timedelta(days=1)).isoformat()
+        await database.execute(
+            "INSERT INTO quest_instances (definition_id, child_id, "
+            "window, due_date, due_time, generated_at) "
+            "VALUES (?, ?, 'morning', ?, '09:00', ?)",
+            (created.definition.id, child.id, past_due, NOW),
+        )
+
+        # An ABSENT override covering three future dates that had
+        # instances: days 2..4 after today.
+        absent_start = (today + datetime.timedelta(days=2)).isoformat()
+        absent_end = (today + datetime.timedelta(days=4)).isoformat()
+        override = await overrides.create(
+            child.id, absent_start, absent_end, False, note="away"
+        )
+
+        await regenerate_for_child(database, child.id)
+
+        records = await dao.list_by_date_range(
+            child.id, past_due, horizon_end.isoformat()
+        )
+        by_due = {r.due_date: r for r in records}
+
+        # The now-absent days' instances are gone.
+        for offset in range(2, 5):
+            iso = (today + datetime.timedelta(days=offset)).isoformat()
+            assert iso not in by_due
+
+        # The completed instance survived untouched (same physical id).
+        assert by_due[completed_due].id == completed.id
+
+        # The past instance survived.
+        assert past_due in by_due
+
+        # Every non-absent future day still has its instance.
+        for offset in range(15):
+            iso = (today + datetime.timedelta(days=offset)).isoformat()
+            if 2 <= offset <= 4:
+                continue
+            assert iso in by_due
+
+        # Remove the override and regenerate again: the absent days return.
+        await overrides.delete(override.id)
+        await regenerate_for_child(database, child.id)
+
+        records = await dao.list_by_date_range(
+            child.id, past_due, horizon_end.isoformat()
+        )
+        by_due = {r.due_date: r for r in records}
+
+        for offset in range(15):
+            iso = (today + datetime.timedelta(days=offset)).isoformat()
+            assert iso in by_due
+
+        # The completed instance is still the same untouched row, and the
+        # past instance is still there.
+        assert by_due[completed_due].id == completed.id
+        assert by_due[completed_due].due_time == "09:00"
+        assert past_due in by_due
+        return None
+
+    _with_db(tmp_path, "regenerate-child.db")(_body)
+
+
+def test_regenerate_for_child_uses_single_anchor_across_midnight(
+    tmp_path, monkeypatch
+) -> None:
+    """A call queued across midnight must not delete-then-fail-to-rebuild.
+
+    ``regenerate_for_child`` reads "today" once as a cutoff hint, but the
+    delete clamps that cutoff to the execution-day under its own lock and
+    RETURNS the effective cutoff; the re-materialization window is then
+    anchored to the same returned day.  This test fakes a midnight rollover
+    between the two reads: the caller's hint is day0 while the delete
+    executes on day1.  The rebuild must start on day1 (so the walk's
+    no-past guard never fires) and the now-past day0 instance must survive.
+    """
+    day0 = datetime.date.today() + datetime.timedelta(days=30)
+    day1 = day0 + datetime.timedelta(days=1)
+
+    clock = {"rolled": False, "reads": 0}
+
+    def _fake_today() -> datetime.date:
+        if not clock["rolled"]:
+            return day0
+        clock["reads"] += 1
+        return day0 if clock["reads"] == 1 else day1
+
+    import custom_components.nestquest.dao_instances as dao_instances_module
+    import custom_components.nestquest.materialize as materialize_module
+
+    monkeypatch.setattr(dao_instances_module, "_today", _fake_today)
+    monkeypatch.setattr(materialize_module, "_today", _fake_today)
+
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+
+        day0_iso = day0.isoformat()
+        horizon_end = day0 + datetime.timedelta(days=14)
+
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=day0_iso),
+            [child.id],
+            [("morning", "09:00")],
+        )
+        dao = QuestInstancesDao(database)
+
+        # Seed the horizon while the clock reads day0.
+        await materialize(database, day0_iso, horizon_end.isoformat())
+
+        # Roll the clock forward: every read after the caller's single
+        # cutoff hint now returns day1 (the delete's execution-day).
+        clock["rolled"] = True
+        clock["reads"] = 0
+
+        rebuilt = await regenerate_for_child(database, child.id)
+
+        # No raise occurred; the rebuilt window is anchored on the delete's
+        # execution-day (day1), so day1..day1+14 all exist.
+        assert rebuilt == 15
+        day1_iso = day1.isoformat()
+        day1_horizon_end = day1 + datetime.timedelta(days=14)
+        assert len(await dao.list_by_date_range(
+            child.id, day1_iso, day1_horizon_end.isoformat()
+        )) == 15
+
+        # day0 was the caller's "today" but rolled over to the past by the
+        # time the delete ran; it must survive (never delete the past).
+        assert await dao.get(
+            created.definition.id, child.id, day0_iso, "morning"
+        ) is not None
+        return rebuilt
+
+    _with_db(tmp_path, "regenerate-child-midnight.db")(_body)
+
+
+def test_regenerate_for_child_is_child_scoped(tmp_path) -> None:
+    """Regenerating one child must never touch another child's rows."""
+    async def _body(database):
+        from custom_components.nestquest.dao_presence import (
+            PresenceOverridesDao,
+        )
+
+        children = ChildrenDao(database)
+        overrides = PresenceOverridesDao(database)
+        a = await children.create("Ada", NOW)
+        b = await children.create("Bo", NOW)
+
+        today = datetime.date.today()
+        horizon_end = today + datetime.timedelta(days=14)
+        start_iso = today.isoformat()
+
+        await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [a.id, b.id],
+            [("morning", "09:00")],
+        )
+
+        dao = QuestInstancesDao(database)
+        await materialize(database, start_iso, horizon_end.isoformat())
+
+        # Baseline for child b, keyed by due_date, so we can prove its rows
+        # are byte-for-byte unchanged afterward.
+        baseline_b = {
+            r.due_date: (r.id, r.due_time, r.generated_at)
+            for r in await dao.list_by_date_range(
+                b.id, start_iso, horizon_end.isoformat()
+            )
+        }
+        assert len(baseline_b) == 15
+
+        # An ABSENT override for child a only, covering days 2..4.
+        absent_start = (today + datetime.timedelta(days=2)).isoformat()
+        absent_end = (today + datetime.timedelta(days=4)).isoformat()
+        await overrides.create(
+            a.id, absent_start, absent_end, False, note="away"
+        )
+
+        await regenerate_for_child(database, a.id)
+
+        # Child a's now-absent days vanished.
+        a_by_due = {
+            r.due_date: r
+            for r in await dao.list_by_date_range(
+                a.id, start_iso, horizon_end.isoformat()
+            )
+        }
+        for offset in range(2, 5):
+            iso = (today + datetime.timedelta(days=offset)).isoformat()
+            assert iso not in a_by_due
+
+        # Child b is untouched: same physical rows, same snapshot columns.
+        b_records = await dao.list_by_date_range(
+            b.id, start_iso, horizon_end.isoformat()
+        )
+        assert len(b_records) == 15
+        for r in b_records:
+            assert (r.id, r.due_time, r.generated_at) == baseline_b[r.due_date]
+        return None
+
+    _with_db(tmp_path, "regenerate-child-scoped.db")(_body)
+
+
+def test_regenerate_for_child_rejects_non_int_child_id(tmp_path) -> None:
+    async def _body(database):
+        for bad in (True, False, 1.0, "1"):
+            with pytest.raises(ValueError, match="child_id must be an integer"):
+                await regenerate_for_child(database, bad)
+        return None
+
+    _with_db(tmp_path, "regenerate-child-badid.db")(_body)

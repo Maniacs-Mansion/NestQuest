@@ -37,13 +37,34 @@ window), so re-running the materialization over the same range never
 duplicates a row; a tuple whose instance is already completed is SKIPPED
 (never rewritten, never raised) by
 :meth:`~.dao_instances.QuestInstancesDao.upsert_if_valid`.
+
+Regeneration: a config or presence change must rebuild future instances
+so they track the new state.  :func:`regenerate_for_definition` covers
+definition edits / reassignment (Features 06/07); :func:`regenerate_for_child`
+covers a single child's presence change (Feature 09).  Both delete the
+affected open instances at or after today — never a completed instance,
+never the past — and re-run the walk over the rolling horizon
+``[today, today + DEFAULT_HORIZON_DAYS]``.
+
+HOOK (Feature 09 presence services): the presence business layer that
+lands in Feature 09 MUST call :func:`regenerate_for_child` after EVERY
+presence-state write so a child's future instances track its presence:
+``set_presence_pattern`` (including clearing/setting an empty pattern),
+deleting/clearing the presence schedule
+(:meth:`~.dao_presence.PresenceSchedulesDao.delete`),
+``create_presence_override``, and ``delete_presence_override``.  A
+schedule delete changes presence state too (the child becomes
+always-present), so it must regenerate just like the others.  This hook
+is documented, not yet wired: no presence business layer exists yet, and
+the presence DAO (``dao_presence.py``) must stay free of business rules
+— never call :func:`regenerate_for_child` from inside the DAO layer.
 """
 from __future__ import annotations
 
 import datetime
 
 from .const import DEFAULT_HORIZON_DAYS
-from .dao_instances import QuestInstancesDao
+from .dao_instances import QuestInstancesDao, _today
 from .dao_rules import (
     _validate_date,
     load_materialization_input,
@@ -104,6 +125,8 @@ async def materialize(
     database: NestQuestDatabase,
     start_date: str,
     end_date: str,
+    *,
+    child_ids: list[int] | None = None,
 ) -> int:
     """Generate quest instances for the closed range [start_date, end_date].
 
@@ -112,6 +135,12 @@ async def materialize(
     else raises ValueError naming the offending field.  Returns the number
     of instances upserted for the range (idempotent — a re-run refreshes
     the same rows, never duplicates them).
+
+    ``child_ids`` optionally scopes the walk to exactly those children:
+    assignees outside the list are never written, so a caller that only
+    wants one child's instances rebuilt (e.g. :func:`regenerate_for_child`
+    after a presence change) cannot touch any unrelated child's rows.
+    When omitted (or None) the walk covers every assignee as before.
 
     All inputs are read in ONE locked transaction; each tuple's write then
     goes through the atomic :meth:`~.dao_instances.QuestInstancesDao.upsert_if_valid`,
@@ -132,6 +161,7 @@ async def materialize(
         load_materialization_input(database, start_date, end_date)
     )
     engine = _build_engine(schedules_records, overrides_records)
+    child_filter = None if child_ids is None else set(child_ids)
 
     definitions = [
         (snapshot.definition.id, _decode_rule(snapshot),
@@ -153,6 +183,8 @@ async def materialize(
             if not occurs_on(rule, cursor):
                 continue
             for child in assignees:
+                if child_filter is not None and child.id not in child_filter:
+                    continue
                 if not engine.is_present(child.id, cursor):
                     continue
                 for window in windows:
@@ -186,17 +218,85 @@ async def regenerate_for_definition(
     assignee set and windows re-materialize against today's state.
 
     "today" is computed the same way the walk computes it —
-    ``datetime.date.today()`` — so the delete cutoff and the
+    :func:`~.dao_instances._today` — so the delete cutoff and the
     re-materialization range share one anchor, and the walk's
     ``upsert_if_valid`` no-past guard never rejects the regenerated
     range.  Returns the number of instances the re-materialization
     upserted across the whole snapshot (idempotent — other active
     definitions' tuples refresh in place, never duplicate).
     """
-    today = datetime.date.today()
+    today = _today()
     start_date = today.isoformat()
     end_date = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
 
     instances = QuestInstancesDao(database)
     await instances.delete_future_uncompleted(definition_id, start_date)
     return await materialize(database, start_date, end_date)
+
+
+# HOOK (Feature 09 presence services): ``regenerate_for_child`` is the
+# child-presence counterpart to ``regenerate_for_definition``.  The
+# presence business layer that lands in Feature 09 MUST call
+# ``regenerate_for_child`` after EVERY presence-state write, so future
+# instances track a child's changed presence: set_presence_pattern
+# (including clearing/setting an empty pattern), deleting/clearing the
+# presence schedule (PresenceSchedulesDao.delete),
+# create_presence_override, and delete_presence_override.  A schedule
+# delete changes presence state too (the child becomes always-present),
+# so it must regenerate just like the others.  It is deliberately NOT
+# wired into ``dao_presence.py``: the DAO layer stays pure storage (no
+# business rules), and no presence business layer exists yet to host the
+# call — see the module docstring note above.
+async def regenerate_for_child(
+    database: NestQuestDatabase,
+    child_id: int,
+) -> int:
+    """Regenerate a child's future instances after a presence change.
+
+    The Feature 09 presence services call this after every
+    presence-state write — set_presence_pattern (including clearing or
+    setting an empty pattern), deleting/clearing the presence schedule
+    (:meth:`~.dao_presence.PresenceSchedulesDao.delete`),
+    create_presence_override, and delete_presence_override — so a
+    child's future instances track its new presence: the child's open
+    instances at or after today are deleted across ALL its definitions
+    (never a completed instance, never the past) via
+    :meth:`~.dao_instances.QuestInstancesDao.delete_future_uncompleted_for_child`,
+    then the materialization walk re-runs over the rolling horizon
+    ``[today, today + DEFAULT_HORIZON_DAYS]`` scoped to that child only,
+    so the child's now-absent/present dates re-materialize against
+    today's presence WITHOUT touching any other child's rows.
+
+    ``child_id`` must be a plain int — bool and float are rejected
+    (SQLite binds a bool as 0/1 and a float would round, so a malformed
+    id must never mutate the wrong profile).
+
+    "today" is computed the same way the walk computes it —
+    :func:`~.dao_instances._today` — and the re-materialization range uses the
+    delete's returned effective cutoff (see
+    :meth:`~.dao_instances.QuestInstancesDao.delete_future_uncompleted_for_child`),
+    so the delete cutoff and the re-materialization window share ONE
+    execution-day anchor even when the call is queued across midnight.
+    Returns the number of instances the re-materialization upserted for
+    the child across the whole snapshot.
+    """
+    if isinstance(child_id, bool) or not isinstance(child_id, int):
+        raise ValueError(f"child_id must be an integer, got {child_id!r}")
+
+    today = _today()
+
+    instances = QuestInstancesDao(database)
+    # Use the delete's returned effective cutoff as the materialize anchor,
+    # NOT the independently-computed "today" above.  If the call is queued
+    # across midnight the delete clamps its cutoff to the execution-day;
+    # materializing from the stale "today" (now yesterday) would trip the
+    # walk's no-past guard and leave the child's future instances deleted
+    # but not rebuilt.  One anchor for both keeps them consistent.
+    _, effective_cutoff = await instances.delete_future_uncompleted_for_child(
+        child_id, today.isoformat()
+    )
+    start = datetime.date.fromisoformat(effective_cutoff)
+    end_date = (start + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+    return await materialize(
+        database, start.isoformat(), end_date, child_ids=[child_id]
+    )
