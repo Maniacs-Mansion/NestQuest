@@ -9,13 +9,21 @@ import pytest
 from custom_components.nestquest.dao_children import ChildrenDao
 from custom_components.nestquest.dao_rules import (
     ScheduleRuleRecord,
+    ScheduleRuleStorage,
     ScheduleRulesDao,
     QuestDefinitionRecord,
     QuestDefinitionWindowRecord,
     QuestDefinitionsDao,
+    schedule_rule_from_storage,
+    schedule_rule_to_storage,
 )
 from custom_components.nestquest.db import NestQuestDatabase
 from custom_components.nestquest.migrations import apply_migrations
+from custom_components.nestquest.recurrence import (
+    RuleType,
+    RuleValidationError,
+    ScheduleRule,
+)
 
 
 def _run(coro):
@@ -421,6 +429,249 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
     # its INSERT, so the queued delete must find the definition and be
     # rejected — the create must NOT lose its rule after validating it.
     assert create_won is False
+
+
+# ---------------------------------------------------------------------------
+# ScheduleRule <-> storage mapping
+# ---------------------------------------------------------------------------
+
+
+_RULE_STORAGE_CASES = [
+    (
+        ScheduleRule(rule_type=RuleType.DAILY, start_date="2026-09-01"),
+        ScheduleRuleStorage(
+            "daily", 1, None, None, None, None, "2026-09-01", None
+        ),
+    ),
+    (
+        ScheduleRule(
+            rule_type=RuleType.DAILY,
+            interval=3,
+            start_date="2026-09-01",
+            end_date="2026-12-31",
+        ),
+        ScheduleRuleStorage(
+            "daily", 3, None, None, None, None, "2026-09-01", "2026-12-31"
+        ),
+    ),
+    (
+        ScheduleRule(
+            rule_type=RuleType.WEEKLY,
+            weekday_set={2, 0, 4},
+            start_date="2026-09-01",
+        ),
+        ScheduleRuleStorage(
+            "weekly", 1, "0,2,4", None, None, None, "2026-09-01", None
+        ),
+    ),
+    (
+        ScheduleRule(
+            rule_type=RuleType.CUSTOM_DAYS,
+            weekday_set={1, 3, 5},
+            interval=2,
+            start_date="2026-09-01",
+        ),
+        ScheduleRuleStorage(
+            "custom", 2, "1,3,5", None, None, None, "2026-09-01", None
+        ),
+    ),
+    (
+        ScheduleRule(
+            rule_type=RuleType.MONTHLY_DAY,
+            day_of_month=15,
+            start_date="2026-09-01",
+        ),
+        ScheduleRuleStorage(
+            "monthly", 1, None, 15, None, None, "2026-09-01", None
+        ),
+    ),
+    (
+        ScheduleRule(
+            rule_type=RuleType.MONTHLY_DAY,
+            day_of_month=31,
+            interval=3,
+            start_date="2026-09-01",
+        ),
+        ScheduleRuleStorage(
+            "monthly", 3, None, 31, None, None, "2026-09-01", None
+        ),
+    ),
+    (
+        ScheduleRule(
+            rule_type=RuleType.MONTHLY_WEEKDAY,
+            nth_weekday=2,
+            nth_weekday_weekday=1,
+            start_date="2026-09-01",
+        ),
+        ScheduleRuleStorage(
+            "monthly", 1, "1", None, 2, None, "2026-09-01", None
+        ),
+    ),
+    (
+        ScheduleRule(
+            rule_type=RuleType.MONTHLY_WEEKDAY,
+            nth_weekday=-1,
+            nth_weekday_weekday=4,
+            interval=2,
+            start_date="2026-09-01",
+        ),
+        ScheduleRuleStorage(
+            "monthly", 2, "4", None, -1, None, "2026-09-01", None
+        ),
+    ),
+    (
+        ScheduleRule(
+            rule_type=RuleType.YEARLY, month=6, start_date="2026-09-01"
+        ),
+        ScheduleRuleStorage(
+            "yearly", 1, None, None, None, 6, "2026-09-01", None
+        ),
+    ),
+    (
+        ScheduleRule(
+            rule_type=RuleType.YEARLY,
+            month=2,
+            day_of_month=29,
+            start_date="2026-09-01",
+        ),
+        ScheduleRuleStorage(
+            "yearly", 1, None, 29, None, 2, "2026-09-01", None
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize("rule, storage", _RULE_STORAGE_CASES)
+def test_schedule_rule_to_storage_maps_each_type(rule, storage) -> None:
+    assert schedule_rule_to_storage(rule) == storage
+
+
+@pytest.mark.parametrize("rule, storage", _RULE_STORAGE_CASES)
+def test_schedule_rule_from_storage_rebuilds_each_type(rule, storage) -> None:
+    assert schedule_rule_from_storage(storage) == rule
+
+
+@pytest.mark.parametrize("rule, storage", _RULE_STORAGE_CASES)
+def test_schedule_rule_round_trips_losslessly_both_directions(
+    rule, storage
+) -> None:
+    assert schedule_rule_from_storage(schedule_rule_to_storage(rule)) == rule
+    assert schedule_rule_to_storage(schedule_rule_from_storage(storage)) == storage
+
+
+@pytest.mark.parametrize(
+    "storage",
+    [
+        # monthly with neither day_of_month nor nth_weekday
+        ScheduleRuleStorage(
+            "monthly", 1, None, None, None, None, "2026-09-01", None
+        ),
+        # monthly with both day_of_month and nth_weekday
+        ScheduleRuleStorage(
+            "monthly", 1, None, 15, 2, None, "2026-09-01", None
+        ),
+        # MONTHLY_WEEKDAY whose weekday_set is None
+        ScheduleRuleStorage(
+            "monthly", 1, None, None, 2, None, "2026-09-01", None
+        ),
+        # MONTHLY_WEEKDAY whose weekday_set is empty
+        ScheduleRuleStorage("monthly", 1, "", None, 2, None, "2026-09-01", None),
+        # MONTHLY_WEEKDAY whose weekday_set is multi-element
+        ScheduleRuleStorage(
+            "monthly", 1, "1,3", None, 2, None, "2026-09-01", None
+        ),
+        # unknown storage rule_type
+        ScheduleRuleStorage(
+            "sometimes", 1, None, None, None, None, "2026-09-01", None
+        ),
+    ],
+)
+def test_schedule_rule_from_storage_rejects_ambiguous_or_invalid(
+    storage,
+) -> None:
+    with pytest.raises(RuleValidationError):
+        schedule_rule_from_storage(storage)
+
+
+def test_schedule_rule_from_storage_rejects_malformed_weekday_csv() -> None:
+    with pytest.raises(RuleValidationError):
+        schedule_rule_from_storage(
+            ScheduleRuleStorage(
+                "weekly", 1, "0,2,x", None, None, None, "2026-09-01", None
+            )
+        )
+    with pytest.raises(RuleValidationError):
+        schedule_rule_from_storage(
+            ScheduleRuleStorage(
+                "weekly", 1, "7", None, None, None, "2026-09-01", None
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "storage",
+    [
+        # DAILY carrying shape columns it must not hold.
+        ScheduleRuleStorage(
+            "daily", 1, "0", None, None, None, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "daily", 1, None, 15, None, None, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "daily", 1, None, None, 2, None, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "daily", 1, None, None, None, 6, "2026-09-01", None
+        ),
+        # WEEKLY carrying shape columns it must not hold.
+        ScheduleRuleStorage(
+            "weekly", 1, "0,2", 15, None, None, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "weekly", 1, "0,2", None, None, 6, "2026-09-01", None
+        ),
+        # CUSTOM_DAYS carrying shape columns it must not hold.
+        ScheduleRuleStorage(
+            "custom", 1, "0,2", 15, None, None, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "custom", 1, "0,2", None, None, 6, "2026-09-01", None
+        ),
+        # MONTHLY_DAY carrying weekday_set (folded-only column) or month.
+        ScheduleRuleStorage(
+            "monthly", 1, "1", 15, None, None, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "monthly", 1, None, 15, None, 6, "2026-09-01", None
+        ),
+        # MONTHLY_WEEKDAY carrying a forbidden month.
+        ScheduleRuleStorage(
+            "monthly", 1, "1", None, 2, 6, "2026-09-01", None
+        ),
+        # YEARLY carrying weekday_set or nth_weekday.
+        ScheduleRuleStorage(
+            "yearly", 1, "0", None, None, 6, "2026-09-01", None
+        ),
+        ScheduleRuleStorage(
+            "yearly", 1, None, None, 2, 6, "2026-09-01", None
+        ),
+    ],
+)
+def test_schedule_rule_from_storage_rejects_forbidden_fields(storage) -> None:
+    with pytest.raises(RuleValidationError):
+        schedule_rule_from_storage(storage)
+
+
+def test_schedule_rule_from_storage_rejects_duplicate_weekday_token() -> None:
+    """A MONTHLY_WEEKDAY with a duplicate CSV token ("1,1") must raise,
+    never silently canonicalize to a single weekday on re-storage."""
+    with pytest.raises(RuleValidationError):
+        schedule_rule_from_storage(
+            ScheduleRuleStorage(
+                "monthly", 1, "1,1", None, 2, None, "2026-09-01", None
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

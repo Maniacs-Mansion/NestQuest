@@ -40,6 +40,7 @@ from .const import QUEST_WINDOWS
 from .dao_children import ChildRecord, _child_from_row, _connection_lock
 from .dao_children import _CHILD_COLUMNS
 from .db import NestQuestDatabase
+from .recurrence import RuleType, RuleValidationError, ScheduleRule
 
 #: Sentinel distinguishing "argument omitted" from "explicit SQL NULL"
 #: in update methods: passing ``None`` must mean clearing a nullable
@@ -120,6 +121,26 @@ class ScheduleRuleRecord:
 
 
 @dataclass(frozen=True)
+class ScheduleRuleStorage:
+    """The eight value columns a ScheduleRule maps to (no id column).
+
+    ``id`` is assigned by the database on insert, so the model<->storage
+    mapping concerns only the value columns.  ``nth_weekday_weekday`` is
+    deliberately absent here: for MONTHLY_WEEKDAY its value is folded
+    into ``weekday_set`` as that column's single CSV element.
+    """
+
+    rule_type: str
+    interval: int
+    weekday_set: str | None
+    day_of_month: int | None
+    nth_weekday: int | None
+    month: int | None
+    start_date: str
+    end_date: str | None
+
+
+@dataclass(frozen=True)
 class QuestDefinitionRecord:
     """One row of ``quest_definitions`` (without its assignees)."""
 
@@ -140,6 +161,24 @@ class QuestDefinitionWindowRecord:
     definition_id: int
     window: str
     due_time: str | None
+
+
+@dataclass(frozen=True)
+class QuestDefinitionSnapshot:
+    """A definition plus its rule, assignees and windows, read atomically.
+
+    Returned by :meth:`QuestDefinitionsDao.create_with_rule_and_windows`
+    and :meth:`QuestDefinitionsDao.edit_definition` with the rule,
+    assignees and windows read inside the SAME transaction that wrote
+    them, so the snapshot is a consistent creation/edit-time view — a
+    concurrent rule, assignee or window mutation cannot change it
+    between the write and the read.
+    """
+
+    definition: QuestDefinitionRecord
+    rule: ScheduleRuleRecord
+    assignees: list[ChildRecord]
+    windows: list[QuestDefinitionWindowRecord]
 
 
 _RULE_COLUMNS = (
@@ -188,6 +227,250 @@ def _window_from_row(row: tuple) -> QuestDefinitionWindowRecord:
     )
 
 
+#: Storage columns that are forbidden for each rule type.  A populated
+#: forbidden column means the row's shape is invalid and must raise on
+#: read, never be silently dropped.  ``weekday_set`` is absent for
+#: DAILY/MONTHLY_DAY/YEARLY; MONTHLY_WEEKDAY is the only shape allowed a
+#: non-NULL ``nth_weekday``; YEARLY is the only shape allowed ``month``.
+_FORBIDDEN_STORAGE_FIELDS: dict[str, tuple[RuleType, ...]] = {
+    "weekday_set": (RuleType.DAILY, RuleType.MONTHLY_DAY, RuleType.YEARLY),
+    "day_of_month": (
+        RuleType.DAILY,
+        RuleType.WEEKLY,
+        RuleType.CUSTOM_DAYS,
+        RuleType.MONTHLY_WEEKDAY,
+    ),
+    "nth_weekday": (
+        RuleType.DAILY,
+        RuleType.WEEKLY,
+        RuleType.CUSTOM_DAYS,
+        RuleType.MONTHLY_DAY,
+        RuleType.YEARLY,
+    ),
+    "month": (
+        RuleType.DAILY,
+        RuleType.WEEKLY,
+        RuleType.CUSTOM_DAYS,
+        RuleType.MONTHLY_DAY,
+        RuleType.MONTHLY_WEEKDAY,
+    ),
+}
+
+
+def schedule_rule_to_storage(rule: ScheduleRule) -> ScheduleRuleStorage:
+    """Map a validated ScheduleRule onto its storage columns.
+
+    ``rule_type`` stores as ``RuleType.storage_value`` (MONTHLY_DAY and
+    MONTHLY_WEEKDAY both store ``'monthly'``); ``weekday_set`` stores as
+    a sorted CSV list.  MONTHLY_WEEKDAY folds its model-only
+    ``nth_weekday_weekday`` into ``weekday_set`` as that list's single
+    element; every other type leaves the column as its own set
+    (WEEKLY/CUSTOM_DAYS) or NULL.
+    """
+    shape = rule.rule_type
+    if shape is RuleType.MONTHLY_WEEKDAY:
+        weekday_set = str(rule.nth_weekday_weekday)
+    elif shape is RuleType.WEEKLY or shape is RuleType.CUSTOM_DAYS:
+        weekday_set = ",".join(str(w) for w in sorted(rule.weekday_set))
+    else:
+        weekday_set = None
+    return ScheduleRuleStorage(
+        rule_type=shape.storage_value,
+        interval=rule.interval,
+        weekday_set=weekday_set,
+        day_of_month=rule.day_of_month,
+        nth_weekday=rule.nth_weekday,
+        month=rule.month,
+        start_date=rule.start_date,
+        end_date=rule.end_date,
+    )
+
+
+def schedule_rule_from_storage(storage: ScheduleRuleStorage) -> ScheduleRule:
+    """Reconstruct a ScheduleRule from storage columns.
+
+    Disambiguates MONTHLY_DAY from MONTHLY_WEEKDAY by which field is
+    populated, and raises RuleValidationError rather than silently
+    mis-decoding an ambiguous or invalid shape.
+    """
+    rule_type = storage.rule_type
+    if rule_type == "daily":
+        shape = RuleType.DAILY
+    elif rule_type == "weekly":
+        shape = RuleType.WEEKLY
+    elif rule_type == "monthly":
+        shape = _disambiguate_monthly(storage)
+    elif rule_type == "yearly":
+        shape = RuleType.YEARLY
+    elif rule_type == "custom":
+        shape = RuleType.CUSTOM_DAYS
+    else:
+        raise RuleValidationError(
+            f"unknown storage rule_type {rule_type!r}"
+        )
+
+    _reject_forbidden_storage_fields(storage, shape)
+
+    weekday_set = None
+    nth_weekday_weekday = None
+    if shape is RuleType.WEEKLY or shape is RuleType.CUSTOM_DAYS:
+        weekday_set = _weekdays_from_csv(storage.weekday_set)
+    elif shape is RuleType.MONTHLY_WEEKDAY:
+        nth_weekday_weekday = _single_weekday_from_csv(storage.weekday_set)
+
+    return ScheduleRule(
+        rule_type=shape,
+        interval=storage.interval,
+        weekday_set=weekday_set,
+        day_of_month=storage.day_of_month,
+        nth_weekday=storage.nth_weekday,
+        nth_weekday_weekday=nth_weekday_weekday,
+        month=storage.month,
+        start_date=storage.start_date,
+        end_date=storage.end_date,
+    )
+
+
+def schedule_rule_storage_from_record(
+    record: ScheduleRuleRecord,
+) -> ScheduleRuleStorage:
+    """Copy a rule row's value columns into a storage mapping.
+
+    ``ScheduleRuleRecord`` is the read shape (it carries ``id``);
+    :func:`schedule_rule_from_storage` consumes the value-only
+    :class:`ScheduleRuleStorage` shape, so callers re-reading a stored
+    rule convert through this helper.
+    """
+    return ScheduleRuleStorage(
+        rule_type=record.rule_type,
+        interval=record.interval,
+        weekday_set=record.weekday_set,
+        day_of_month=record.day_of_month,
+        nth_weekday=record.nth_weekday,
+        month=record.month,
+        start_date=record.start_date,
+        end_date=record.end_date,
+    )
+
+
+def _reject_forbidden_storage_fields(
+    storage: ScheduleRuleStorage, shape: RuleType
+) -> None:
+    """Raise unless every populated column is permitted for ``shape``.
+
+    The model constructor rejects a forbidden ``day_of_month``,
+    ``nth_weekday``, or ``month``, but ``weekday_set`` never reaches it
+    (it is folded for MONTHLY_WEEKDAY and dropped otherwise), so a daily
+    row carrying ``weekday_set="0"`` would otherwise decode as a valid
+    daily rule and silently lose the stored data.  This validates every
+    shape column explicitly so a populated-forbidden column raises
+    instead of being discarded.
+    """
+    for field, forbidden_shapes in _FORBIDDEN_STORAGE_FIELDS.items():
+        value = getattr(storage, field)
+        if value is not None and shape in forbidden_shapes:
+            raise RuleValidationError(
+                f"{shape.value} storage rows must not set {field}, "
+                f"got {value!r}"
+            )
+
+
+def _disambiguate_monthly(storage: ScheduleRuleStorage) -> RuleType:
+    """Resolve the shared 'monthly' storage value to a model type.
+
+    MONTHLY_DAY names ``day_of_month`` only; MONTHLY_WEEKDAY names
+    ``nth_weekday`` only.  Neither, or both, is ambiguous and raises.
+    """
+    day_of_month = storage.day_of_month
+    nth_weekday = storage.nth_weekday
+    if day_of_month is not None and nth_weekday is None:
+        return RuleType.MONTHLY_DAY
+    if nth_weekday is not None and day_of_month is None:
+        return RuleType.MONTHLY_WEEKDAY
+    raise RuleValidationError(
+        "storage rule_type 'monthly' is ambiguous: must name exactly one "
+        "of day_of_month or nth_weekday, got "
+        f"day_of_month={day_of_month!r}, nth_weekday={nth_weekday!r}"
+    )
+
+
+def _weekdays_from_csv(value: str | None) -> frozenset[int]:
+    """Parse a weekday CSV column into a frozenset of ints.
+
+    ``None`` and ``""`` both yield an empty frozenset (the caller decides
+    whether empty is legal); a non-integer token raises
+    RuleValidationError rather than leaking a raw ValueError.
+    """
+    if value is None or value == "":
+        return frozenset()
+    try:
+        entries = [int(token) for token in value.split(",")]
+    except ValueError:
+        raise RuleValidationError(
+            f"weekday_set must be a CSV of integers, got {value!r}"
+        ) from None
+    return frozenset(entries)
+
+
+def _single_weekday_from_csv(value: str | None) -> int:
+    """The one weekday a MONTHLY_WEEKDAY stores in weekday_set.
+
+    Parses the CSV into tokens FIRST and requires exactly one token,
+    so a duplicate pair like ``"1,1"`` is rejected rather than silently
+    canonicalized to a single weekday on re-storage.  An empty or
+    multi-element column raises RuleValidationError.
+    """
+    if value is None or value == "":
+        raise RuleValidationError(
+            "MONTHLY_WEEKDAY storage weekday_set must hold exactly one "
+            f"weekday, got {value!r}"
+        )
+    tokens = value.split(",")
+    if len(tokens) != 1:
+        raise RuleValidationError(
+            "MONTHLY_WEEKDAY storage weekday_set must hold exactly one "
+            f"weekday, got {value!r}"
+        )
+    try:
+        return int(tokens[0])
+    except ValueError:
+        raise RuleValidationError(
+            "MONTHLY_WEEKDAY storage weekday_set must be an integer, "
+            f"got {value!r}"
+        ) from None
+
+
+async def _insert_rule_row(
+    database: NestQuestDatabase, storage: ScheduleRuleStorage
+) -> int:
+    """Insert one ``schedule_rules`` row and return its new id.
+
+    Runs inside the caller's transaction (no lock or transaction of its
+    own) so a multi-table write can persist the rule together with the
+    rows that reference it.  The caller is responsible for validating
+    the storage fields — :meth:`ScheduleRulesDao.create` validates the
+    date shape, and :meth:`QuestDefinitionsDao.create_with_rule_and_windows`
+    receives storage already mapped from a validated
+    :class:`~.recurrence.ScheduleRule`.
+    """
+    result = await database.execute(
+        "INSERT INTO schedule_rules (rule_type, interval, weekday_set, "
+        "day_of_month, nth_weekday, month, start_date, end_date) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            storage.rule_type,
+            storage.interval,
+            storage.weekday_set,
+            storage.day_of_month,
+            storage.nth_weekday,
+            storage.month,
+            storage.start_date,
+            storage.end_date,
+        ),
+    )
+    return result.lastrowid
+
+
 class ScheduleRulesDao:
     """Typed async access to the ``schedule_rules`` table."""
 
@@ -218,22 +501,20 @@ class ScheduleRulesDao:
         _validate_date(start_date, "start_date")
         if end_date is not None:
             _validate_date(end_date, "end_date")
-        result = await self._database.execute(
-            "INSERT INTO schedule_rules (rule_type, interval, weekday_set, "
-            "day_of_month, nth_weekday, month, start_date, end_date) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                rule_type,
-                interval,
-                weekday_set,
-                day_of_month,
-                nth_weekday,
-                month,
-                start_date,
-                end_date,
+        rule_id = await _insert_rule_row(
+            self._database,
+            ScheduleRuleStorage(
+                rule_type=rule_type,
+                interval=interval,
+                weekday_set=weekday_set,
+                day_of_month=day_of_month,
+                nth_weekday=nth_weekday,
+                month=month,
+                start_date=start_date,
+                end_date=end_date,
             ),
         )
-        rule = await self.get(result.lastrowid)
+        rule = await self.get(rule_id)
         assert rule is not None
         return rule
 
@@ -393,6 +674,191 @@ class QuestDefinitionsDao:
         assert definition is not None
         return definition
 
+    async def create_with_rule_and_windows(
+        self,
+        title: str,
+        schedule_rule: ScheduleRuleStorage,
+        created_at: str,
+        assignee_child_ids: list[int],
+        windows: list[tuple[str, str | None]],
+        *,
+        description: str | None = None,
+        icon: str | None = None,
+    ) -> QuestDefinitionSnapshot:
+        """Insert a rule, definition, assignees and windows atomically.
+
+        The whole write — the schedule rule row, the definition row,
+        every assignee link and every window declaration — runs inside
+        ONE transaction under the connection lock, so a validation or
+        write failure rolls the lot back together (all-or-nothing): the
+        caller can never observe a definition with a missing rule,
+        assignee or window, and a rejected create leaves no partial
+        rows.
+
+        Returns a :class:`QuestDefinitionSnapshot` whose assignees and
+        windows are read back inside the same transaction, so the
+        returned view cannot be raced by a concurrent assignee/window
+        mutation after the write.
+
+        The rule arrives as pre-validated storage fields (mapped from a
+        :class:`~.recurrence.ScheduleRule` via
+        :func:`schedule_rule_to_storage`); its dates are re-validated
+        here so a hand-built storage can never persist a malformed date.
+        The definition-level ``due_time`` column is deliberately left
+        NULL — per-window due times supersede it (D-008).  Assignees are
+        validated as existing-and-active at insert time, and windows are
+        validated for name and strict HH:MM due time, matching
+        :meth:`upsert_window`.
+        """
+        _validate_date(schedule_rule.start_date, "start_date")
+        if schedule_rule.end_date is not None:
+            _validate_date(schedule_rule.end_date, "end_date")
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                for child_id in assignee_child_ids:
+                    await self._validate_assignable_child(child_id)
+                rule_id = await _insert_rule_row(self._database, schedule_rule)
+                result = await self._database.execute(
+                    "INSERT INTO quest_definitions (title, description, "
+                    "icon, schedule_rule_id, due_time, is_active, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (title, description, icon, rule_id, None, 1, created_at),
+                )
+                definition_id = result.lastrowid
+                for child_id in assignee_child_ids:
+                    await self._database.execute(
+                        "INSERT INTO quest_definition_assignees "
+                        "(definition_id, child_id) VALUES (?, ?)",
+                        (definition_id, child_id),
+                    )
+                for window, due_time in windows:
+                    _validate_window(window)
+                    if due_time is not None:
+                        _validate_time(due_time, "due_time")
+                    await self._database.execute(
+                        "INSERT INTO quest_definition_windows "
+                        "(definition_id, window, due_time) VALUES (?, ?, ?)",
+                        (definition_id, window, due_time),
+                    )
+                definition = await self.get(definition_id)
+                assignees = await self.list_assignees(definition_id)
+                window_records = await self.list_windows(definition_id)
+                rule_record = await ScheduleRulesDao(self._database).get(
+                    rule_id
+                )
+        assert definition is not None
+        assert rule_record is not None
+        return QuestDefinitionSnapshot(
+            definition=definition,
+            rule=rule_record,
+            assignees=assignees,
+            windows=window_records,
+        )
+
+    async def edit_definition(
+        self,
+        definition_id: int,
+        *,
+        title: str | None | object = _UNSET,
+        description: str | None | object = _UNSET,
+        icon: str | None | object = _UNSET,
+        rule: ScheduleRuleStorage | object = _UNSET,
+        windows: list[tuple[str, str | None]] | object = _UNSET,
+    ) -> QuestDefinitionSnapshot:
+        """Edit a definition's metadata, rule and windows atomically.
+
+        Mirrors :meth:`create_with_rule_and_windows`: everything runs
+        inside ONE transaction under the connection lock, and the
+        returned snapshot's rule, assignees and windows are read back
+        inside that transaction.  Arguments default to the module sentinel
+        ``_UNSET`` meaning "leave this field alone"; ``None`` writes SQL
+        NULL so optional metadata (description, icon) can be cleared.
+
+        - ``title``/``description``/``icon`` update the definition row
+          in place; the definition-level ``due_time`` column is never
+          written (per-window due times supersede it, D-008).
+        - ``rule`` (a pre-validated :class:`ScheduleRuleStorage`)
+          overwrites the referenced ``schedule_rules`` row in place: the
+          definition keeps its ``schedule_rule_id``, so no new or
+          orphaned rule row appears.
+        - ``windows`` REPLACES the whole window set: the current rows
+          are deleted and the given set re-inserted, so missing windows
+          are added, changed due times updated and removed windows
+          dropped.
+
+        Assignment is deliberately not settable here (multi-assignee is
+        managed by :meth:`add_assignee`/:meth:`remove_assignee`), and
+        activation is untouched.  Raises ValueError when the definition
+        does not exist.  Edits change future instances only: no
+        ``quest_instances`` or ``completion_events`` row is touched.
+        """
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                definition = await self.get(definition_id)
+                if definition is None:
+                    raise ValueError(
+                        f"quest definition {definition_id} does not exist"
+                    )
+                assignments: list[str] = []
+                parameters: list[object] = []
+                for column, value in (
+                    ("title", title),
+                    ("description", description),
+                    ("icon", icon),
+                ):
+                    if value is not _UNSET:
+                        assignments.append(f"{column} = ?")
+                        parameters.append(value)
+                if assignments:
+                    parameters.append(definition_id)
+                    await self._database.execute(
+                        f"UPDATE quest_definitions SET "
+                        f"{', '.join(assignments)} WHERE id = ?",
+                        tuple(parameters),
+                    )
+                if rule is not _UNSET:
+                    await ScheduleRulesDao(self._database).update(
+                        definition.schedule_rule_id,
+                        rule_type=rule.rule_type,
+                        interval=rule.interval,
+                        weekday_set=rule.weekday_set,
+                        day_of_month=rule.day_of_month,
+                        nth_weekday=rule.nth_weekday,
+                        month=rule.month,
+                        start_date=rule.start_date,
+                        end_date=rule.end_date,
+                    )
+                if windows is not _UNSET:
+                    await self._database.execute(
+                        "DELETE FROM quest_definition_windows "
+                        "WHERE definition_id = ?",
+                        (definition_id,),
+                    )
+                    for window, due_time in windows:
+                        _validate_window(window)
+                        if due_time is not None:
+                            _validate_time(due_time, "due_time")
+                        await self._database.execute(
+                            "INSERT INTO quest_definition_windows "
+                            "(definition_id, window, due_time) "
+                            "VALUES (?, ?, ?)",
+                            (definition_id, window, due_time),
+                        )
+                updated = await self.get(definition_id)
+                assignees = await self.list_assignees(definition_id)
+                window_records = await self.list_windows(definition_id)
+                rule_record = await ScheduleRulesDao(self._database).get(
+                    updated.schedule_rule_id
+                )
+        assert updated is not None
+        assert rule_record is not None
+        return QuestDefinitionSnapshot(
+            definition=updated,
+            rule=rule_record,
+            assignees=assignees,
+            windows=window_records,
+        )
+
     async def _validate_rule_exists(self, schedule_rule_id: int) -> None:
         """Raise ValueError unless the rule exists.
 
@@ -440,6 +906,66 @@ class QuestDefinitionsDao:
             "WHERE is_active = 1 ORDER BY id"
         )
         return [_definition_from_row(row) for row in rows]
+
+    async def _snapshots_for(
+        self, definitions: list[QuestDefinitionRecord]
+    ) -> list[QuestDefinitionSnapshot]:
+        """Read each definition's rule, assignees and windows.
+
+        MUST be called inside the connection lock (and ideally a
+        transaction) so the definitions handed in and the rows this
+        reads back cannot be raced by a concurrent edit between list
+        and bundle.  Each rule is read through
+        :class:`ScheduleRulesDao` on the same connection, so the
+        snapshot's rule record is the one the definition references AT
+        the moment of the locked read.
+        """
+        rules_dao = ScheduleRulesDao(self._database)
+        snapshots: list[QuestDefinitionSnapshot] = []
+        for definition in definitions:
+            rule_record = await rules_dao.get(definition.schedule_rule_id)
+            assert rule_record is not None
+            snapshots.append(
+                QuestDefinitionSnapshot(
+                    definition=definition,
+                    rule=rule_record,
+                    assignees=await self.list_assignees(definition.id),
+                    windows=await self.list_windows(definition.id),
+                )
+            )
+        return snapshots
+
+    async def list_snapshots_active(self) -> list[QuestDefinitionSnapshot]:
+        """Return every active definition with its rule, assignees and
+        windows, all read inside one locked transaction.
+
+        The definitive list and each definition's linked rows are read
+        in a single BEGIN..COMMIT span under the connection lock, so a
+        concurrent atomic edit cannot interleave between the definition
+        list and the bundle read: the caller receives a coherent
+        snapshot (each definition's rule, assignees and windows as they
+        were at one instant), never a mixed old-rule/new-windows state.
+        """
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                definitions = await self.list_active()
+                return await self._snapshots_for(definitions)
+
+    async def list_snapshots_by_child(
+        self, child_id: int
+    ) -> list[QuestDefinitionSnapshot]:
+        """Return each definition assigned to ``child_id`` with its rule,
+        assignees and windows, all read inside one locked transaction.
+
+        Mirrors :meth:`list_snapshots_active` but selects by assignment
+        (``list_by_child`` order: newest first).  Locks read-and-bundle
+        into one transaction so the bundle never mixes one edit's
+        definition with another's windows.
+        """
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                definitions = await self.list_by_child(child_id)
+                return await self._snapshots_for(definitions)
 
     async def update(
         self,
@@ -496,14 +1022,18 @@ class QuestDefinitionsDao:
 
     async def add_assignee(
         self, definition_id: int, child_id: int
-    ) -> None:
+    ) -> list[ChildRecord]:
         """Assign ``child_id`` to the definition (idempotent).
 
         Validates the assignee inside the same serialized transaction
         as the INSERT (existing and active AT ASSIGNMENT TIME), so a
         child deactivated concurrently cannot become an assignee.
         Assigning an already-assigned child is a no-op, mirroring the
-        composite primary key's storage-level guarantee.  Changes
+        composite primary key's storage-level guarantee.  Returns the
+        definition's assignees read back INSIDE the same transaction
+        that performed the write, so the returned roster is a
+        consistent post-assignment snapshot — a concurrent assign or
+        unassign cannot race it after the write commits.  Changes
         future instances only: already-generated instances and
         completion history are never rewritten here.
         """
@@ -524,6 +1054,7 @@ class QuestDefinitionsDao:
                     "ON CONFLICT (definition_id, child_id) DO NOTHING",
                     (definition_id, child_id),
                 )
+                return await self.list_assignees(definition_id)
 
     async def remove_assignee(
         self, definition_id: int, child_id: int
