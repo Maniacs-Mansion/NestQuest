@@ -400,6 +400,37 @@ def _single_weekday_from_csv(value: str | None) -> int:
         ) from None
 
 
+async def _insert_rule_row(
+    database: NestQuestDatabase, storage: ScheduleRuleStorage
+) -> int:
+    """Insert one ``schedule_rules`` row and return its new id.
+
+    Runs inside the caller's transaction (no lock or transaction of its
+    own) so a multi-table write can persist the rule together with the
+    rows that reference it.  The caller is responsible for validating
+    the storage fields — :meth:`ScheduleRulesDao.create` validates the
+    date shape, and :meth:`QuestDefinitionsDao.create_with_rule_and_windows`
+    receives storage already mapped from a validated
+    :class:`~.recurrence.ScheduleRule`.
+    """
+    result = await database.execute(
+        "INSERT INTO schedule_rules (rule_type, interval, weekday_set, "
+        "day_of_month, nth_weekday, month, start_date, end_date) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            storage.rule_type,
+            storage.interval,
+            storage.weekday_set,
+            storage.day_of_month,
+            storage.nth_weekday,
+            storage.month,
+            storage.start_date,
+            storage.end_date,
+        ),
+    )
+    return result.lastrowid
+
+
 class ScheduleRulesDao:
     """Typed async access to the ``schedule_rules`` table."""
 
@@ -430,22 +461,20 @@ class ScheduleRulesDao:
         _validate_date(start_date, "start_date")
         if end_date is not None:
             _validate_date(end_date, "end_date")
-        result = await self._database.execute(
-            "INSERT INTO schedule_rules (rule_type, interval, weekday_set, "
-            "day_of_month, nth_weekday, month, start_date, end_date) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                rule_type,
-                interval,
-                weekday_set,
-                day_of_month,
-                nth_weekday,
-                month,
-                start_date,
-                end_date,
+        rule_id = await _insert_rule_row(
+            self._database,
+            ScheduleRuleStorage(
+                rule_type=rule_type,
+                interval=interval,
+                weekday_set=weekday_set,
+                day_of_month=day_of_month,
+                nth_weekday=nth_weekday,
+                month=month,
+                start_date=start_date,
+                end_date=end_date,
             ),
         )
-        rule = await self.get(result.lastrowid)
+        rule = await self.get(rule_id)
         assert rule is not None
         return rule
 
@@ -600,6 +629,71 @@ class QuestDefinitionsDao:
                         "INSERT INTO quest_definition_assignees "
                         "(definition_id, child_id) VALUES (?, ?)",
                         (definition_id, child_id),
+                    )
+                definition = await self.get(definition_id)
+        assert definition is not None
+        return definition
+
+    async def create_with_rule_and_windows(
+        self,
+        title: str,
+        schedule_rule: ScheduleRuleStorage,
+        created_at: str,
+        assignee_child_ids: list[int],
+        windows: list[tuple[str, str | None]],
+        *,
+        description: str | None = None,
+        icon: str | None = None,
+    ) -> QuestDefinitionRecord:
+        """Insert a rule, definition, assignees and windows atomically.
+
+        The whole write — the schedule rule row, the definition row,
+        every assignee link and every window declaration — runs inside
+        ONE transaction under the connection lock, so a validation or
+        write failure rolls the lot back together (all-or-nothing): the
+        caller can never observe a definition with a missing rule,
+        assignee or window, and a rejected create leaves no partial
+        rows.
+
+        The rule arrives as pre-validated storage fields (mapped from a
+        :class:`~.recurrence.ScheduleRule` via
+        :func:`schedule_rule_to_storage`); its dates are re-validated
+        here so a hand-built storage can never persist a malformed date.
+        The definition-level ``due_time`` column is deliberately left
+        NULL — per-window due times supersede it (D-008).  Assignees are
+        validated as existing-and-active at insert time, and windows are
+        validated for name and strict HH:MM due time, matching
+        :meth:`upsert_window`.
+        """
+        _validate_date(schedule_rule.start_date, "start_date")
+        if schedule_rule.end_date is not None:
+            _validate_date(schedule_rule.end_date, "end_date")
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                for child_id in assignee_child_ids:
+                    await self._validate_assignable_child(child_id)
+                rule_id = await _insert_rule_row(self._database, schedule_rule)
+                result = await self._database.execute(
+                    "INSERT INTO quest_definitions (title, description, "
+                    "icon, schedule_rule_id, due_time, is_active, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (title, description, icon, rule_id, None, 1, created_at),
+                )
+                definition_id = result.lastrowid
+                for child_id in assignee_child_ids:
+                    await self._database.execute(
+                        "INSERT INTO quest_definition_assignees "
+                        "(definition_id, child_id) VALUES (?, ?)",
+                        (definition_id, child_id),
+                    )
+                for window, due_time in windows:
+                    _validate_window(window)
+                    if due_time is not None:
+                        _validate_time(due_time, "due_time")
+                    await self._database.execute(
+                        "INSERT INTO quest_definition_windows "
+                        "(definition_id, window, due_time) VALUES (?, ?, ?)",
+                        (definition_id, window, due_time),
                     )
                 definition = await self.get(definition_id)
         assert definition is not None
