@@ -907,6 +907,66 @@ class QuestDefinitionsDao:
         )
         return [_definition_from_row(row) for row in rows]
 
+    async def _snapshots_for(
+        self, definitions: list[QuestDefinitionRecord]
+    ) -> list[QuestDefinitionSnapshot]:
+        """Read each definition's rule, assignees and windows.
+
+        MUST be called inside the connection lock (and ideally a
+        transaction) so the definitions handed in and the rows this
+        reads back cannot be raced by a concurrent edit between list
+        and bundle.  Each rule is read through
+        :class:`ScheduleRulesDao` on the same connection, so the
+        snapshot's rule record is the one the definition references AT
+        the moment of the locked read.
+        """
+        rules_dao = ScheduleRulesDao(self._database)
+        snapshots: list[QuestDefinitionSnapshot] = []
+        for definition in definitions:
+            rule_record = await rules_dao.get(definition.schedule_rule_id)
+            assert rule_record is not None
+            snapshots.append(
+                QuestDefinitionSnapshot(
+                    definition=definition,
+                    rule=rule_record,
+                    assignees=await self.list_assignees(definition.id),
+                    windows=await self.list_windows(definition.id),
+                )
+            )
+        return snapshots
+
+    async def list_snapshots_active(self) -> list[QuestDefinitionSnapshot]:
+        """Return every active definition with its rule, assignees and
+        windows, all read inside one locked transaction.
+
+        The definitive list and each definition's linked rows are read
+        in a single BEGIN..COMMIT span under the connection lock, so a
+        concurrent atomic edit cannot interleave between the definition
+        list and the bundle read: the caller receives a coherent
+        snapshot (each definition's rule, assignees and windows as they
+        were at one instant), never a mixed old-rule/new-windows state.
+        """
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                definitions = await self.list_active()
+                return await self._snapshots_for(definitions)
+
+    async def list_snapshots_by_child(
+        self, child_id: int
+    ) -> list[QuestDefinitionSnapshot]:
+        """Return each definition assigned to ``child_id`` with its rule,
+        assignees and windows, all read inside one locked transaction.
+
+        Mirrors :meth:`list_snapshots_active` but selects by assignment
+        (``list_by_child`` order: newest first).  Locks read-and-bundle
+        into one transaction so the bundle never mixes one edit's
+        definition with another's windows.
+        """
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                definitions = await self.list_by_child(child_id)
+                return await self._snapshots_for(definitions)
+
     async def update(
         self,
         definition_id: int,
