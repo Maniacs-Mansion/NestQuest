@@ -11,6 +11,7 @@ from custom_components.nestquest import DOMAIN, async_setup_entry, async_unload_
 from custom_components.nestquest.const import (
     CONF_DAY_ROLLOVER_TIME,
     DEFAULT_HORIZON_DAYS,
+    SERVICE_REGENERATE,
     DOMAIN as DOMAIN_CONST,
 )
 
@@ -345,7 +346,9 @@ async def test_day_rollover_listener_materializes_ha_local_horizon(
 
     await hass.time_change.fire()
 
-    fake.assert_awaited_once_with(database, expected_start, expected_end)
+    fake.assert_awaited_once_with(
+        database, expected_start, expected_end, today=today
+    )
 
 
 def test_day_rollover_time_change_tracker_rejects_local_kwarg() -> None:
@@ -382,3 +385,172 @@ async def test_setup_applies_all_v1_tables(hass, make_entry) -> None:
         "schedule_rules",
     ]
     await async_unload_entry(hass, entry)
+
+
+async def _seed_daily_child_and_definition(database, today) -> int:
+    """Create one always-present child + a daily definition starting today.
+
+    Returns the child's id.  No presence schedule means the child is present
+    every day, so the daily rule yields exactly one instance per horizon day.
+    """
+    from custom_components.nestquest.dao_children import ChildrenDao
+    from custom_components.nestquest.quest_definitions import (
+        create_quest_definition,
+    )
+    from custom_components.nestquest.recurrence import RuleType, ScheduleRule
+
+    NOW = "2026-09-14T12:00:00+00:00"
+    child = await ChildrenDao(database).create("Ada", NOW)
+    await create_quest_definition(
+        database,
+        "Daily chore",
+        ScheduleRule(rule_type=RuleType.DAILY, start_date=today.isoformat()),
+        [child.id],
+        ["morning"],
+    )
+    return child.id
+
+
+def _local_today(hass) -> "datetime.date":
+    import datetime
+    from zoneinfo import ZoneInfo
+
+    return datetime.datetime.now(ZoneInfo(hass.config.time_zone)).date()
+
+
+async def test_setup_backfills_instances_over_horizon(hass, make_entry) -> None:
+    """Setup materializes once so a restart backfills any missed days."""
+    import datetime
+
+    from custom_components.nestquest.dao_instances import QuestInstancesDao
+    from custom_components.nestquest.db import NestQuestDatabase
+    from custom_components.nestquest.migrations import apply_migrations
+    from custom_components.nestquest.store import async_get_db_path
+
+    # Seed the database BEFORE setup: a restart reopens an existing file that
+    # already holds definitions.  The startup backfill must pick them up.
+    db_path = await async_get_db_path(hass)
+    pre = NestQuestDatabase(hass)
+    await pre.open(db_path)
+    await apply_migrations(pre)
+    child_id = await _seed_daily_child_and_definition(pre, _local_today(hass))
+    await pre.close()
+
+    entry = _wire(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+
+    today = _local_today(hass)
+    end = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+    records = await QuestInstancesDao(entry.runtime_data.database).list_by_date_range(
+        child_id, today.isoformat(), end
+    )
+    assert len(records) == DEFAULT_HORIZON_DAYS + 1
+
+
+async def test_regenerate_service_registered_and_materializes(
+    hass, make_entry
+) -> None:
+    """``nestquest.regenerate`` is registered and calling it regenerates."""
+    import datetime
+
+    from custom_components.nestquest.dao_instances import QuestInstancesDao
+
+    entry = _wire(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    assert hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
+
+    # A definition created AFTER setup has no instances yet (create does not
+    # materialize); the service must generate them on demand.
+    database = entry.runtime_data.database
+    child_id = await _seed_daily_child_and_definition(database, _local_today(hass))
+
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+
+    today = _local_today(hass)
+    end = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+    records = await QuestInstancesDao(database).list_by_date_range(
+        child_id, today.isoformat(), end
+    )
+    assert len(records) == DEFAULT_HORIZON_DAYS + 1
+
+
+async def test_unload_deregisters_regenerate_service(hass, make_entry) -> None:
+    """Unload removes the ``regenerate`` service so no stale entry leaks."""
+    entry = _wire(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    assert hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
+
+    assert await async_unload_entry(hass, entry) is True
+    assert not hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
+
+
+async def test_regenerate_service_is_domain_scoped_across_entries(
+    hass, make_entry
+) -> None:
+    """The ``regenerate`` service is domain-global, not per-entry.
+
+    With two loaded entries the service must be registered and functional;
+    unloading one entry must keep it registered and functional for the
+    remaining entry; unloading the final entry must remove it.
+    """
+    import datetime
+
+    from custom_components.nestquest.dao_instances import QuestInstancesDao
+
+    entry_a = _wire(make_entry(entry_id="entry_a"), hass.registry)
+    entry_b = _wire(make_entry(entry_id="entry_b"), hass.registry)
+
+    assert await async_setup_entry(hass, entry_a) is True
+    assert await async_setup_entry(hass, entry_b) is True
+    assert hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
+
+    # The domain-global handler resolves a live database from any entry.
+    database_b = entry_b.runtime_data.database
+    child_id = await _seed_daily_child_and_definition(
+        database_b, _local_today(hass)
+    )
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+    today = _local_today(hass)
+    end = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+    records = await QuestInstancesDao(database_b).list_by_date_range(
+        child_id, today.isoformat(), end
+    )
+    assert len(records) == DEFAULT_HORIZON_DAYS + 1
+
+    # Unloading one entry must not tear down the shared service.
+    assert await async_unload_entry(hass, entry_a) is True
+    assert hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
+
+    # It still works for the remaining entry.
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+
+    # Unloading the final entry removes the domain-global service.
+    assert await async_unload_entry(hass, entry_b) is True
+    assert not hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
+
+
+async def test_setup_cleans_listeners_when_materialization_raises(
+    hass, make_entry, monkeypatch
+) -> None:
+    """A startup-materialization failure rolls back every registered listener.
+
+    The daily and update listeners are installed before the startup
+    materialization runs; when that walk raises, the database is closed but
+    the remover callables must also be invoked so no listener survives
+    firing against a closed database.
+    """
+    import custom_components.nestquest as nestquest
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("materialization failed")
+
+    monkeypatch.setattr(nestquest, "_materialize_run", _boom)
+
+    entry = _wire(make_entry(), hass.registry)
+    with pytest.raises(RuntimeError, match="materialization failed"):
+        await async_setup_entry(hass, entry)
+
+    assert hass.time_change.size == 0
+    assert hass.registry.size == 0
+    assert not hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
+    assert not hasattr(entry, "runtime_data")

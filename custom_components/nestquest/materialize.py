@@ -64,7 +64,7 @@ from __future__ import annotations
 import datetime
 
 from .const import DEFAULT_HORIZON_DAYS
-from .dao_instances import QuestInstancesDao, _today
+from .dao_instances import QuestInstancesDao, _resolve_today
 from .dao_rules import (
     _validate_date,
     load_materialization_input,
@@ -127,6 +127,7 @@ async def materialize(
     end_date: str,
     *,
     child_ids: list[int] | None = None,
+    today: datetime.date | None = None,
 ) -> int:
     """Generate quest instances for the closed range [start_date, end_date].
 
@@ -141,6 +142,14 @@ async def materialize(
     wants one child's instances rebuilt (e.g. :func:`regenerate_for_child`
     after a presence change) cannot touch any unrelated child's rows.
     When omitted (or None) the walk covers every assignee as before.
+
+    ``today`` optionally pins the resolved HA-local date the walk's
+    no-past guard compares against; it is threaded into every
+    :meth:`~.dao_instances.QuestInstancesDao.upsert_if_valid` write.  When
+    omitted the host clock (``datetime.date.today``) is used, which is the
+    historical default.  A caller that computed the horizon in Home
+    Assistant's configured time zone MUST pass that same date here so a
+    time zone behind the host around midnight is not rejected as "past".
 
     All inputs are read in ONE locked transaction; each tuple's write then
     goes through the atomic :meth:`~.dao_instances.QuestInstancesDao.upsert_if_valid`,
@@ -195,6 +204,7 @@ async def materialize(
                         generated_at,
                         window=window.window,
                         due_time=window.due_time,
+                        today=today,
                     )
                     if written is not None:
                         count += 1
@@ -205,6 +215,8 @@ async def materialize(
 async def regenerate_for_definition(
     database: NestQuestDatabase,
     definition_id: int,
+    *,
+    today: datetime.date | None = None,
 ) -> int:
     """Regenerate a definition's future instances after a config change.
 
@@ -221,17 +233,24 @@ async def regenerate_for_definition(
     :func:`~.dao_instances._today` — so the delete cutoff and the
     re-materialization range share one anchor, and the walk's
     ``upsert_if_valid`` no-past guard never rejects the regenerated
-    range.  Returns the number of instances the re-materialization
+    range.  ``today`` optionally pins a caller-resolved HA-local date
+    (threaded into both the delete cutoff and the re-materialization)
+    so a household time zone behind the host around midnight stays
+    consistent.  Returns the number of instances the re-materialization
     upserted across the whole snapshot (idempotent — other active
     definitions' tuples refresh in place, never duplicate).
     """
-    today = _today()
-    start_date = today.isoformat()
-    end_date = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+    today_date = _resolve_today(today)
+    start_date = today_date.isoformat()
+    end_date = (
+        today_date + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+    ).isoformat()
 
     instances = QuestInstancesDao(database)
-    await instances.delete_future_uncompleted(definition_id, start_date)
-    return await materialize(database, start_date, end_date)
+    await instances.delete_future_uncompleted(
+        definition_id, start_date, today=today
+    )
+    return await materialize(database, start_date, end_date, today=today)
 
 
 # HOOK (Feature 09 presence services): ``regenerate_for_child`` is the
@@ -250,6 +269,8 @@ async def regenerate_for_definition(
 async def regenerate_for_child(
     database: NestQuestDatabase,
     child_id: int,
+    *,
+    today: datetime.date | None = None,
 ) -> int:
     """Regenerate a child's future instances after a presence change.
 
@@ -277,13 +298,16 @@ async def regenerate_for_child(
     :meth:`~.dao_instances.QuestInstancesDao.delete_future_uncompleted_for_child`),
     so the delete cutoff and the re-materialization window share ONE
     execution-day anchor even when the call is queued across midnight.
-    Returns the number of instances the re-materialization upserted for
-    the child across the whole snapshot.
+    ``today`` optionally pins a caller-resolved HA-local date, threaded
+    into the delete cutoff and the re-materialization for the same
+    host-vs-HA time-zone consistency.  Returns the number of instances
+    the re-materialization upserted for the child across the whole
+    snapshot.
     """
     if isinstance(child_id, bool) or not isinstance(child_id, int):
         raise ValueError(f"child_id must be an integer, got {child_id!r}")
 
-    today = _today()
+    today_date = _resolve_today(today)
 
     instances = QuestInstancesDao(database)
     # Use the delete's returned effective cutoff as the materialize anchor,
@@ -293,10 +317,10 @@ async def regenerate_for_child(
     # walk's no-past guard and leave the child's future instances deleted
     # but not rebuilt.  One anchor for both keeps them consistent.
     _, effective_cutoff = await instances.delete_future_uncompleted_for_child(
-        child_id, today.isoformat()
+        child_id, today_date.isoformat(), today=today
     )
     start = datetime.date.fromisoformat(effective_cutoff)
     end_date = (start + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
     return await materialize(
-        database, start.isoformat(), end_date, child_ids=[child_id]
+        database, start.isoformat(), end_date, child_ids=[child_id], today=today
     )
