@@ -37,6 +37,23 @@ window), so re-running the materialization over the same range never
 duplicates a row; a tuple whose instance is already completed is SKIPPED
 (never rewritten, never raised) by
 :meth:`~.dao_instances.QuestInstancesDao.upsert_if_valid`.
+
+Regeneration: a config or presence change must rebuild future instances
+so they track the new state.  :func:`regenerate_for_definition` covers
+definition edits / reassignment (Features 06/07); :func:`regenerate_for_child`
+covers a single child's presence change (Feature 09).  Both delete the
+affected open instances at or after today — never a completed instance,
+never the past — and re-run the walk over the rolling horizon
+``[today, today + DEFAULT_HORIZON_DAYS]``.
+
+HOOK (Feature 09 presence services): the presence business layer that
+lands in Feature 09 (``set_presence_pattern`` / ``create_presence_override``
+/ ``delete_presence_override``) MUST call :func:`regenerate_for_child`
+after each successful presence write so a child's future instances track
+its presence.  This hook is documented, not yet wired: no presence
+business layer exists yet, and the presence DAO (``dao_presence.py``)
+must stay free of business rules — never call :func:`regenerate_for_child`
+from inside the DAO layer.
 """
 from __future__ import annotations
 
@@ -199,4 +216,46 @@ async def regenerate_for_definition(
 
     instances = QuestInstancesDao(database)
     await instances.delete_future_uncompleted(definition_id, start_date)
+    return await materialize(database, start_date, end_date)
+
+
+# HOOK (Feature 09 presence services): ``regenerate_for_child`` is the
+# child-presence counterpart to ``regenerate_for_definition``.  The
+# presence business layer that lands in Feature 09
+# (set_presence_pattern / create_presence_override /
+# delete_presence_override) MUST call ``regenerate_for_child`` after each
+# successful write, so future instances track a child's changed presence.
+# It is deliberately NOT wired into ``dao_presence.py``: the DAO layer
+# stays pure storage (no business rules), and no presence business layer
+# exists yet to host the call — see the module docstring note below.
+async def regenerate_for_child(
+    database: NestQuestDatabase,
+    child_id: int,
+) -> int:
+    """Regenerate a child's future instances after a presence change.
+
+    The Feature 09 presence services (set_presence_pattern /
+    create_presence_override / delete_presence_override) call this after
+    every presence write so a child's future instances track its new
+    presence: the child's open instances at or after today are deleted
+    across ALL its definitions (never a completed instance, never the
+    past) via
+    :meth:`~.dao_instances.QuestInstancesDao.delete_future_uncompleted_for_child`,
+    then the materialization walk re-runs over the rolling horizon
+    ``[today, today + DEFAULT_HORIZON_DAYS]`` so the child's
+    now-absent/present dates re-materialize against today's presence.
+
+    "today" is computed the same way the walk computes it —
+    ``datetime.date.today()`` — so the delete cutoff and the
+    re-materialization range share one anchor.  Returns the number of
+    instances the re-materialization upserted across the whole snapshot
+    (idempotent — other children's and unaffected definitions' tuples
+    refresh in place, never duplicate).
+    """
+    today = datetime.date.today()
+    start_date = today.isoformat()
+    end_date = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+
+    instances = QuestInstancesDao(database)
+    await instances.delete_future_uncompleted_for_child(child_id, start_date)
     return await materialize(database, start_date, end_date)

@@ -487,6 +487,40 @@ class QuestInstancesDao:
                 )
         return result.rowcount
 
+    async def delete_future_uncompleted_for_child(
+        self, child_id: int, cutoff_date: str
+    ) -> int:
+        """Delete the child's open instances at/after cutoff, across every
+        definition.
+
+        Child-scoped counterpart to :meth:`delete_future_uncompleted`,
+        used when a child's presence changes (Feature 09): only instances
+        at or after the cutoff with NO completion event are removed, inside
+        one transaction — an instance that gains a completion event
+        mid-flight cannot be deleted.  The cutoff cannot be backdated below
+        today, for the same reason as the definition-scoped method (see its
+        docstring).  Any instance with a completion event is never touched,
+        regardless of its date.  Returns the number deleted.
+        """
+        _validate_date(cutoff_date, "cutoff_date")
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                # "today" is read under the lock, matching the
+                # definition-scoped method: the DELETE executes on this
+                # date, so a caller queued across midnight cannot delete
+                # instances that became past while it waited.
+                today = datetime.date.today().isoformat()
+                effective_cutoff = max(cutoff_date, today)
+                result = await self._database.execute(
+                    "DELETE FROM quest_instances WHERE child_id = ? "
+                    "AND due_date >= ? AND NOT EXISTS ("
+                    "  SELECT 1 FROM completion_events "
+                    "  WHERE instance_id = quest_instances.id"
+                    ")",
+                    (child_id, effective_cutoff),
+                )
+        return result.rowcount
+
 
 class CompletionEventsDao:
     """Typed append-only access to the ``completion_events`` table.
