@@ -151,6 +151,14 @@ async def materialize(
     Assistant's configured time zone MUST pass that same date here so a
     time zone behind the host around midnight is not rejected as "past".
 
+    ``start_date`` is clamped up to the resolved "today" (the same
+    ``today`` anchor threaded into the no-past guard), so a caller that
+    passes a ``start_date`` already in the past never yields a
+    past-dated instance: the walk simply begins on today and skips every
+    earlier date.  A range entirely in the past therefore produces zero
+    instances rather than an error, and the DAO's no-past guard remains
+    the authoritative backstop under the lock.
+
     All inputs are read in ONE locked transaction; each tuple's write then
     goes through the atomic :meth:`~.dao_instances.QuestInstancesDao.upsert_if_valid`,
     which re-validates the tuple and its current ``due_time`` in the same
@@ -183,6 +191,13 @@ async def materialize(
 
     start = datetime.datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    # Clamp a past start up to today (the HA-local anchor when the caller
+    # pinned one, else the host clock) so the walk can never emit a
+    # past-dated instance; the DAO's no-past guard remains the backstop.
+    # A range entirely in the past therefore yields zero instances.
+    today_date = _resolve_today(today)
+    start = max(start, today_date)
 
     count = 0
     cursor = start

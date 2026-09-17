@@ -631,13 +631,14 @@ def test_materialize_rejects_malformed_or_inverted_bounds(tmp_path) -> None:
 
 
 def test_materialize_accepts_ha_local_today_behind_host(tmp_path) -> None:
-    """The no-past guard compares against a caller-supplied HA-local today.
+    """The clamp and no-past guard compare against a caller-supplied HA-local today.
 
     A household time zone behind the host clock around midnight resolves a
     HA-local "today" one calendar day earlier than the host's
-    ``date.today()``.  The host-clock guard would reject that date as past,
-    so the resolved HA-local date must be threaded through ``materialize``
-    and accepted instead of raising.
+    ``date.today()``.  The walk clamps its start to that anchor: without
+    a pinned HA-local date the effective start is the host's today (one
+    day after ha_today), so the now-past day is skipped rather than
+    rejected, and only the host-today-onward days materialize.
     """
     async def _body(database):
         children = ChildrenDao(database)
@@ -653,17 +654,62 @@ def test_materialize_accepts_ha_local_today_behind_host(tmp_path) -> None:
             ["morning"],
         )
 
-        # Without the pinned HA-local today, the host-clock guard rejects
-        # the horizon start (ha_today is "yesterday" on the host).
-        with pytest.raises(ValueError, match="never generated in the past"):
-            await materialize(database, start_iso, end_iso)
+        # Without a pinned HA-local today, the walk clamps its start to the
+        # host's today (one day after ha_today); the past day is dropped and
+        # the 14 host-today-onward days materialize.
+        without_pin = await materialize(database, start_iso, end_iso)
+        assert without_pin == 14
 
-        # With today=ha_today, the same range is accepted and materialized.
+        # With today=ha_today, the full 15-day horizon materializes.
         count = await materialize(database, start_iso, end_iso, today=ha_today)
         assert count == 15
         return count
 
     _with_db(tmp_path, "materialize-ha-local-today.db")(_body)
+
+
+def test_materialize_clamps_past_start_to_today(tmp_path) -> None:
+    """A past start_date is clamped to today: no past-dated instance is created.
+
+    A caller passing a start one month in the past never yields a
+    past-dated instance: the walk clamps its effective start up to today
+    and materializes only dates on/after today, leaving the past untouched
+    rather than raising or corrupting state.
+    """
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+
+        today = datetime.date.today()
+        start_iso = (today - datetime.timedelta(days=30)).isoformat()
+        end_iso = (today + datetime.timedelta(days=14)).isoformat()
+
+        await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            ["morning"],
+        )
+
+        count = await materialize(database, start_iso, end_iso, today=today)
+        assert count == 15
+
+        dao = QuestInstancesDao(database)
+        records = await dao.list_by_date_range(child.id, start_iso, end_iso)
+        assert len(records) == 15
+        assert all(r.due_date >= today.isoformat() for r in records)
+
+        # The past month is empty: no past-dated instance was ever created.
+        past_records = await dao.list_by_date_range(
+            child.id,
+            start_iso,
+            (today - datetime.timedelta(days=1)).isoformat(),
+        )
+        assert past_records == []
+        return count
+
+    _with_db(tmp_path, "materialize-past-start.db")(_body)
 
 
 def test_materialize_skips_inactive_definitions(tmp_path) -> None:
