@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import datetime
 
+from .const import DEFAULT_HORIZON_DAYS
 from .dao_instances import QuestInstancesDao
 from .dao_rules import (
     _validate_date,
@@ -167,3 +168,35 @@ async def materialize(
                         count += 1
         cursor += datetime.timedelta(days=1)
     return count
+
+
+async def regenerate_for_definition(
+    database: NestQuestDatabase,
+    definition_id: int,
+) -> int:
+    """Regenerate a definition's future instances after a config change.
+
+    The Feature 06 edit/assignment/activation paths call this after a
+    successful write so future instances track the new state: the
+    definition's open instances at or after today are deleted (never a
+    completed instance, never the past) via
+    :meth:`~.dao_instances.QuestInstancesDao.delete_future_uncompleted`,
+    then the materialization walk re-runs over the rolling horizon
+    ``[today, today + DEFAULT_HORIZON_DAYS]`` so the (changed) rule,
+    assignee set and windows re-materialize against today's state.
+
+    "today" is computed the same way the walk computes it —
+    ``datetime.date.today()`` — so the delete cutoff and the
+    re-materialization range share one anchor, and the walk's
+    ``upsert_if_valid`` no-past guard never rejects the regenerated
+    range.  Returns the number of instances the re-materialization
+    upserted across the whole snapshot (idempotent — other active
+    definitions' tuples refresh in place, never duplicate).
+    """
+    today = datetime.date.today()
+    start_date = today.isoformat()
+    end_date = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+
+    instances = QuestInstancesDao(database)
+    await instances.delete_future_uncompleted(definition_id, start_date)
+    return await materialize(database, start_date, end_date)
