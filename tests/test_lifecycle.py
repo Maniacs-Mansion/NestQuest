@@ -484,6 +484,51 @@ async def test_unload_deregisters_regenerate_service(hass, make_entry) -> None:
     assert not hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
 
 
+async def test_regenerate_service_is_domain_scoped_across_entries(
+    hass, make_entry
+) -> None:
+    """The ``regenerate`` service is domain-global, not per-entry.
+
+    With two loaded entries the service must be registered and functional;
+    unloading one entry must keep it registered and functional for the
+    remaining entry; unloading the final entry must remove it.
+    """
+    import datetime
+
+    from custom_components.nestquest.dao_instances import QuestInstancesDao
+
+    entry_a = _wire(make_entry(entry_id="entry_a"), hass.registry)
+    entry_b = _wire(make_entry(entry_id="entry_b"), hass.registry)
+
+    assert await async_setup_entry(hass, entry_a) is True
+    assert await async_setup_entry(hass, entry_b) is True
+    assert hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
+
+    # The domain-global handler resolves a live database from any entry.
+    database_b = entry_b.runtime_data.database
+    child_id = await _seed_daily_child_and_definition(
+        database_b, _local_today(hass)
+    )
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+    today = _local_today(hass)
+    end = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+    records = await QuestInstancesDao(database_b).list_by_date_range(
+        child_id, today.isoformat(), end
+    )
+    assert len(records) == DEFAULT_HORIZON_DAYS + 1
+
+    # Unloading one entry must not tear down the shared service.
+    assert await async_unload_entry(hass, entry_a) is True
+    assert hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
+
+    # It still works for the remaining entry.
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+
+    # Unloading the final entry removes the domain-global service.
+    assert await async_unload_entry(hass, entry_b) is True
+    assert not hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
+
+
 async def test_setup_cleans_listeners_when_materialization_raises(
     hass, make_entry, monkeypatch
 ) -> None:

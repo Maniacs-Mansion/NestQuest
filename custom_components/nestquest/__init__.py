@@ -237,7 +237,6 @@ class NestQuestRuntimeData:
     database: NestQuestDatabase
     remove_update_listener: Callable[[], Any]
     remove_time_change_listener: Callable[[], Any]
-    remove_service_listener: Callable[[], Any]
 
 
 async def _async_owner_user_ids(hass: HomeAssistant) -> list[str]:
@@ -318,31 +317,54 @@ def _register_day_rollover_listener(
     )
 
 
-def _register_regenerate_service(
-    hass: HomeAssistant,
-    database: NestQuestDatabase,
-) -> Callable[[], Any]:
-    """Register ``nestquest.regenerate`` and return its unregister callable.
+def _find_live_database(hass: HomeAssistant) -> NestQuestDatabase | None:
+    """Return a connected database from the active runtime data, or None.
+
+    The domain-global services (e.g. ``regenerate``) have no database of
+    their own; they resolve whichever config entry's database is currently
+    live at call time, so none of them can hold a stale handle to a closed
+    connection after another entry unloads.
+    """
+    for runtime_data in hass.data.get(DOMAIN, {}).values():
+        database = getattr(runtime_data, "database", None)
+        if database is not None and database.connected:
+            return database
+    return None
+
+
+def _register_regenerate_service(hass: HomeAssistant) -> None:
+    """Register ``nestquest.regenerate`` once at domain scope.
 
     The service triggers a full on-demand regeneration over the rolling
     horizon, running the SAME idempotent materialize path
     (:func:`_run_horizon_materialization`) as the startup backfill and the
-    daily rollover listener.  Registration is guarded by ``has_service`` so a
-    reload can never leave a duplicate; the returned remover deregisters the
-    service (idempotently) so unload leaves no stale entry behind.
+    daily rollover listener.  It is DOMAIN-global — registered exactly once
+    (guarded by ``has_service``) and NOT bound to any config entry — so the
+    handler resolves the currently-live database at call time and a name
+    collision or duplicate setup is impossible.  Removal is handled by the
+    unload path only once the LAST entry is removed (see
+    :func:`_deregister_regenerate_service`).
     """
-    if not hass.services.has_service(DOMAIN, SERVICE_REGENERATE):
+    if hass.services.has_service(DOMAIN, SERVICE_REGENERATE):
+        return
 
-        async def _regenerate(_call: Any) -> None:
-            await _run_horizon_materialization(hass, database)
+    async def _regenerate(_call: Any) -> None:
+        database = _find_live_database(hass)
+        if database is None:
+            _LOGGER.warning(
+                "NestQuest regenerate requested but no config entry has a "
+                "live database; ignoring"
+            )
+            return
+        await _run_horizon_materialization(hass, database)
 
-        hass.services.async_register(DOMAIN, SERVICE_REGENERATE, _regenerate)
+    hass.services.async_register(DOMAIN, SERVICE_REGENERATE, _regenerate)
 
-    def _unregister() -> None:
-        if hass.services.has_service(DOMAIN, SERVICE_REGENERATE):
-            hass.services.async_remove(DOMAIN, SERVICE_REGENERATE)
 
-    return _unregister
+def _deregister_regenerate_service(hass: HomeAssistant) -> None:
+    """Remove ``nestquest.regenerate`` when the last entry unloads."""
+    if hass.services.has_service(DOMAIN, SERVICE_REGENERATE):
+        hass.services.async_remove(DOMAIN, SERVICE_REGENERATE)
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
@@ -404,7 +426,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     database = await _async_open_database(hass, await async_get_db_path(hass))
     remove_update_listener: Callable[[], Any] | None = None
     remove_time_change_listener: Callable[[], Any] | None = None
-    remove_service_listener: Callable[[], Any] | None = None
     try:
         # Seed the admin allowlist on first setup so the owner is never
         # locked out: an empty database takes the persisted admin copy
@@ -438,7 +459,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # [today, today + DEFAULT_HORIZON_DAYS] once at setup.  This runs
         # through the SAME path as the daily listener and regenerate service.
         await _run_horizon_materialization(hass, database)
-        remove_service_listener = _register_regenerate_service(hass, database)
+        _register_regenerate_service(hass)
     except BaseException:
         # A failure anywhere after the database is open must not leak the
         # listeners already registered against that (now-closed) database:
@@ -446,7 +467,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # original error as the one raised.  Removal is best-effort — a
         # failing remover must not mask the setup error that triggered it.
         for remove_listener in (
-            remove_service_listener,
             remove_time_change_listener,
             remove_update_listener,
         ):
@@ -462,14 +482,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise
     assert remove_update_listener is not None
     assert remove_time_change_listener is not None
-    assert remove_service_listener is not None
     runtime_data = NestQuestRuntimeData(
         entry_id=entry.entry_id,
         options=dict(entry.options),
         database=database,
         remove_update_listener=remove_update_listener,
         remove_time_change_listener=remove_time_change_listener,
-        remove_service_listener=remove_service_listener,
     )
     entry.runtime_data = runtime_data
     hass.data[DOMAIN][entry.entry_id] = runtime_data
@@ -480,24 +498,21 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     domain_data = hass.data.setdefault(DOMAIN, {})
     runtime_data = domain_data.pop(entry.entry_id, None)
-    if not domain_data:
+    is_last = not domain_data
+    if is_last:
         hass.data.pop(DOMAIN, None)
     if runtime_data is None:
         runtime_data = getattr(entry, "runtime_data", None)
+    unload_error: BaseException | None = None
     if runtime_data is not None:
         remove_update_listener = getattr(runtime_data, "remove_update_listener", None)
         remove_time_change_listener = getattr(
             runtime_data, "remove_time_change_listener", None
         )
-        remove_service_listener = getattr(
-            runtime_data, "remove_service_listener", None
-        )
-        unload_error: BaseException | None = None
         try:
             for remove_listener in (
                 remove_update_listener,
                 remove_time_change_listener,
-                remove_service_listener,
             ):
                 if remove_listener is None:
                     continue
@@ -517,10 +532,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             database = getattr(runtime_data, "database", None)
             if database is not None:
                 await database.close()
-        if unload_error is not None:
-            if getattr(entry, "runtime_data", None) is not None:
-                entry.runtime_data = None
-            raise unload_error
+    # The ``regenerate`` service is DOMAIN-global: it is torn down only
+    # once the FINAL entry unloads (``hass.data[DOMAIN]`` is now empty),
+    # never when a sibling entry is still loaded.
+    if is_last:
+        _deregister_regenerate_service(hass)
     if getattr(entry, "runtime_data", None) is not None:
         entry.runtime_data = None
+    if unload_error is not None:
+        raise unload_error
     return True
