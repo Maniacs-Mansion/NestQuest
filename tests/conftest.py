@@ -311,11 +311,13 @@ class ServiceRegistry:
     """Models HA's ``hass.services`` service registry.
 
     ``async_register`` stores a handler under its (domain, service) key,
-    ``has_service`` reports registration, and ``async_unregister`` removes
-    it.  ``async_remove`` is the deprecated HA alias, kept so either
-    spelling resolves.  ``call`` invokes a stored handler the way HA's
-    service bus would — awaiting a coroutine result — so tests can exercise
-    a registered service end-to-end.
+    ``has_service`` reports registration, and ``async_remove`` removes it
+    — exactly the surface Home Assistant's ``ServiceRegistry`` exposes
+    (there is deliberately NO ``async_unregister`` alias here, so a caller
+    that uses the wrong method name fails instead of being silently
+    papered over).  ``call`` invokes a stored handler the way HA's service
+    bus would — awaiting a coroutine result — so tests can exercise a
+    registered service end-to-end.
     """
 
     def __init__(self, hass=None):
@@ -329,12 +331,9 @@ class ServiceRegistry:
     def has_service(self, domain, service):
         return (domain, service) in self._services
 
-    def async_unregister(self, domain, service):
+    def async_remove(self, domain, service):
         self._services.pop((domain, service), None)
         return None
-
-    def async_remove(self, domain, service):
-        return self.async_unregister(domain, service)
 
     async def call(self, domain, service, data=None):
         func = self._services.get((domain, service))

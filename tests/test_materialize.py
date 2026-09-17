@@ -340,7 +340,7 @@ async def _materialize_with_change(
     seen = {"n": 0}
 
     async def _gated(self, definition_id, child_id, due_date, generated_at,
-                     *, window, due_time=None):
+                     *, window, due_time=None, today=None):
         seen["n"] += 1
         if seen["n"] == 1:
             seen["first"] = (definition_id, child_id, window)
@@ -348,7 +348,7 @@ async def _materialize_with_change(
             await release.wait()
         return await original_upsert(
             self, definition_id, child_id, due_date, generated_at,
-            window=window, due_time=due_time,
+            window=window, due_time=due_time, today=today,
         )
 
     QuestInstancesDao.upsert_if_valid = _gated
@@ -628,6 +628,42 @@ def test_materialize_rejects_malformed_or_inverted_bounds(tmp_path) -> None:
         return None
 
     _with_db(tmp_path, "materialize-bounds.db")(_body)
+
+
+def test_materialize_accepts_ha_local_today_behind_host(tmp_path) -> None:
+    """The no-past guard compares against a caller-supplied HA-local today.
+
+    A household time zone behind the host clock around midnight resolves a
+    HA-local "today" one calendar day earlier than the host's
+    ``date.today()``.  The host-clock guard would reject that date as past,
+    so the resolved HA-local date must be threaded through ``materialize``
+    and accepted instead of raising.
+    """
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+        ha_today = datetime.date.today() - datetime.timedelta(days=1)
+        start_iso = ha_today.isoformat()
+        end_iso = (ha_today + datetime.timedelta(days=14)).isoformat()
+        await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            ["morning"],
+        )
+
+        # Without the pinned HA-local today, the host-clock guard rejects
+        # the horizon start (ha_today is "yesterday" on the host).
+        with pytest.raises(ValueError, match="never generated in the past"):
+            await materialize(database, start_iso, end_iso)
+
+        # With today=ha_today, the same range is accepted and materialized.
+        count = await materialize(database, start_iso, end_iso, today=ha_today)
+        assert count == 15
+        return count
+
+    _with_db(tmp_path, "materialize-ha-local-today.db")(_body)
 
 
 def test_materialize_skips_inactive_definitions(tmp_path) -> None:
@@ -914,10 +950,8 @@ def test_regenerate_for_child_uses_single_anchor_across_midnight(
         return day0 if clock["reads"] == 1 else day1
 
     import custom_components.nestquest.dao_instances as dao_instances_module
-    import custom_components.nestquest.materialize as materialize_module
 
     monkeypatch.setattr(dao_instances_module, "_today", _fake_today)
-    monkeypatch.setattr(materialize_module, "_today", _fake_today)
 
     async def _body(database):
         children = ChildrenDao(database)

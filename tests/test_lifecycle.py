@@ -346,7 +346,9 @@ async def test_day_rollover_listener_materializes_ha_local_horizon(
 
     await hass.time_change.fire()
 
-    fake.assert_awaited_once_with(database, expected_start, expected_end)
+    fake.assert_awaited_once_with(
+        database, expected_start, expected_end, today=today
+    )
 
 
 def test_day_rollover_time_change_tracker_rejects_local_kwarg() -> None:
@@ -480,3 +482,30 @@ async def test_unload_deregisters_regenerate_service(hass, make_entry) -> None:
 
     assert await async_unload_entry(hass, entry) is True
     assert not hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
+
+
+async def test_setup_cleans_listeners_when_materialization_raises(
+    hass, make_entry, monkeypatch
+) -> None:
+    """A startup-materialization failure rolls back every registered listener.
+
+    The daily and update listeners are installed before the startup
+    materialization runs; when that walk raises, the database is closed but
+    the remover callables must also be invoked so no listener survives
+    firing against a closed database.
+    """
+    import custom_components.nestquest as nestquest
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("materialization failed")
+
+    monkeypatch.setattr(nestquest, "_materialize_run", _boom)
+
+    entry = _wire(make_entry(), hass.registry)
+    with pytest.raises(RuntimeError, match="materialization failed"):
+        await async_setup_entry(hass, entry)
+
+    assert hass.time_change.size == 0
+    assert hass.registry.size == 0
+    assert not hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
+    assert not hasattr(entry, "runtime_data")

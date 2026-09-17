@@ -294,7 +294,7 @@ async def _run_horizon_materialization(
     end_date = (
         today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
     ).isoformat()
-    await _materialize_run(database, start_date, end_date)
+    await _materialize_run(database, start_date, end_date, today=today)
 
 
 def _register_day_rollover_listener(
@@ -340,7 +340,7 @@ def _register_regenerate_service(
 
     def _unregister() -> None:
         if hass.services.has_service(DOMAIN, SERVICE_REGENERATE):
-            hass.services.async_unregister(DOMAIN, SERVICE_REGENERATE)
+            hass.services.async_remove(DOMAIN, SERVICE_REGENERATE)
 
     return _unregister
 
@@ -402,6 +402,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await listener_hass.config_entries.async_reload(listener_entry.entry_id)
 
     database = await _async_open_database(hass, await async_get_db_path(hass))
+    remove_update_listener: Callable[[], Any] | None = None
+    remove_time_change_listener: Callable[[], Any] | None = None
+    remove_service_listener: Callable[[], Any] | None = None
     try:
         # Seed the admin allowlist on first setup so the owner is never
         # locked out: an empty database takes the persisted admin copy
@@ -437,8 +440,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await _run_horizon_materialization(hass, database)
         remove_service_listener = _register_regenerate_service(hass, database)
     except BaseException:
+        # A failure anywhere after the database is open must not leak the
+        # listeners already registered against that (now-closed) database:
+        # unwind EVERY remover we acquired before the failure, keeping the
+        # original error as the one raised.  Removal is best-effort — a
+        # failing remover must not mask the setup error that triggered it.
+        for remove_listener in (
+            remove_service_listener,
+            remove_time_change_listener,
+            remove_update_listener,
+        ):
+            if remove_listener is None:
+                continue
+            try:
+                result = remove_listener()
+                if inspect.isawaitable(result):
+                    await result
+            except BaseException:
+                pass
         await database.close()
         raise
+    assert remove_update_listener is not None
+    assert remove_time_change_listener is not None
+    assert remove_service_listener is not None
     runtime_data = NestQuestRuntimeData(
         entry_id=entry.entry_id,
         options=dict(entry.options),
