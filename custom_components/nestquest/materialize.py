@@ -19,16 +19,18 @@ The walk is deterministic and idempotent:
 - For each date in the range, each definition whose decoded rule
   :func:`~.recurrence.occurs_on` on that date, each assignee who is
   ``is_present`` on that date and each declared window, one instance is
-  upserted through :class:`~.dao_instances.QuestInstancesDao.upsert` with
-  the window's ``due_time`` snapshotted and a ``generated_at`` stamp
-  shared by the whole batch (one coherent time per run).
+  written through :class:`~.dao_instances.QuestInstancesDao.upsert_if_valid`
+  with a ``generated_at`` stamp shared by the whole batch (one coherent
+  time per run).
 
 A config change that lands AFTER the snapshot is read but BEFORE a
-tuple's upsert (an assignment removed, a definition or child
-deactivated, a window removed) makes that tuple SKIP rather than abort
-the batch: each tuple is re-validated against the current state right
-before its upsert, and only the narrow "no longer valid" conditions are
-treated as skippable.
+tuple's write (an assignment removed, a definition or child deactivated,
+a window removed) makes that tuple SKIP rather than abort the batch:
+:meth:`~.dao_instances.QuestInstancesDao.upsert_if_valid` re-validates
+every materialization precondition (active definition, active child,
+live assignment, declared window, and its CURRENT ``due_time``) inside
+the SAME transaction as the INSERT, so the check and the write cannot be
+split by a racing config edit.
 
 The upsert is idempotent on (definition_id, child_id, due_date, window),
 so re-running the materialization over the same range never duplicates a
@@ -40,7 +42,6 @@ import datetime
 
 from .dao_instances import QuestInstancesDao
 from .dao_rules import (
-    QuestDefinitionsDao,
     _validate_date,
     load_materialization_input,
     schedule_rule_from_storage,
@@ -96,22 +97,6 @@ def _build_engine(
     return PresenceEngine(schedules, overrides)
 
 
-def _is_deleted_tuple(error: ValueError) -> bool:
-    """True for the narrow 'tuple no longer valid' upsert rejections.
-
-    A change landing between the per-tuple validity re-check and the
-    upsert can still surface as the upsert's "definition does not exist"
-    or "not assigned to child" error; those are skippable.  Every other
-    rejection (past due date, immutable completed instance, bad window)
-    is a real error and propagates.
-    """
-    message = str(error)
-    return (
-        "does not exist" in message
-        or "is not assigned to child" in message
-    )
-
-
 async def materialize(
     database: NestQuestDatabase,
     start_date: str,
@@ -125,10 +110,12 @@ async def materialize(
     of instances upserted for the range (idempotent — a re-run refreshes
     the same rows, never duplicates them).
 
-    All inputs are read in ONE locked transaction, and each tuple is
-    re-validated against the current state just before its upsert so a
-    config change that arrives mid-batch skips the affected tuples rather
-    than aborting the batch or leaving a partial result.
+    All inputs are read in ONE locked transaction; each tuple's write then
+    goes through the atomic :meth:`~.dao_instances.QuestInstancesDao.upsert_if_valid`,
+    which re-validates the tuple and its current ``due_time`` in the same
+    transaction as the INSERT, so a config change that arrives mid-batch
+    skips the affected tuples rather than aborting the batch or leaving a
+    partial result.
     """
     _validate_date(start_date, "start_date")
     _validate_date(end_date, "end_date")
@@ -151,7 +138,6 @@ async def materialize(
 
     generated_at = _now_stamp()
     instances = QuestInstancesDao(database)
-    definitions_dao = QuestDefinitionsDao(database)
 
     start = datetime.datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
@@ -167,23 +153,14 @@ async def materialize(
                 if not engine.is_present(child.id, cursor):
                     continue
                 for window in windows:
-                    if not await definitions_dao.still_materializable(
-                        definition_id, child.id, window.window
-                    ):
-                        continue
-                    try:
-                        await instances.upsert(
-                            definition_id,
-                            child.id,
-                            iso,
-                            generated_at,
-                            window=window.window,
-                            due_time=window.due_time,
-                        )
-                    except ValueError as error:
-                        if _is_deleted_tuple(error):
-                            continue
-                        raise
-                    count += 1
+                    written = await instances.upsert_if_valid(
+                        definition_id,
+                        child.id,
+                        iso,
+                        generated_at,
+                        window=window.window,
+                    )
+                    if written is not None:
+                        count += 1
         cursor += datetime.timedelta(days=1)
     return count

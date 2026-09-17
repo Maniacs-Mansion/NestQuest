@@ -230,31 +230,36 @@ def test_materialize_is_idempotent(tmp_path) -> None:
 async def _materialize_with_change(
     database, start_iso, end_iso, change
 ) -> int:
-    """Run materialize, pause before its first per-tuple re-check, apply
+    """Run materialize, pause before its first atomic write, apply
     ``change``, then release.  Returns the materialize count.
 
     The gate parks the walk AFTER the single input snapshot is read but
-    BEFORE the first :meth:`QuestDefinitionsDao.still_materializable`
-    re-check acquires the connection lock, so ``change`` commits against
-    the live state and the walk's per-tuple re-check then skips the
-    tuples it invalidated (or, for a presence-only change, continues with
-    the snapped presence).  This deterministically exercises the
-    snapshot-to-upsert gap that a config edit can interleave into.
+    BEFORE the first :meth:`QuestInstancesDao.upsert_if_valid` call
+    acquires the connection lock, so ``change`` commits against the live
+    state and the write's own in-transaction precondition check then
+    skips the tuples it invalidated (or, for a presence-only change,
+    proceeds with the snapped presence).  This deterministically
+    exercises the snapshot-to-insert gap that a config edit can
+    interleave into.
     """
-    original_check = QuestDefinitionsDao.still_materializable
+    original_upsert = QuestInstancesDao.upsert_if_valid
     entered = asyncio.Event()
     release = asyncio.Event()
     seen = {"n": 0}
 
-    async def _gated_check(self, definition_id, child_id, window):
+    async def _gated(self, definition_id, child_id, due_date, generated_at,
+                     *, window):
         seen["n"] += 1
         if seen["n"] == 1:
             seen["first"] = (definition_id, child_id, window)
             entered.set()
             await release.wait()
-        return await original_check(self, definition_id, child_id, window)
+        return await original_upsert(
+            self, definition_id, child_id, due_date, generated_at,
+            window=window,
+        )
 
-    QuestDefinitionsDao.still_materializable = _gated_check
+    QuestInstancesDao.upsert_if_valid = _gated
     try:
         task = asyncio.ensure_future(
             materialize(database, start_iso, end_iso)
@@ -264,7 +269,7 @@ async def _materialize_with_change(
         release.set()
         return await task
     finally:
-        QuestDefinitionsDao.still_materializable = original_check
+        QuestInstancesDao.upsert_if_valid = original_upsert
 
 
 def test_materialize_skips_removed_assignee_mid_walk(tmp_path) -> None:

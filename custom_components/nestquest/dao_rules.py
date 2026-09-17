@@ -1190,37 +1190,6 @@ class QuestDefinitionsDao:
             )
         return result.rowcount > 0
 
-    async def still_materializable(
-        self, definition_id: int, child_id: int, window: str
-    ) -> bool:
-        """Return True when the (definition, child, window) tuple is still
-        a valid materialization target.
-
-        Checks, in one query under the connection lock, that the
-        definition exists AND is active, the child exists AND is active,
-        the (definition, child) assignment link is still present, and the
-        window is still declared on the definition.  The materialization
-        walk re-checks each tuple against this verdict right before its
-        upsert so a config change landed between the input snapshot and
-        the upsert (an assignment removed, a definition or child
-        deactivated, a window removed) causes that tuple to be SKIPPED
-        instead of aborting the batch.  This is a point read under the
-        lock; the walk additionally treats the upsert's own "does not
-        exist" / "not assigned" rejections as skippable, closing the
-        assignment/existence gap.
-        """
-        async with _connection_lock(self._database):
-            row = await self._database.fetch_one(
-                "SELECT 1 FROM quest_definitions d "
-                "JOIN quest_definition_assignees a ON a.definition_id = d.id "
-                "JOIN children c ON c.id = a.child_id "
-                "JOIN quest_definition_windows w ON w.definition_id = d.id "
-                "WHERE d.id = ? AND a.child_id = ? AND w.window = ? "
-                "AND d.is_active = 1 AND c.is_active = 1 LIMIT 1",
-                (definition_id, child_id, window),
-            )
-        return row is not None
-
     async def _validate_assignable_child(self, child_id: int) -> None:
         """Raise ValueError unless the child exists and is active.
 
