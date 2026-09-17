@@ -776,3 +776,107 @@ def test_edit_rejects_non_int_definition_id(tmp_path, bad) -> None:
         return None
 
     _with_db(tmp_path, "edit-bad-definition-id.db")(_body)
+
+
+# ---------------------------------------------------------------------------
+# edit_quest_definition: consistent snapshot and rollback (CQ-01, CQ-02)
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_edit_omitted_rule_snapshot_consistent(tmp_path) -> None:
+    """Two concurrent edits never return a mixed-time snapshot.
+
+    One edit changes windows only (rule omitted); the other changes the
+    rule only (windows omitted).  Because each edit reads its rule,
+    assignees and windows back inside its own locked transaction, the
+    windows-only edit reports the rule as it was AT THAT EDIT's
+    transaction: the ORIGINAL rule when it ran first, the NEW rule when
+    it ran second.  That yields a strict invariant — the windows-only
+    result's rule is the original exactly when the rule-only result
+    still saw the original windows — which a post-transaction rule read
+    would violate.
+    """
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        weekly = ScheduleRule(
+            rule_type=RuleType.WEEKLY,
+            weekday_set={2},
+            start_date="2026-09-14",
+        )
+        windows_result, rule_result = await asyncio.gather(
+            edit_quest_definition(
+                database,
+                created.definition.id,
+                windows=[("evening", "19:00")],
+            ),
+            edit_quest_definition(database, created.definition.id, rule=weekly),
+        )
+        # Each edit reports its own change...
+        assert [w.window for w in windows_result.windows] == ["evening"]
+        assert rule_result.rule == weekly
+        # ...and the pair is self-consistent: the windows-only edit saw
+        # the original rule iff the rule-only edit saw the original
+        # windows (they ran in that order).
+        assert (windows_result.rule == _daily_rule()) == (
+            [w.window for w in rule_result.windows] == ["evening"]
+        )
+        return None
+
+    _with_db(tmp_path, "edit-concurrent-snapshot.db")(_body)
+
+
+def test_edit_post_write_failure_rolls_back_everything(tmp_path) -> None:
+    """A post-write failure during an edit rolls every table back together.
+
+    Deterministic trigger: call the DAO's edit directly with a window
+    name outside const.QUEST_WINDOWS.  The DAO applies the metadata and
+    rule writes and the window delete, THEN validates the window name
+    and raises ValueError.  That failure lands after several writes
+    inside the transaction, so the metadata, rule and window changes
+    must all roll back — the baseline definition, rule and windows
+    survive unchanged.
+    """
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database,
+            "Brush teeth",
+            _daily_rule(),
+            [child.id],
+            [("morning", "07:00")],
+        )
+        rule_id = created.definition.schedule_rule_id
+        weekly_storage = schedule_rule_to_storage(
+            ScheduleRule(
+                rule_type=RuleType.WEEKLY,
+                weekday_set={2},
+                start_date="2026-09-14",
+            )
+        )
+        dao = QuestDefinitionsDao(database)
+        with pytest.raises(ValueError, match="window must be one of"):
+            await dao.edit_definition(
+                created.definition.id,
+                title="Changed",
+                rule=weekly_storage,
+                windows=[("noon", None)],
+            )
+        stored = await definitions.get(created.definition.id)
+        assert stored is not None
+        assert stored.title == "Brush teeth"
+        rule_row = await rules.get(rule_id)
+        assert rule_row is not None
+        assert rule_row.rule_type == "daily"
+        assert rule_row.weekday_set is None
+        by_name = {
+            w.window: w.due_time
+            for w in await definitions.list_windows(created.definition.id)
+        }
+        assert by_name == {"morning": "07:00"}
+        assert [
+            c.id for c in await definitions.list_assignees(created.definition.id)
+        ] == [child.id]
+        return None
+
+    _with_db(tmp_path, "edit-post-write-rollback.db")(_body)

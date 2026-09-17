@@ -165,16 +165,18 @@ class QuestDefinitionWindowRecord:
 
 @dataclass(frozen=True)
 class QuestDefinitionSnapshot:
-    """A definition plus its assignees and windows, read atomically.
+    """A definition plus its rule, assignees and windows, read atomically.
 
     Returned by :meth:`QuestDefinitionsDao.create_with_rule_and_windows`
-    with the assignees and windows read inside the SAME transaction that
-    inserted them, so the snapshot is a consistent creation-time view —
-    a concurrent assignee or window mutation cannot change it between
-    the write and the read.
+    and :meth:`QuestDefinitionsDao.edit_definition` with the rule,
+    assignees and windows read inside the SAME transaction that wrote
+    them, so the snapshot is a consistent creation/edit-time view — a
+    concurrent rule, assignee or window mutation cannot change it
+    between the write and the read.
     """
 
     definition: QuestDefinitionRecord
+    rule: ScheduleRuleRecord
     assignees: list[ChildRecord]
     windows: list[QuestDefinitionWindowRecord]
 
@@ -741,9 +743,14 @@ class QuestDefinitionsDao:
                 definition = await self.get(definition_id)
                 assignees = await self.list_assignees(definition_id)
                 window_records = await self.list_windows(definition_id)
+                rule_record = await ScheduleRulesDao(self._database).get(
+                    rule_id
+                )
         assert definition is not None
+        assert rule_record is not None
         return QuestDefinitionSnapshot(
             definition=definition,
+            rule=rule_record,
             assignees=assignees,
             windows=window_records,
         )
@@ -762,8 +769,8 @@ class QuestDefinitionsDao:
 
         Mirrors :meth:`create_with_rule_and_windows`: everything runs
         inside ONE transaction under the connection lock, and the
-        returned snapshot's assignees and windows are read back inside
-        that transaction.  Arguments default to the module sentinel
+        returned snapshot's rule, assignees and windows are read back
+        inside that transaction.  Arguments default to the module sentinel
         ``_UNSET`` meaning "leave this field alone"; ``None`` writes SQL
         NULL so optional metadata (description, icon) can be cleared.
 
@@ -840,9 +847,14 @@ class QuestDefinitionsDao:
                 updated = await self.get(definition_id)
                 assignees = await self.list_assignees(definition_id)
                 window_records = await self.list_windows(definition_id)
+                rule_record = await ScheduleRulesDao(self._database).get(
+                    updated.schedule_rule_id
+                )
         assert updated is not None
+        assert rule_record is not None
         return QuestDefinitionSnapshot(
             definition=updated,
+            rule=rule_record,
             assignees=assignees,
             windows=window_records,
         )

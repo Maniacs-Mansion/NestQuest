@@ -45,7 +45,6 @@ from .dao_rules import (
     QuestDefinitionWindowRecord,
     QuestDefinitionsDao,
     ScheduleRuleStorage,
-    ScheduleRulesDao,
     _UNSET,
     _validate_time,
     _validate_window,
@@ -312,16 +311,9 @@ async def edit_quest_definition(
         windows=window_specs,
     )
 
-    if rule_storage is not _UNSET:
-        decoded_rule = schedule_rule_from_storage(rule_storage)
-    else:
-        rule_record = await ScheduleRulesDao(database).get(
-            snapshot.definition.schedule_rule_id
-        )
-        assert rule_record is not None
-        decoded_rule = schedule_rule_from_storage(
-            schedule_rule_storage_from_record(rule_record)
-        )
+    decoded_rule = schedule_rule_from_storage(
+        schedule_rule_storage_from_record(snapshot.rule)
+    )
 
     return CreatedQuestDefinition(
         definition=snapshot.definition,
