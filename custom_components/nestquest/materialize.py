@@ -44,7 +44,8 @@ definition edits / reassignment (Features 06/07); :func:`regenerate_for_child`
 covers a single child's presence change (Feature 09).  Both delete the
 affected open instances at or after today — never a completed instance,
 never the past — and re-run the walk over the rolling horizon
-``[today, today + DEFAULT_HORIZON_DAYS]``.
+``[today, today + horizon_days]`` (``horizon_days`` defaults to
+``DEFAULT_HORIZON_DAYS``).
 
 HOOK (Feature 09 presence services): the presence business layer that
 lands in Feature 09 MUST call :func:`regenerate_for_child` after EVERY
@@ -232,6 +233,7 @@ async def regenerate_for_definition(
     definition_id: int,
     *,
     today: datetime.date | None = None,
+    horizon_days: int | None = None,
 ) -> int:
     """Regenerate a definition's future instances after a config change.
 
@@ -241,7 +243,7 @@ async def regenerate_for_definition(
     completed instance, never the past) via
     :meth:`~.dao_instances.QuestInstancesDao.delete_future_uncompleted`,
     then the materialization walk re-runs over the rolling horizon
-    ``[today, today + DEFAULT_HORIZON_DAYS]`` so the (changed) rule,
+    ``[today, today + horizon_days]`` so the (changed) rule,
     assignee set and windows re-materialize against today's state.
 
     "today" is computed the same way the walk computes it —
@@ -251,14 +253,17 @@ async def regenerate_for_definition(
     range.  ``today`` optionally pins a caller-resolved HA-local date
     (threaded into both the delete cutoff and the re-materialization)
     so a household time zone behind the host around midnight stays
-    consistent.  Returns the number of instances the re-materialization
+    consistent.  ``horizon_days`` sizes the re-materialization window;
+    when omitted it falls back to :data:`~.const.DEFAULT_HORIZON_DAYS`.
+    Returns the number of instances the re-materialization
     upserted across the whole snapshot (idempotent — other active
     definitions' tuples refresh in place, never duplicate).
     """
+    horizon = DEFAULT_HORIZON_DAYS if horizon_days is None else horizon_days
     today_date = _resolve_today(today)
     start_date = today_date.isoformat()
     end_date = (
-        today_date + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+        today_date + datetime.timedelta(days=horizon)
     ).isoformat()
 
     instances = QuestInstancesDao(database)
@@ -286,6 +291,7 @@ async def regenerate_for_child(
     child_id: int,
     *,
     today: datetime.date | None = None,
+    horizon_days: int | None = None,
 ) -> int:
     """Regenerate a child's future instances after a presence change.
 
@@ -299,7 +305,7 @@ async def regenerate_for_child(
     (never a completed instance, never the past) via
     :meth:`~.dao_instances.QuestInstancesDao.delete_future_uncompleted_for_child`,
     then the materialization walk re-runs over the rolling horizon
-    ``[today, today + DEFAULT_HORIZON_DAYS]`` scoped to that child only,
+    ``[today, today + horizon_days]`` scoped to that child only,
     so the child's now-absent/present dates re-materialize against
     today's presence WITHOUT touching any other child's rows.
 
@@ -315,13 +321,16 @@ async def regenerate_for_child(
     execution-day anchor even when the call is queued across midnight.
     ``today`` optionally pins a caller-resolved HA-local date, threaded
     into the delete cutoff and the re-materialization for the same
-    host-vs-HA time-zone consistency.  Returns the number of instances
+    host-vs-HA time-zone consistency.  ``horizon_days`` sizes the
+    re-materialization window; when omitted it falls back to
+    :data:`~.const.DEFAULT_HORIZON_DAYS`.  Returns the number of instances
     the re-materialization upserted for the child across the whole
     snapshot.
     """
     if isinstance(child_id, bool) or not isinstance(child_id, int):
         raise ValueError(f"child_id must be an integer, got {child_id!r}")
 
+    horizon = DEFAULT_HORIZON_DAYS if horizon_days is None else horizon_days
     today_date = _resolve_today(today)
 
     instances = QuestInstancesDao(database)
@@ -335,7 +344,7 @@ async def regenerate_for_child(
         child_id, today_date.isoformat(), today=today
     )
     start = datetime.date.fromisoformat(effective_cutoff)
-    end_date = (start + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+    end_date = (start + datetime.timedelta(days=horizon)).isoformat()
     return await materialize(
         database, start.isoformat(), end_date, child_ids=[child_id], today=today
     )

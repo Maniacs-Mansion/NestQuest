@@ -1113,6 +1113,70 @@ def test_regenerate_for_child_is_child_scoped(tmp_path) -> None:
     _with_db(tmp_path, "regenerate-child-scoped.db")(_body)
 
 
+def test_regenerate_for_definition_respects_horizon_days(tmp_path) -> None:
+    """A non-default horizon_days sizes the definition's rebuild window."""
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+
+        today = datetime.date.today()
+        start_iso = today.isoformat()
+
+        created = await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            [("morning", "09:00")],
+        )
+
+        # ``create`` does not materialize; regeneration over a 5-day horizon
+        # must build exactly today..today+5 (six daily rows).
+        await regenerate_for_definition(
+            database, created.definition.id, horizon_days=5
+        )
+
+        dao = QuestInstancesDao(database)
+        horizon_end = today + datetime.timedelta(days=5)
+        records = await dao.list_by_date_range(
+            child.id, start_iso, horizon_end.isoformat()
+        )
+        assert len(records) == 6
+        return None
+
+    _with_db(tmp_path, "regenerate-def-horizon.db")(_body)
+
+
+def test_regenerate_for_child_respects_horizon_days(tmp_path) -> None:
+    """A non-default horizon_days sizes the child's rebuild window."""
+    async def _body(database):
+        children = ChildrenDao(database)
+        child = await children.create("Ada", NOW)
+
+        today = datetime.date.today()
+        start_iso = today.isoformat()
+
+        await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            [("morning", "09:00")],
+        )
+
+        await regenerate_for_child(database, child.id, horizon_days=5)
+
+        dao = QuestInstancesDao(database)
+        horizon_end = today + datetime.timedelta(days=5)
+        records = await dao.list_by_date_range(
+            child.id, start_iso, horizon_end.isoformat()
+        )
+        assert len(records) == 6
+        return None
+
+    _with_db(tmp_path, "regenerate-child-horizon.db")(_body)
+
+
 #: Fixed end-to-end anchor: 2026-06-01 is a Monday AND the 1st of its month,
 #: so the two-week custody cycle is week-aligned and the yearly rule's
 #: "1st of the anchor month" is GUARANTEED to fire inside the 28-day window
