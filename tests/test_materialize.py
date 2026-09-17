@@ -1229,12 +1229,36 @@ def _resolve_e2e(raw, def_ids, child_ids) -> set:
     }
 
 
-async def _collect_records(database, child_ids, start, end) -> set:
-    """Return the full logical instance records over the children/range.
+async def _collect_keyed(database, child_ids, start, end) -> dict:
+    """Return {(definition_id, child_id, window, due_date): (id, due_time)}.
 
-    Each 7-tuple carries the primary key AND the ``generated_at`` snapshot
-    stamp, so comparing two of these sets proves true zero-change rather
-    than merely stable keys or an unchanged count.
+    The stable parts of an instance — its widened key, its physical id and
+    its due_time snapshot — with the refreshable ``generated_at`` stamp
+    deliberately excluded.  Comparing two of these captures the real
+    re-run contract: no rows added/removed, ids stable (upsert refreshes
+    in place, never delete + reinsert), and due_time untouched.
+    """
+    dao = QuestInstancesDao(database)
+    keyed = {}
+    for child_id in child_ids:
+        for record in await dao.list_by_date_range(child_id, start, end):
+            key = (
+                record.definition_id,
+                record.child_id,
+                record.window,
+                record.due_date,
+            )
+            keyed[key] = (record.id, record.due_time)
+    return keyed
+
+
+async def _collect_records(database, child_ids, start, end) -> set:
+    """Return the full 7-field instance records over the children/range.
+
+    Includes the ``generated_at`` stamp, so this is only used for children
+    that should NEVER be written (Ada/Bo during Cleo's override): their
+    records are truly byte-for-byte untouched, unlike the idempotency
+    re-run where the stamp legitimately refreshes.
     """
     dao = QuestInstancesDao(database)
     records = set()
@@ -1257,13 +1281,17 @@ async def _collect_records(database, child_ids, start, end) -> set:
 def test_materialize_end_to_end_six_rule_types(tmp_path, monkeypatch) -> None:
     import custom_components.nestquest.materialize as materialize_module
 
-    # Pin the batch stamp so the idempotency assertion can compare full
-    # records (generated_at included) deterministically across re-runs.
-    monkeypatch.setattr(
-        materialize_module,
-        "_now_stamp",
-        lambda: "2026-06-01T00:00:00+00:00",
-    )
+    # Give each materialize run a DISTINCT batch stamp: production upserts
+    # rewrite generated_at on every re-run, so a shared pinned stamp would
+    # merely hide that rewrite.  The idempotency assertion below therefore
+    # ignores generated_at and checks the stable columns only.
+    stamps = {"n": 0}
+
+    def _distinct_stamp() -> str:
+        stamps["n"] += 1
+        return f"2026-06-01T00:00:{stamps['n']:02d}+00:00"
+
+    monkeypatch.setattr(materialize_module, "_now_stamp", _distinct_stamp)
 
     async def _body(database):
         from custom_components.nestquest.dao_presence import (
@@ -1369,16 +1397,17 @@ def test_materialize_end_to_end_six_rule_types(tmp_path, monkeypatch) -> None:
             database, all_children, start_iso, end_iso
         ) == expected
 
-        # True zero-change: a re-run leaves every column — primary key AND
-        # generated_at — byte-for-byte unchanged across all 69 records.
-        first_records = await _collect_records(
+        # Re-run contract: the upsert refreshes each existing row IN PLACE,
+        # so the widened key set, the physical ids and each due_time are all
+        # stable (only generated_at may refresh to the new run's stamp).
+        first_keyed = await _collect_keyed(
             database, all_children, start_iso, end_iso
         )
         second = await materialize(database, start_iso, end_iso, today=anchor)
         assert second == len(expected)
-        assert await _collect_records(
+        assert await _collect_keyed(
             database, all_children, start_iso, end_iso
-        ) == first_records
+        ) == first_keyed
 
         # Capture Ada and Bo's complete records BEFORE the override, so we
         # can prove they are untouched afterward.
