@@ -1093,3 +1093,60 @@ def test_assign_and_unassign_leave_instances_and_history_alone(
         return None
 
     _with_db(tmp_path, "assign-unassign-history.db")(_body)
+
+
+def test_concurrent_assign_unassign_returns_consistent_roster(
+    tmp_path,
+) -> None:
+    """A concurrent unassign cannot strip the just-assigned child from
+    the roster that ``assign_child`` returns.
+
+    ``assign_child`` returns the roster read inside the same locked
+    transaction as the INSERT, so the child it assigned is always present
+    in its result — even when an unassign of that same child races.  The
+    pause hook holds ``list_assignees`` mid-flight so the unassign is
+    deterministically queued against the assignment's lock.
+    """
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        bo = await children.create("Bo", NOW)
+
+        import custom_components.nestquest.dao_rules as dao_rules
+
+        original_list = dao_rules.QuestDefinitionsDao.list_assignees
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _pausing_list(self, definition_id):
+            if not started.is_set():
+                started.set()
+                await release.wait()
+            return await original_list(self, definition_id)
+
+        dao_rules.QuestDefinitionsDao.list_assignees = _pausing_list
+        try:
+            assign_task = asyncio.ensure_future(
+                assign_child(database, created.definition.id, bo.id)
+            )
+            await started.wait()
+            unassign_task = asyncio.ensure_future(
+                unassign_child(database, created.definition.id, bo.id)
+            )
+            await asyncio.sleep(0)
+            release.set()
+            assignees, removed = await asyncio.gather(
+                assign_task, unassign_task
+            )
+        finally:
+            dao_rules.QuestDefinitionsDao.list_assignees = original_list
+
+        assert bo.id in [c.id for c in assignees], (
+            "assign_child must return a roster containing the child it "
+            "just assigned, even under a concurrent unassign"
+        )
+        assert removed is True
+        return assignees
+
+    _with_db(tmp_path, "assign-unassign-concurrent.db")(_body)

@@ -348,8 +348,9 @@ async def assign_child(
     active/exists check inside its transaction, and also confirms the
     definition exists.  Assigning an already-assigned child is a no-op
     (no duplicate row).  Returns the definition's assignees read back
-    through the DAO, a consistent post-assignment roster.  Raises
-    ValueError on any rejected argument.  Only the
+    inside the DAO's same transaction, a consistent post-assignment
+    roster (a concurrent assign/unassign cannot race it after the
+    write).  Raises ValueError on any rejected argument.  Only the
     ``quest_definition_assignees`` link is written; existing instances
     and completion history are never touched.
     """
@@ -357,7 +358,7 @@ async def assign_child(
     _validate_child_id(child_id)
     dao = QuestDefinitionsDao(database)
     try:
-        await dao.add_assignee(definition_id, child_id)
+        return await dao.add_assignee(definition_id, child_id)
     except ValueError as error:
         # The DAO names only the child/definition; re-raise so the
         # public contract names the field the caller actually passed.
@@ -367,7 +368,6 @@ async def assign_child(
         if message.startswith("quest definition "):
             raise ValueError(f"definition_id: {message}") from error
         raise
-    return await dao.list_assignees(definition_id)
 
 
 async def unassign_child(
