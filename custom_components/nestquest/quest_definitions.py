@@ -3,10 +3,11 @@
 Sits between the Feature 09 service gate and the typed
 :class:`~.dao_rules.QuestDefinitionsDao`: callers get validation and the
 all-or-nothing create/edit here, and never touch the DAO SQL directly.
-:func:`create_quest_definition` is the create path and
-:func:`edit_quest_definition` the edit path; :func:`assign_child` and
-:func:`unassign_child` are the assignment paths.  There is no permission
-check here (that is Feature 09).
+:func:`create_quest_definition` is the create path,
+:func:`edit_quest_definition` the edit path, :func:`assign_child` and
+:func:`unassign_child` the assignment paths, and
+:func:`set_quest_definition_active` the deactivate/reactivate path.
+There is no permission check here (that is Feature 09).
 
 Validation policy mirrors :mod:`.children`:
 
@@ -40,12 +41,13 @@ from __future__ import annotations
 import datetime
 from dataclasses import dataclass
 
-from .dao_children import ChildRecord
+from .dao_children import ChildRecord, _connection_lock
 from .dao_rules import (
     QuestDefinitionRecord,
     QuestDefinitionWindowRecord,
     QuestDefinitionsDao,
     ScheduleRuleStorage,
+    ScheduleRulesDao,
     _UNSET,
     _validate_time,
     _validate_window,
@@ -59,7 +61,7 @@ from .recurrence import ScheduleRule
 
 @dataclass(frozen=True)
 class CreatedQuestDefinition:
-    """The persisted result of a create or edit.
+    """The persisted result of a create, edit or activation change.
 
     ``definition`` is the stored row; ``rule`` is the schedule rule
     decoded back through the storage mapping; ``assignees`` and
@@ -393,3 +395,60 @@ async def unassign_child(
             f"definition_id: quest definition {definition_id} does not exist"
         )
     return await dao.remove_assignee(definition_id, child_id)
+
+
+async def set_quest_definition_active(
+    database: NestQuestDatabase,
+    definition_id: int,
+    is_active: bool,
+) -> CreatedQuestDefinition:
+    """Deactivate or reactivate a definition; returns the updated view.
+
+    Flipping the flag is the only removal path (Feature 06 guardrail):
+    a deactivated definition stops future instance generation but its
+    row, schedule rule, assignees and windows all survive, and existing
+    instances plus completion history are never touched.  Reactivation
+    re-enables future generation; generating or removing instances is
+    Feature 07 and does not happen here.
+
+    ``definition_id`` must be a plain int (bools and floats rejected,
+    since SQLite would bind ``True`` onto definition 1) and
+    ``is_active`` must be a real bool — the DAO's ``int()`` would
+    otherwise silently coerce strings and numerics ("1", 0) into a
+    state the caller never asked for.  Raises ValueError naming the
+    offending field when the id is malformed, ``is_active`` is not a
+    bool, or the definition does not exist.
+
+    Atomicity: the existence check, the UPDATE and the readback of the
+    definition, its rule, assignees and windows all run inside the
+    connection-scoped lock, so the returned bundle is a consistent
+    snapshot that a concurrent mutation cannot race.
+    """
+    _validate_definition_id(definition_id)
+    if not isinstance(is_active, bool):
+        raise ValueError(f"is_active must be a real bool, got {is_active!r}")
+    async with _connection_lock(database):
+        dao = QuestDefinitionsDao(database)
+        if await dao.get(definition_id) is None:
+            raise ValueError(
+                f"definition_id: quest definition {definition_id} "
+                "does not exist"
+            )
+        await dao.set_active(definition_id, is_active)
+        updated = await dao.get(definition_id)
+        assert updated is not None
+        rule_record = await ScheduleRulesDao(database).get(
+            updated.schedule_rule_id
+        )
+        assert rule_record is not None
+        assignees = await dao.list_assignees(definition_id)
+        windows = await dao.list_windows(definition_id)
+    rule = schedule_rule_from_storage(
+        schedule_rule_storage_from_record(rule_record)
+    )
+    return CreatedQuestDefinition(
+        definition=updated,
+        rule=rule,
+        assignees=assignees,
+        windows=windows,
+    )

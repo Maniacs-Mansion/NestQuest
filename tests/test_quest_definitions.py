@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import re
 
 import pytest
 
 from custom_components.nestquest.dao_children import ChildrenDao
+from custom_components.nestquest.dao_instances import (
+    CompletionEventsDao,
+    QuestInstancesDao,
+)
 from custom_components.nestquest.dao_rules import (
     QuestDefinitionsDao,
     ScheduleRulesDao,
@@ -19,6 +24,7 @@ from custom_components.nestquest.quest_definitions import (
     assign_child,
     create_quest_definition,
     edit_quest_definition,
+    set_quest_definition_active,
     unassign_child,
 )
 from custom_components.nestquest.recurrence import RuleType, ScheduleRule
@@ -70,6 +76,15 @@ def _with_db(tmp_path, name):
 
 def _daily_rule() -> ScheduleRule:
     return ScheduleRule(rule_type=RuleType.DAILY, start_date="2026-09-14")
+
+
+def _today_iso() -> str:
+    """Today's date in ISO form, computed at call time (never cached).
+
+    ``QuestInstancesDao.upsert`` refuses past due dates, so seeded
+    instances use a date that is always today-or-later at test time.
+    """
+    return datetime.date.today().isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -1150,3 +1165,258 @@ def test_concurrent_assign_unassign_returns_consistent_roster(
         return assignees
 
     _with_db(tmp_path, "assign-unassign-concurrent.db")(_body)
+
+
+# ---------------------------------------------------------------------------
+# set_quest_definition_active: deactivate / reactivate
+# ---------------------------------------------------------------------------
+
+
+def test_set_quest_definition_active_round_trip(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        definition_id = created.definition.id
+
+        deactivated = await set_quest_definition_active(
+            database, definition_id, False
+        )
+        assert isinstance(deactivated, CreatedQuestDefinition)
+        assert deactivated.definition.id == definition_id
+        assert deactivated.definition.is_active is False
+        # The decoded rule, assignees and windows form a consistent
+        # snapshot of the (unchanged) definition.
+        assert deactivated.rule == _daily_rule()
+        assert [c.id for c in deactivated.assignees] == [child.id]
+        assert [w.window for w in deactivated.windows] == ["morning"]
+        assert await definitions.list_active() == []
+
+        reactivated = await set_quest_definition_active(
+            database, definition_id, True
+        )
+        assert reactivated.definition.is_active is True
+        assert [d.id for d in await definitions.list_active()] == [
+            definition_id
+        ]
+        return reactivated
+
+    _with_db(tmp_path, "set-active-round-trip.db")(_body)
+
+
+@pytest.mark.parametrize("bad", ["1", "0", 1, 0, 1.0, None, "true"])
+def test_set_quest_definition_active_rejects_non_bool(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        with pytest.raises(
+            ValueError, match="is_active must be a real bool"
+        ):
+            await set_quest_definition_active(
+                database, created.definition.id, bad
+            )
+        # The refused transition left the definition active.
+        stored = await definitions.get(created.definition.id)
+        assert stored is not None
+        assert stored.is_active is True
+        return None
+
+    _with_db(tmp_path, "set-active-non-bool.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [True, False, 1.5, "1", None])
+def test_set_quest_definition_active_rejects_non_int_definition_id(
+    tmp_path, bad
+) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        with pytest.raises(
+            ValueError, match="definition_id must be an integer"
+        ):
+            await set_quest_definition_active(database, bad, False)
+        stored = await definitions.get(created.definition.id)
+        assert stored is not None
+        assert stored.is_active is True
+        return None
+
+    _with_db(tmp_path, "set-active-non-int-id.db")(_body)
+
+
+def test_set_quest_definition_active_nonexistent_definition_names_field(
+    tmp_path,
+) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(
+            ValueError, match="definition_id.*does not exist"
+        ):
+            await set_quest_definition_active(database, 999, False)
+        return None
+
+    _with_db(tmp_path, "set-active-missing-definition.db")(_body)
+
+
+def test_set_quest_definition_active_never_deletes_or_touches_instances(
+    tmp_path,
+) -> None:
+    """Deactivation hides the definition but deletes nothing, and
+    pre-existing instances and completion history survive unchanged."""
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        definition_id = created.definition.id
+        rule_id = created.definition.schedule_rule_id
+
+        # Seed a real instance and a real completion event against the
+        # definition BEFORE deactivation, so the test can detect a
+        # delete or mutation of pre-existing data (not just an empty
+        # table staying empty).
+        instances = QuestInstancesDao(database)
+        events = CompletionEventsDao(database)
+        instance = await instances.upsert(
+            definition_id, child.id, _today_iso(), NOW, window="morning"
+        )
+        event = await events.append(
+            instance.id,
+            child.id,
+            "completed",
+            "user",
+            NOW,
+            True,
+            actor_user_id="admin-1",
+        )
+
+        instance_count = await database.fetch_one(
+            "SELECT COUNT(*) FROM quest_instances"
+        )
+        event_count = await database.fetch_one(
+            "SELECT COUNT(*) FROM completion_events"
+        )
+
+        await set_quest_definition_active(database, definition_id, False)
+
+        # The definition row survives (deactivated, not deleted).
+        stored = await definitions.get(definition_id)
+        assert stored is not None
+        assert stored.is_active is False
+        # Its rule, assignee and window rows all survive too.
+        assert await rules.get(rule_id) is not None
+        assert [c.id for c in await definitions.list_assignees(
+            definition_id
+        )] == [child.id]
+        assert [w.window for w in await definitions.list_windows(
+            definition_id
+        )] == ["morning"]
+        # The pre-existing instance and completion event survive with
+        # unchanged ids and contents, and no new rows appeared.
+        assert await instances.get_by_id(instance.id) == instance
+        assert await events.list_by_instance(instance.id) == [event]
+        assert await database.fetch_one(
+            "SELECT COUNT(*) FROM quest_instances"
+        ) == instance_count
+        assert await database.fetch_one(
+            "SELECT COUNT(*) FROM completion_events"
+        ) == event_count
+
+        await set_quest_definition_active(database, definition_id, True)
+        assert (await definitions.get(definition_id)).is_active is True
+        assert await instances.get_by_id(instance.id) == instance
+        assert await events.list_by_instance(instance.id) == [event]
+        assert await database.fetch_one(
+            "SELECT COUNT(*) FROM quest_instances"
+        ) == instance_count
+        assert await database.fetch_one(
+            "SELECT COUNT(*) FROM completion_events"
+        ) == event_count
+        return None
+
+    _with_db(tmp_path, "set-active-never-deletes.db")(_body)
+
+
+def _gated_hass(
+    armed: dict, gate_open: asyncio.Event, a_started: asyncio.Event
+):
+    """A hass mock whose executor gates the FIRST ``_execute`` job after
+    arming — the UPDATE of whichever ``set_quest_definition_active``
+    call starts first — proving the caller holds the connection lock at
+    that moment and the second caller must queue behind it."""
+    from unittest.mock import MagicMock
+
+    hass = MagicMock()
+
+    async def _gated_executor(fn, *args):
+        if armed["active"]:
+            if getattr(fn, "__name__", "") == "_execute" and not armed["gated"]:
+                armed["gated"] = True
+                a_started.set()
+                await gate_open.wait()
+        return fn(*args)
+
+    hass.async_add_executor_job = _gated_executor
+    return hass
+
+
+def test_set_quest_definition_active_concurrent_opposite_transitions_return_own(
+    tmp_path,
+) -> None:
+    """Racing deactivate/reactivate calls each report their own request.
+
+    Deterministic gate on task A's UPDATE: task B queues behind the
+    connection lock and lands the opposite transition after A.  Without
+    the lock, A's readback could see B's write and report B's value.
+    """
+    async def _main():
+        armed = {"active": False, "gated": False}
+        gate_open = asyncio.Event()
+        a_started = asyncio.Event()
+        hass = _gated_hass(armed, gate_open, a_started)
+        database = NestQuestDatabase(hass)
+        await database.open(tmp_path / "active-race.db")
+        try:
+            await apply_migrations(database)
+            children = ChildrenDao(database)
+            child = await children.create("Ada", NOW)
+            created = await create_quest_definition(
+                database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+            )
+
+            armed["active"] = True
+            task_a = asyncio.ensure_future(
+                set_quest_definition_active(
+                    database, created.definition.id, False
+                )
+            )
+            await a_started.wait()
+            armed["active"] = False
+            task_b = asyncio.ensure_future(
+                set_quest_definition_active(
+                    database, created.definition.id, True
+                )
+            )
+            await asyncio.sleep(0)
+            gate_open.set()
+            record_a, record_b = await asyncio.gather(task_a, task_b)
+
+            # Each caller gets back exactly the state it requested.
+            assert record_a.definition.is_active is False
+            assert record_b.definition.is_active is True
+            # Both snapshots stay coherent: the decoded rule and the
+            # assignees are those of the definition they were read from.
+            assert record_a.rule == _daily_rule()
+            assert record_b.rule == _daily_rule()
+            assert [c.id for c in record_a.assignees] == [child.id]
+            assert [c.id for c in record_b.assignees] == [child.id]
+            # B landed last: the stored row is B's (read via the DAO —
+            # the four-table leak guard forbids raw probes here).
+            stored = await QuestDefinitionsDao(database).get(
+                created.definition.id
+            )
+            assert stored is not None
+            assert stored.is_active is True
+        finally:
+            await database.close()
+
+    _run(_main())
