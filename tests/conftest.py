@@ -307,6 +307,51 @@ def _async_track_time_change(hass, action, hour=None, minute=None, second=None):
 _ha_mock("homeassistant.helpers.event").async_track_time_change = _async_track_time_change
 
 
+class ServiceRegistry:
+    """Models HA's ``hass.services`` service registry.
+
+    ``async_register`` stores a handler under its (domain, service) key,
+    ``has_service`` reports registration, and ``async_unregister`` removes
+    it.  ``async_remove`` is the deprecated HA alias, kept so either
+    spelling resolves.  ``call`` invokes a stored handler the way HA's
+    service bus would — awaiting a coroutine result — so tests can exercise
+    a registered service end-to-end.
+    """
+
+    def __init__(self, hass=None):
+        self._hass = hass
+        self._services: dict[tuple[str, str], object] = {}
+
+    def async_register(self, domain, service, func, schema=None, supports_response=None):
+        self._services[(domain, service)] = func
+        return None
+
+    def has_service(self, domain, service):
+        return (domain, service) in self._services
+
+    def async_unregister(self, domain, service):
+        self._services.pop((domain, service), None)
+        return None
+
+    def async_remove(self, domain, service):
+        return self.async_unregister(domain, service)
+
+    async def call(self, domain, service, data=None):
+        func = self._services.get((domain, service))
+        if func is None:
+            raise KeyError(f"service {domain}.{service} not registered")
+        call = SimpleNamespace(domain=domain, service=service, data=data or {})
+        result = func(call)
+        if inspect.isawaitable(result):
+            await result
+        return result
+
+    @property
+    def registered_services(self):
+        """The registered (domain, service) pairs."""
+        return list(self._services)
+
+
 def make_config_entry(
     entry_id: str = "test_entry",
     options: dict | None = None,
@@ -369,6 +414,7 @@ def make_hass() -> tuple:
     hass.async_add_executor_job = _run_executor_job
     registry = ListenerRegistry(hass)
     hass.time_change = TimeChangeRegistry(hass)
+    hass.services = ServiceRegistry(hass)
     # A valid IANA time zone (the day-rollover listener reads it to
     # compute "today" in HA local time).
     hass.config.time_zone = "UTC"

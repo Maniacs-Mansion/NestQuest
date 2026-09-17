@@ -9,6 +9,9 @@ LOGGER = logging.getLogger(LOGGER_NAME)
 
 PLATFORMS: list[str] = []
 
+#: Service name for the on-demand regeneration service (``nestquest.regenerate``).
+SERVICE_REGENERATE = "regenerate"
+
 SQLITE_DB_FILENAME = "nestquest.db"
 
 # Configuration keys and default values

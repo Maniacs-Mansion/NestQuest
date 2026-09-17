@@ -23,6 +23,7 @@ from .const import (
     DEFAULT_HORIZON_DAYS,
     DOMAIN,
     LOGGER,
+    SERVICE_REGENERATE,
 )
 from .db import NestQuestDatabase
 from .materialize import materialize as _materialize_run
@@ -236,6 +237,7 @@ class NestQuestRuntimeData:
     database: NestQuestDatabase
     remove_update_listener: Callable[[], Any]
     remove_time_change_listener: Callable[[], Any]
+    remove_service_listener: Callable[[], Any]
 
 
 async def _async_owner_user_ids(hass: HomeAssistant) -> list[str]:
@@ -272,6 +274,29 @@ def _day_rollover_hour_minute(options: dict[str, Any]) -> tuple[int, int]:
     return int(hour), int(minute)
 
 
+async def _run_horizon_materialization(
+    hass: HomeAssistant, database: NestQuestDatabase
+) -> None:
+    """Materialize the rolling horizon ``[today, today + DEFAULT_HORIZON_DAYS]``.
+
+    "today" is computed in HA local time (``hass.config.time_zone``) rather
+    than the system clock, so the horizon tracks the household's own day.
+    The walk itself runs through :func:`~.materialize.materialize`, whose DB
+    access is executor-only.
+
+    This is the ONE generation path: the startup backfill, the daily rollover
+    listener and the ``regenerate`` service all funnel through it, so there is
+    no duplicated materialization logic.
+    """
+    time_zone = ZoneInfo(hass.config.time_zone)
+    today = datetime.datetime.now(time_zone).date()
+    start_date = today.isoformat()
+    end_date = (
+        today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+    ).isoformat()
+    await _materialize_run(database, start_date, end_date)
+
+
 def _register_day_rollover_listener(
     hass: HomeAssistant,
     database: NestQuestDatabase,
@@ -280,26 +305,44 @@ def _register_day_rollover_listener(
     """Register the daily materialization listener and return its remover.
 
     Fires once per day at the configured local ``day_rollover_time`` and
-    materializes the rolling horizon ``[today, today + DEFAULT_HORIZON_DAYS]``.
-    "today" is computed in HA local time (``hass.config.time_zone``) rather
-    than the system clock, so the horizon tracks the household's own day.
-    The walk itself runs through :func:`~.materialize.materialize`, whose DB
-    access is executor-only.
+    materializes the rolling horizon ``[today, today + DEFAULT_HORIZON_DAYS]``
+    through the shared :func:`_run_horizon_materialization` path.
     """
     hour, minute = _day_rollover_hour_minute(options)
 
     async def _run_materialization(_now: datetime.datetime) -> None:
-        time_zone = ZoneInfo(hass.config.time_zone)
-        today = datetime.datetime.now(time_zone).date()
-        start_date = today.isoformat()
-        end_date = (
-            today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
-        ).isoformat()
-        await _materialize_run(database, start_date, end_date)
+        await _run_horizon_materialization(hass, database)
 
     return async_track_time_change(
         hass, _run_materialization, hour=hour, minute=minute
     )
+
+
+def _register_regenerate_service(
+    hass: HomeAssistant,
+    database: NestQuestDatabase,
+) -> Callable[[], Any]:
+    """Register ``nestquest.regenerate`` and return its unregister callable.
+
+    The service triggers a full on-demand regeneration over the rolling
+    horizon, running the SAME idempotent materialize path
+    (:func:`_run_horizon_materialization`) as the startup backfill and the
+    daily rollover listener.  Registration is guarded by ``has_service`` so a
+    reload can never leave a duplicate; the returned remover deregisters the
+    service (idempotently) so unload leaves no stale entry behind.
+    """
+    if not hass.services.has_service(DOMAIN, SERVICE_REGENERATE):
+
+        async def _regenerate(_call: Any) -> None:
+            await _run_horizon_materialization(hass, database)
+
+        hass.services.async_register(DOMAIN, SERVICE_REGENERATE, _regenerate)
+
+    def _unregister() -> None:
+        if hass.services.has_service(DOMAIN, SERVICE_REGENERATE):
+            hass.services.async_unregister(DOMAIN, SERVICE_REGENERATE)
+
+    return _unregister
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
@@ -387,6 +430,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         remove_time_change_listener = _register_day_rollover_listener(
             hass, database, dict(entry.options)
         )
+        # Backfill any days the daily listener missed while the integration
+        # was off (or freshly installed): run the one idempotent walk over
+        # [today, today + DEFAULT_HORIZON_DAYS] once at setup.  This runs
+        # through the SAME path as the daily listener and regenerate service.
+        await _run_horizon_materialization(hass, database)
+        remove_service_listener = _register_regenerate_service(hass, database)
     except BaseException:
         await database.close()
         raise
@@ -396,6 +445,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         database=database,
         remove_update_listener=remove_update_listener,
         remove_time_change_listener=remove_time_change_listener,
+        remove_service_listener=remove_service_listener,
     )
     entry.runtime_data = runtime_data
     hass.data[DOMAIN][entry.entry_id] = runtime_data
@@ -415,11 +465,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         remove_time_change_listener = getattr(
             runtime_data, "remove_time_change_listener", None
         )
+        remove_service_listener = getattr(
+            runtime_data, "remove_service_listener", None
+        )
         unload_error: BaseException | None = None
         try:
             for remove_listener in (
                 remove_update_listener,
                 remove_time_change_listener,
+                remove_service_listener,
             ):
                 if remove_listener is None:
                     continue
