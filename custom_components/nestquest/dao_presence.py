@@ -277,3 +277,58 @@ class PresenceOverridesDao:
             (override_id,),
         )
         return result.rowcount > 0
+
+
+async def read_snapshot_unlocked(
+    database: NestQuestDatabase,
+    child_ids: list[int],
+    range_start: str,
+    range_end: str,
+) -> tuple[
+    dict[int, PresenceScheduleRecord],
+    dict[int, list[PresenceOverrideRecord]],
+]:
+    """Read schedules and overrides for ``child_ids`` WITHOUT locking.
+
+    MUST be called inside the connection lock and an open transaction, so
+    the schedules and overrides returned here stay coherent with every
+    other table the caller reads inside that same transaction (the
+    materialization walk's single input snapshot does exactly that).  The
+    date range comes already validated by the caller.
+
+    Returns ``(schedules, overrides)``:
+
+    - ``schedules`` maps ``child_id`` to its :class:`PresenceScheduleRecord`
+      for every child that HAS a schedule row.  A child absent from the
+      mapping has no schedule, i.e. is present every day (Feature 05).
+    - ``overrides`` maps ``child_id`` to that child's overrides overlapping
+      ``[range_start, range_end]`` (inclusive boundaries), ordered by start
+      date; a child with no matching override is absent from the mapping.
+
+    ``child_ids`` must name existing children (the caller derives them
+    from a trusted snapshot, within the same transaction).
+    """
+    children = sorted(set(child_ids))
+    if not children:
+        return {}, {}
+    placeholders = ",".join("?" for _ in children)
+    schedule_rows = await database.fetch_all(
+        f"SELECT {_SCHEDULE_COLUMNS} FROM presence_schedules "
+        f"WHERE child_id IN ({placeholders})",
+        tuple(children),
+    )
+    override_rows = await database.fetch_all(
+        f"SELECT {_OVERRIDE_COLUMNS} FROM presence_overrides "
+        f"WHERE child_id IN ({placeholders}) AND end_date >= ? "
+        "AND start_date <= ? ORDER BY start_date",
+        tuple(children) + (range_start, range_end),
+    )
+    schedules = {
+        record.child_id: record
+        for record in map(_schedule_from_row, schedule_rows)
+    }
+    overrides: dict[int, list[PresenceOverrideRecord]] = {}
+    for row in override_rows:
+        record = _override_from_row(row)
+        overrides.setdefault(record.child_id, []).append(record)
+    return schedules, overrides

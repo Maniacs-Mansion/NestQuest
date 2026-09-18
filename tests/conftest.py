@@ -44,6 +44,7 @@ _HA_MODULES = (
     "homeassistant.exceptions",
     "homeassistant.helpers",
     "homeassistant.helpers.config_validation",
+    "homeassistant.helpers.event",
 )
 
 def _find_spec(name: str):
@@ -83,6 +84,7 @@ for _parent, _child in (
     ("homeassistant", "exceptions"),
     ("homeassistant", "helpers"),
     ("homeassistant.helpers", "config_validation"),
+    ("homeassistant.helpers", "event"),
 ):
     setattr(sys.modules[_parent], _child, sys.modules[f"{_parent}.{_child}"])
 
@@ -242,6 +244,113 @@ class ListenerRegistry:
         return sum(len(listeners) for listeners in self._listeners.values())
 
 
+class TimeChangeRegistry:
+    """Models HA's time-change listener bookkeeping.
+
+    ``track`` mirrors ``homeassistant.helpers.event.async_track_time_change``:
+    each call appends a record (action + hour/minute/second) and returns
+    a remove callable that reverses the registration.  Tests inspect
+    ``registrations`` and exercise the newest action through :meth:`fire`.
+    """
+
+    def __init__(self, hass=None):
+        self._hass = hass
+        self._registrations: list[dict] = []
+
+    def track(self, action, hour=None, minute=None, second=None):
+        record = {
+            "action": action,
+            "hour": hour,
+            "minute": minute,
+            "second": second,
+        }
+
+        def _remove():
+            self._registrations.remove(record)
+
+        record["remove"] = _remove
+        self._registrations.append(record)
+        return _remove
+
+    @property
+    def registrations(self):
+        """Return a copy of the live registrations."""
+        return list(self._registrations)
+
+    @property
+    def size(self) -> int:
+        """Number of live registrations."""
+        return len(self._registrations)
+
+    async def fire(self, now=None, index: int = -1):
+        """Run a registered action as HA's scheduler would, awaiting coroutines."""
+        result = self._registrations[index]["action"](now)
+        if inspect.isawaitable(result):
+            await result
+
+
+def _async_track_time_change(hass, action, hour=None, minute=None, second=None):
+    """Mirror homeassistant.helpers.event.async_track_time_change.
+
+    Exact HA 2024.6 signature — no ``local`` keyword: the local-time
+    wrapper is already this function.  Routes to the registry attached to
+    ``hass`` (created on demand), so tests reach the registrations via
+    ``hass.time_change``.
+    """
+    registry = getattr(hass, "time_change", None)
+    if registry is None:
+        registry = TimeChangeRegistry(hass)
+        hass.time_change = registry
+    return registry.track(action, hour=hour, minute=minute, second=second)
+
+
+_ha_mock("homeassistant.helpers.event").async_track_time_change = _async_track_time_change
+
+
+class ServiceRegistry:
+    """Models HA's ``hass.services`` service registry.
+
+    ``async_register`` stores a handler under its (domain, service) key,
+    ``has_service`` reports registration, and ``async_remove`` removes it
+    — exactly the surface Home Assistant's ``ServiceRegistry`` exposes
+    (there is deliberately NO ``async_unregister`` alias here, so a caller
+    that uses the wrong method name fails instead of being silently
+    papered over).  ``call`` invokes a stored handler the way HA's service
+    bus would — awaiting a coroutine result — so tests can exercise a
+    registered service end-to-end.
+    """
+
+    def __init__(self, hass=None):
+        self._hass = hass
+        self._services: dict[tuple[str, str], object] = {}
+
+    def async_register(self, domain, service, func, schema=None, supports_response=None):
+        self._services[(domain, service)] = func
+        return None
+
+    def has_service(self, domain, service):
+        return (domain, service) in self._services
+
+    def async_remove(self, domain, service):
+        self._services.pop((domain, service), None)
+        return None
+
+    async def call(self, domain, service, data=None):
+        func = self._services.get((domain, service))
+        if func is None:
+            raise KeyError(f"service {domain}.{service} not registered")
+        call = SimpleNamespace(domain=domain, service=service, data=data or {})
+        result = func(call)
+        if inspect.isawaitable(result):
+            await result
+        return result
+
+    @property
+    def registered_services(self):
+        """The registered (domain, service) pairs."""
+        return list(self._services)
+
+
 def make_config_entry(
     entry_id: str = "test_entry",
     options: dict | None = None,
@@ -303,6 +412,11 @@ def make_hass() -> tuple:
 
     hass.async_add_executor_job = _run_executor_job
     registry = ListenerRegistry(hass)
+    hass.time_change = TimeChangeRegistry(hass)
+    hass.services = ServiceRegistry(hass)
+    # A valid IANA time zone (the day-rollover listener reads it to
+    # compute "today" in HA local time).
+    hass.config.time_zone = "UTC"
 
     async def _async_reload(entry_id: str) -> None:
         registry.reloaded.append(entry_id)

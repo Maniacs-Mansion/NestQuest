@@ -47,6 +47,46 @@ from .db import NestQuestDatabase
 _UTC_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S+00:00"
 
 
+def _today() -> datetime.date:
+    """Return the current local calendar date (the single date source).
+
+    Every "today" read in this module goes through this one function so
+    the delete clamp and the materialize walk's no-past guard read the
+    same clock, and a caller or test can pin/roll that clock
+    deterministically (e.g. a queued-across-midnight regression).  Pure
+    clock read — no business rule lives here.
+    """
+    return datetime.date.today()
+
+
+def _resolve_today(today: datetime.date | None) -> datetime.date:
+    """Return the caller-resolved "today", or the host date when absent.
+
+    The no-past guard and the delete cutoffs must compare due dates
+    against the SAME calendar date the materialization horizon was built
+    from.  Home Assistant's configured time zone can lag the host clock
+    around midnight, so when the caller has already resolved the local
+    date (``today``) that anchor is authoritative; ``None`` falls back to
+    the host clock (:func:`_today`), which is exactly the previous
+    behavior for callers with no HA-local date.
+    """
+    return _today() if today is None else today
+
+
+def _reject_past(due_date: str, today_iso: str) -> None:
+    """Raise unless ``due_date`` is on or after ``today_iso``.
+
+    The single no-past rule shared by :meth:`QuestInstancesDao.upsert`
+    and :meth:`QuestInstancesDao.upsert_if_valid`: instances are never
+    generated in the past, measured against the resolved "today".
+    """
+    if due_date < today_iso:
+        raise ValueError(
+            f"instances are never generated in the past: due_date "
+            f"{due_date!r} is before today {today_iso!r}"
+        )
+
+
 def _validate_utc_timestamp(value: str, field: str) -> None:
     """Raise ValueError unless ``value`` is a strict UTC ISO-8601 stamp.
 
@@ -166,6 +206,7 @@ class QuestInstancesDao:
         *,
         window: str,
         due_time: str | None = None,
+        today: datetime.date | None = None,
     ) -> QuestInstanceRecord:
         """Create the dated instance for the widened key idempotently.
 
@@ -184,6 +225,10 @@ class QuestInstancesDao:
         - ``due_date`` must be TODAY or later: instances are never
           generated in the past (Feature 07).  The caller's
           materialization horizon is future-dated by definition.
+          ``today`` optionally pins the resolved HA-local date the
+          guard compares against (falling back to the host clock when
+          omitted) so a household time zone behind the host around
+          midnight is not misread as "past".
         - ``window`` must be one of ``const.QUEST_WINDOWS``.
         - An existing instance WITH a completion event is IMMUTABLE:
           the conflict path must not rewrite its snapshot columns
@@ -203,24 +248,20 @@ class QuestInstancesDao:
         # check runs after the lock is acquired, because a caller can
         # wait on the lock across midnight — a date that was "today"
         # at call time may be "yesterday" by the time the INSERT runs.
-        today = datetime.date.today().isoformat()
-        if due_date < today:
-            raise ValueError(
-                f"instances are never generated in the past: due_date "
-                f"{due_date!r} is before today {today!r}"
-            )
+        # A caller-supplied ``today`` (HA-local) is used for BOTH
+        # checks and never re-read, since it is already the anchor the
+        # batch runs against.
+        today_date = _resolve_today(today)
+        _reject_past(due_date, today_date.isoformat())
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 # Re-read "today" under the lock: this is the date the
                 # insert actually executes on, so the no-past rule
-                # holds across midnight rollovers.
-                today = datetime.date.today().isoformat()
-                if due_date < today:
-                    raise ValueError(
-                        f"instances are never generated in the past: "
-                        f"due_date {due_date!r} is before today "
-                        f"{today!r}"
-                    )
+                # holds across midnight rollovers.  A pinned HA-local
+                # anchor is exempt from the re-read (see above).
+                if today is None:
+                    today_date = _today()
+                _reject_past(due_date, today_date.isoformat())
                 definition = await self._database.fetch_one(
                     "SELECT 1 FROM quest_definitions WHERE id = ?",
                     (definition_id,),
@@ -254,6 +295,123 @@ class QuestInstancesDao:
                         f"window {window!r}) already has a completion "
                         "event and is immutable; it cannot be regenerated"
                     )
+                await self._database.execute(
+                    "INSERT INTO quest_instances (definition_id, child_id, "
+                    "window, due_date, due_time, generated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (definition_id, child_id, due_date, "
+                    "window) DO UPDATE SET "
+                    "due_time = excluded.due_time, "
+                    "generated_at = excluded.generated_at",
+                    (
+                        definition_id,
+                        child_id,
+                        window,
+                        due_date,
+                        due_time,
+                        generated_at,
+                    ),
+                )
+                instance = await self.get(
+                    definition_id, child_id, due_date, window
+                )
+        assert instance is not None
+        return instance
+
+    async def upsert_if_valid(
+        self,
+        definition_id: int,
+        child_id: int,
+        due_date: str,
+        generated_at: str,
+        *,
+        window: str,
+        due_time: str | None = None,
+        today: datetime.date | None = None,
+    ) -> QuestInstanceRecord | None:
+        """Insert one dated instance iff its tuple is still materializable.
+
+        This is the materialization walk's single write path.  Unlike the
+        generic :meth:`upsert`, which validates only existence and
+        assignment, this method re-validates EVERY materialization
+        precondition in the SAME connection-lock-held transaction as the
+        INSERT — closing the check-then-insert gap a concurrent config
+        write could otherwise slip through:
+
+        - the definition exists AND is active (a definition deactivated
+          after the input snapshot is skipped, never written);
+        - the child exists AND is active (a deactivated child is skipped);
+        - the (definition, child) assignment link still exists (a removed
+          assignment is skipped);
+        - the window is still declared on the definition (a removed window
+          is skipped);
+        - the window's live ``due_time`` still EQUALS the caller-supplied
+          ``due_time`` (NULL-safe: NULL == NULL counts as equal; a window
+          with no due time matches a snapshot with no due time).  A
+          window-time edit landed after the input snapshot makes the
+          caller's ``due_time`` stale, and writing it would overwrite the
+          newer due_time a concurrent regeneration already upserted — so
+          the tuple is skipped instead of written.
+
+        The due_time check closes the one check-then-insert gap this
+        method previously left open: it re-validated every OTHER
+        precondition but then wrote the snapshot's ``due_time``
+        unconditionally, so a stale materialization could clobber a
+        newer, concurrently-regenerated due_time.
+
+        Returns the stored instance, or ``None`` when a precondition
+        failed — the tuple no longer materializable, which the walk SKIPS
+        rather than raising, so the rest of the batch is unaffected.  The
+        no-past rule (instances are never generated in the past) is
+        preserved from :meth:`upsert` and still raises ValueError; ``today``
+        optionally pins the HA-local anchor it compares against.  An
+        instance that ALREADY has a completion event is also skipped
+        (returns ``None``) rather than raised: it is immutable, so the
+        walk leaves it untouched instead of failing the batch — the
+        generic :meth:`upsert` keeps its hard refusal for the
+        delete/regenerate path.
+        """
+        _validate_date(due_date, "due_date")
+        _validate_window(window)
+        # Fail fast on obviously-past dates before queuing on the lock;
+        # the authoritative check re-runs under the lock (see upsert).
+        today_date = _resolve_today(today)
+        _reject_past(due_date, today_date.isoformat())
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                if today is None:
+                    today_date = _today()
+                _reject_past(due_date, today_date.isoformat())
+                still_valid = await self._database.fetch_one(
+                    "SELECT 1 FROM quest_definitions d "
+                    "JOIN quest_definition_assignees a "
+                    "ON a.definition_id = d.id "
+                    "JOIN children c ON c.id = a.child_id "
+                    "JOIN quest_definition_windows w "
+                    "ON w.definition_id = d.id "
+                    "WHERE d.id = ? AND a.child_id = ? AND w.window = ? "
+                    "AND d.is_active = 1 AND c.is_active = 1 "
+                    "AND w.due_time IS ? LIMIT 1",
+                    (definition_id, child_id, window, due_time),
+                )
+                if still_valid is None:
+                    # A config change invalidated the tuple since the
+                    # snapshot: skip it rather than abort the batch.
+                    return None
+                existing = await self._database.fetch_one(
+                    "SELECT 1 FROM completion_events "
+                    "WHERE instance_id = (SELECT id FROM quest_instances "
+                    "WHERE definition_id = ? AND child_id = ? "
+                    "AND due_date = ? AND window = ?)",
+                    (definition_id, child_id, due_date, window),
+                )
+                if existing is not None:
+                    # The instance is already completed and therefore
+                    # immutable: the walk SKIPS it (no-op) rather than
+                    # rewriting its snapshot columns or failing the
+                    # batch.  This is the materialization walk's skip,
+                    # distinct from the generic :meth:`upsert` refusal.
+                    return None
                 await self._database.execute(
                     "INSERT INTO quest_instances (definition_id, child_id, "
                     "window, due_date, due_time, generated_at) "
@@ -336,7 +494,7 @@ class QuestInstancesDao:
         return [_instance_from_row(row) for row in rows]
 
     async def delete_future_uncompleted(
-        self, definition_id: int, cutoff_date: str
+        self, definition_id: int, cutoff_date: str, *, today: datetime.date | None = None
     ) -> int:
         """Delete the definition's open instances at/after cutoff.
 
@@ -348,9 +506,11 @@ class QuestInstancesDao:
         is measured against TODAY (materialization regenerates the
         rolling horizon from now), so a caller cannot use this to
         rewrite past open instances either — the day-rollover missed
-        sweep (Feature 11) handles past-due instances instead.  Any
-        instance with a completion event is never touched, regardless
-        of its date.  Returns the number deleted.
+        sweep (Feature 11) handles past-due instances instead.  ``today``
+        optionally pins the HA-local anchor the clamp compares against
+        (falling back to the host clock when omitted).  Any instance with
+        a completion event is never touched, regardless of its date.
+        Returns the number deleted.
         """
         _validate_date(cutoff_date, "cutoff_date")
         async with _connection_lock(self._database):
@@ -360,8 +520,8 @@ class QuestInstancesDao:
                 # midnight cannot delete instances that became past
                 # while it waited (backdating is clamped to the
                 # execution date, not the call date).
-                today = datetime.date.today().isoformat()
-                effective_cutoff = max(cutoff_date, today)
+                today_date = _resolve_today(today)
+                effective_cutoff = max(cutoff_date, today_date.isoformat())
                 result = await self._database.execute(
                     "DELETE FROM quest_instances WHERE definition_id = ? "
                     "AND due_date >= ? AND NOT EXISTS ("
@@ -371,6 +531,51 @@ class QuestInstancesDao:
                     (definition_id, effective_cutoff),
                 )
         return result.rowcount
+
+    async def delete_future_uncompleted_for_child(
+        self, child_id: int, cutoff_date: str, *, today: datetime.date | None = None
+    ) -> tuple[int, str]:
+        """Delete the child's open instances at/after cutoff, across every
+        definition, returning ``(deleted, effective_cutoff)``.
+
+        Child-scoped counterpart to :meth:`delete_future_uncompleted`,
+        used when a child's presence changes (Feature 09): only instances
+        at or after the cutoff with NO completion event are removed, inside
+        one transaction — an instance that gains a completion event
+        mid-flight cannot be deleted.  The cutoff cannot be backdated below
+        today, for the same reason as the definition-scoped method (see its
+        docstring).  ``today`` optionally pins the HA-local anchor the clamp
+        compares against (falling back to the host clock when omitted).
+        Any instance with a completion event is never touched, regardless
+        of its date.
+
+        Returns the number deleted and the effective cutoff that was
+        actually applied (``max(cutoff_date, today)``, read under the
+        lock).  The caller (:func:`~.materialize.regenerate_for_child`)
+        passes that effective cutoff back as its re-materialization anchor,
+        so the delete and the rebuild share ONE execution-day even when the
+        call is queued across midnight — instead of the caller re-reading a
+        stale "today" and materializing a window the delete already
+        superseded.
+        """
+        _validate_date(cutoff_date, "cutoff_date")
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                # "today" is read under the lock, matching the
+                # definition-scoped method: the DELETE executes on this
+                # date, so a caller queued across midnight cannot delete
+                # instances that became past while it waited.
+                today_date = _resolve_today(today)
+                effective_cutoff = max(cutoff_date, today_date.isoformat())
+                result = await self._database.execute(
+                    "DELETE FROM quest_instances WHERE child_id = ? "
+                    "AND due_date >= ? AND NOT EXISTS ("
+                    "  SELECT 1 FROM completion_events "
+                    "  WHERE instance_id = quest_instances.id"
+                    ")",
+                    (child_id, effective_cutoff),
+                )
+        return result.rowcount, effective_cutoff
 
 
 class CompletionEventsDao:
