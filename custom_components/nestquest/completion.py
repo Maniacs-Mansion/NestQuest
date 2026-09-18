@@ -4,11 +4,11 @@ Sits between the Feature 09 service gate and the typed
 :class:`~.dao_instances.CompletionEventsDao`: callers get actor-shape
 validation and the UTC occurred-at stamp here, and never talk to the
 DAO or SQL directly.  This module is the only Feature-08 caller of
-:meth:`~.dao_instances.CompletionEventsDao.append`.  Completing and
-un-completing an instance (no-op-if-already-done) arrive in later
-tasks.  Instance current state is derived from the latest event via
-:func:`instance_state` (``open`` / ``done``); there is no status
-column.
+:meth:`~.dao_instances.CompletionEventsDao.append`.  Completing an
+instance (no-op if already done) is :func:`complete_instance`;
+un-completing arrives in a later task.  Instance current state is
+derived from the latest event via :func:`instance_state`
+(``open`` / ``done``); there is no status column.
 
 Actor policy matches the schema CHECKs (D-008): ``actor_source`` is
 ``'user'`` or ``'panel'`` only — never ``'service'``.  ``'user'``
@@ -198,3 +198,50 @@ async def instance_state(
         f"event_type must be '{EVENT_COMPLETED}' or "
         f"'{EVENT_UNCOMPLETED}', got {latest.event_type!r}"
     )
+
+
+async def complete_instance(
+    database: NestQuestDatabase,
+    instance_id: int,
+    *,
+    actor_source: str,
+    actor_user_id: str | None = None,
+    actor_child_id: int | None = None,
+    now: datetime.datetime | None = None,
+    today: datetime.date | None = None,
+) -> str:
+    """Append a completed event unless the instance is already done.
+
+    Returns the derived state ``done``.  An already-done instance is a
+    no-op: nothing is appended.  Unknown ``instance_id`` raises
+    ValueError naming the field.
+
+    ``was_on_time`` is recorded as True — a placeholder until the
+    on-time task computes it from ``now`` / ``today`` against the
+    instance due_date and optional due_time.  ``today`` is accepted so
+    callers can thread the HA-local date through without a signature
+    change; it is unused here.
+    """
+    instance_id = _validate_int_id(instance_id, "instance_id")
+    actor_source, actor_user_id, actor_child_id = _validate_actor(
+        actor_source, actor_user_id, actor_child_id
+    )
+    instance = await QuestInstancesDao(database).get_by_id(instance_id)
+    if instance is None:
+        raise ValueError(
+            f"instance_id: quest instance {instance_id} does not exist"
+        )
+    if await instance_state(database, instance_id) == "done":
+        return "done"
+    await append_event(
+        database,
+        instance.id,
+        instance.child_id,
+        EVENT_COMPLETED,
+        actor_source=actor_source,
+        actor_user_id=actor_user_id,
+        actor_child_id=actor_child_id,
+        was_on_time=True,
+        now=now,
+    )
+    return "done"
