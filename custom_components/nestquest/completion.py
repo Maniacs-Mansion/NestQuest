@@ -35,6 +35,7 @@ from .dao_instances import (
     EVENT_UNCOMPLETED,
     CompletionEventRecord,
     CompletionEventsDao,
+    QuestInstanceRecord,
     QuestInstancesDao,
 )
 from .db import NestQuestDatabase
@@ -62,6 +63,64 @@ def _stamp_occurred_at(now: datetime.datetime | None) -> str:
     return now.astimezone(datetime.timezone.utc).strftime(
         _UTC_TIMESTAMP_FORMAT
     )
+
+
+def _completion_moment(
+    now: datetime.datetime | None,
+    today: datetime.date | None,
+) -> tuple[datetime.date, datetime.time | None]:
+    """Return the HA-local completion date and optional wall-clock time.
+
+    ``today`` is the HA-local calendar date when threaded (Feature 07
+    style).  ``now`` is a timezone-aware HA-local datetime; its wall
+    clock is used as-is and is never converted to UTC.  When ``today``
+    is omitted the date comes from ``now``.  When both are omitted the
+    host calendar date is the Feature 07 fallback — never the UTC
+    clock.  Time-of-day is None unless ``now`` is supplied; comparing
+    against ``due_time`` requires ``now``.
+    """
+    if now is not None:
+        if not isinstance(now, datetime.datetime):
+            raise ValueError(f"now must be a datetime, got {now!r}")
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+    if today is not None:
+        completion_date = today
+    elif now is not None:
+        completion_date = now.date()
+    else:
+        completion_date = datetime.date.today()
+    if now is None:
+        return completion_date, None
+    return completion_date, now.time()
+
+
+def _was_on_time(
+    instance: QuestInstanceRecord,
+    now: datetime.datetime | None,
+    today: datetime.date | None,
+) -> bool:
+    """Return whether the completion moment is on time for ``instance``.
+
+    On ``due_date`` before ``due_time`` is on time; on ``due_date``
+    after ``due_time``, or any later date, is late.  With no
+    ``due_time``, on time if the completion date equals ``due_date``
+    (or is earlier); late if after ``due_date``.  Same-day
+    ``due_time`` comparison requires ``now``; UTC time-of-day is never
+    substituted.
+    """
+    completion_date, completion_time = _completion_moment(now, today)
+    due_date = datetime.date.fromisoformat(instance.due_date)
+    if completion_date < due_date:
+        return True
+    if completion_date > due_date:
+        return False
+    if instance.due_time is None:
+        return True
+    if completion_time is None:
+        raise ValueError("now is required to compare due_time")
+    due_time = datetime.datetime.strptime(instance.due_time, "%H:%M").time()
+    return completion_time <= due_time
 
 
 class _TaskReentrantLock:
@@ -278,11 +337,11 @@ async def complete_instance(
     append run under one connection lock so a concurrent complete
     cannot double-append.
 
-    ``was_on_time`` is recorded as True — a placeholder until the
-    on-time task computes it from ``now`` / ``today`` against the
-    instance due_date and optional due_time.  ``today`` is accepted so
-    callers can thread the HA-local date through without a signature
-    change; it is unused here.
+    ``was_on_time`` is computed from the HA-local completion moment
+    (threaded ``now`` / ``today``) against the instance ``due_date``
+    and optional ``due_time``.  ``now`` is the timezone-aware HA-local
+    datetime; its wall clock is never converted to UTC.  Same-day
+    ``due_time`` comparison requires ``now``.
     """
     instance_id = _validate_int_id(instance_id, "instance_id")
     actor_source, actor_user_id, actor_child_id = _validate_actor(
@@ -312,7 +371,7 @@ async def complete_instance(
             actor_source=actor_source,
             actor_user_id=actor_user_id,
             actor_child_id=actor_child_id,
-            was_on_time=True,
+            was_on_time=_was_on_time(instance, now, today),
             now=now,
         )
     return "done"
