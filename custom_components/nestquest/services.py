@@ -11,8 +11,10 @@ the Feature 07 handler stays the one in ``__init__``.
 """
 from __future__ import annotations
 
+import datetime
 from collections.abc import Awaitable, Callable
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant
@@ -22,6 +24,8 @@ from . import children as children_layer
 from . import completion as completion_layer
 from . import quest_definitions as quest_definitions_layer
 from .const import (
+    CONF_HORIZON_DAYS,
+    DEFAULT_HORIZON_DAYS,
     DOMAIN,
     DOMAIN_SERVICES,
     QUEST_WINDOWS,
@@ -38,6 +42,7 @@ from .const import (
     SERVICE_UPDATE_QUEST_DEFINITION,
 )
 from .dao_presence import PresenceOverridesDao, PresenceSchedulesDao
+from .materialize import regenerate_for_child
 from .presence import PresenceSchedule
 from .recurrence import ScheduleRule
 
@@ -225,13 +230,24 @@ SCHEMA_MANAGE_CHILD = vol.Schema(
 )
 
 
-def _require_database(hass: HomeAssistant, find_runtime: FindRuntime):
+def _require_runtime(hass: HomeAssistant, find_runtime: FindRuntime):
     runtime = find_runtime(hass)
     if runtime is None:
         raise HomeAssistantError(
             "NestQuest has no live database; cannot run this service"
         )
-    return runtime.database
+    return runtime
+
+
+def _generation_kwargs(hass: HomeAssistant, runtime: Any) -> dict[str, Any]:
+    time_zone = ZoneInfo(hass.config.time_zone)
+    today = datetime.datetime.now(time_zone).date()
+    value = runtime.options.get(CONF_HORIZON_DAYS, DEFAULT_HORIZON_DAYS)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        horizon_days = DEFAULT_HORIZON_DAYS
+    else:
+        horizon_days = value
+    return {"today": today, "horizon_days": horizon_days}
 
 
 def _actor_kwargs(call: Any) -> dict[str, Any]:
@@ -274,7 +290,7 @@ def _complete_quest(
     hass: HomeAssistant, find_runtime: FindRuntime
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
-        database = _require_database(hass, find_runtime)
+        database = _require_runtime(hass, find_runtime).database
         await completion_layer.complete_instance(
             database,
             call.data["instance_id"],
@@ -288,7 +304,7 @@ def _uncomplete_quest(
     hass: HomeAssistant, find_runtime: FindRuntime
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
-        database = _require_database(hass, find_runtime)
+        database = _require_runtime(hass, find_runtime).database
         await completion_layer.uncomplete_instance(
             database,
             call.data["instance_id"],
@@ -302,7 +318,7 @@ def _create_quest_definition(
     hass: HomeAssistant, find_runtime: FindRuntime
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
-        database = _require_database(hass, find_runtime)
+        database = _require_runtime(hass, find_runtime).database
         data = call.data
         await quest_definitions_layer.create_quest_definition(
             database,
@@ -321,9 +337,9 @@ def _update_quest_definition(
     hass: HomeAssistant, find_runtime: FindRuntime
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
-        database = _require_database(hass, find_runtime)
+        runtime = _require_runtime(hass, find_runtime)
         data = call.data
-        kwargs: dict[str, Any] = {}
+        kwargs: dict[str, Any] = _generation_kwargs(hass, runtime)
         if "title" in data:
             kwargs["title"] = data["title"]
         if "description" in data:
@@ -335,7 +351,7 @@ def _update_quest_definition(
         if "windows" in data:
             kwargs["windows"] = data["windows"]
         await quest_definitions_layer.edit_quest_definition(
-            database, data["definition_id"], **kwargs
+            runtime.database, data["definition_id"], **kwargs
         )
 
     return _with_errors(_handler)
@@ -345,11 +361,12 @@ def _set_quest_definition_active(
     hass: HomeAssistant, find_runtime: FindRuntime
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
-        database = _require_database(hass, find_runtime)
+        runtime = _require_runtime(hass, find_runtime)
         await quest_definitions_layer.set_quest_definition_active(
-            database,
+            runtime.database,
             call.data["definition_id"],
             call.data["is_active"],
+            **_generation_kwargs(hass, runtime),
         )
 
     return _with_errors(_handler)
@@ -359,7 +376,7 @@ def _set_presence_pattern(
     hass: HomeAssistant, find_runtime: FindRuntime
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
-        database = _require_database(hass, find_runtime)
+        runtime = _require_runtime(hass, find_runtime)
         data = call.data
         schedule = PresenceSchedule(
             data["child_id"],
@@ -367,11 +384,16 @@ def _set_presence_pattern(
             data["anchor_date"],
             data["pattern"],
         )
-        await PresenceSchedulesDao(database).upsert_by_child(
+        await PresenceSchedulesDao(runtime.database).upsert_by_child(
             schedule.child_id,
             schedule.cycle_length_weeks,
             schedule.anchor_date.isoformat(),
             schedule.encode(),
+        )
+        await regenerate_for_child(
+            runtime.database,
+            schedule.child_id,
+            **_generation_kwargs(hass, runtime),
         )
 
     return _with_errors(_handler)
@@ -381,14 +403,19 @@ def _create_presence_override(
     hass: HomeAssistant, find_runtime: FindRuntime
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
-        database = _require_database(hass, find_runtime)
+        runtime = _require_runtime(hass, find_runtime)
         data = call.data
-        await PresenceOverridesDao(database).create(
+        await PresenceOverridesDao(runtime.database).create(
             data["child_id"],
             data["start_date"],
             data["end_date"],
             data["is_present"],
             note=data.get("note"),
+        )
+        await regenerate_for_child(
+            runtime.database,
+            data["child_id"],
+            **_generation_kwargs(hass, runtime),
         )
 
     return _with_errors(_handler)
@@ -398,8 +425,20 @@ def _delete_presence_override(
     hass: HomeAssistant, find_runtime: FindRuntime
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
-        database = _require_database(hass, find_runtime)
-        await PresenceOverridesDao(database).delete(call.data["override_id"])
+        runtime = _require_runtime(hass, find_runtime)
+        dao = PresenceOverridesDao(runtime.database)
+        override_id = call.data["override_id"]
+        override = await dao.get(override_id)
+        if override is None:
+            raise HomeAssistantError(
+                f"override_id: presence override {override_id} does not exist"
+            )
+        await dao.delete(override_id)
+        await regenerate_for_child(
+            runtime.database,
+            override.child_id,
+            **_generation_kwargs(hass, runtime),
+        )
 
     return _with_errors(_handler)
 
@@ -414,7 +453,7 @@ def _manage_child(
     hass: HomeAssistant, find_runtime: FindRuntime
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
-        database = _require_database(hass, find_runtime)
+        database = _require_runtime(hass, find_runtime).database
         data = call.data
         action = data["action"]
         if action == MANAGE_CHILD_CREATE:

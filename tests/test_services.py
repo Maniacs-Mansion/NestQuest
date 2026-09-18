@@ -15,10 +15,13 @@ from custom_components.nestquest.const import (
     DOMAIN,
     DOMAIN_SERVICES,
     SERVICE_COMPLETE_QUEST,
+    SERVICE_CREATE_PRESENCE_OVERRIDE,
     SERVICE_CREATE_QUEST_DEFINITION,
+    SERVICE_DELETE_PRESENCE_OVERRIDE,
     SERVICE_EXPORT_HISTORY_CSV,
     SERVICE_MANAGE_CHILD,
     SERVICE_REGENERATE,
+    SERVICE_SET_PRESENCE_PATTERN,
     SERVICE_SET_QUEST_DEFINITION_ACTIVE,
     SERVICE_UNCOMPLETE_QUEST,
 )
@@ -244,6 +247,123 @@ async def test_complete_and_uncomplete_quest_call_business_layer(
         await instance_state(entry.runtime_data.database, instance_id)
         == "open"
     )
+
+
+async def test_set_presence_pattern_regenerates_child_instances(
+    hass, make_entry
+) -> None:
+    import datetime
+
+    from custom_components.nestquest.children import list_children
+    from custom_components.nestquest.const import DEFAULT_HORIZON_DAYS
+    from custom_components.nestquest.dao_instances import QuestInstancesDao
+
+    entry = _wire(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_MANAGE_CHILD,
+        {"action": "create", "display_name": "Ada"},
+    )
+    child = (await list_children(entry.runtime_data.database))[0]
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_CREATE_QUEST_DEFINITION,
+        {
+            "title": "Brush teeth",
+            "rule": {"rule_type": "daily"},
+            "assignee_child_ids": [child.id],
+            "windows": ["morning"],
+        },
+    )
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+    today = datetime.date.today().isoformat()
+    end = (
+        datetime.date.today() + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+    ).isoformat()
+    dao = QuestInstancesDao(entry.runtime_data.database)
+    assert await dao.list_by_date_range(child.id, today, end)
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_SET_PRESENCE_PATTERN,
+        {
+            "child_id": child.id,
+            "cycle_length_weeks": 1,
+            "anchor_date": today,
+            "pattern": {0: []},
+        },
+    )
+    assert await dao.list_by_date_range(child.id, today, end) == []
+
+
+async def test_presence_override_create_and_delete_regenerate(
+    hass, make_entry
+) -> None:
+    import datetime
+
+    from custom_components.nestquest.children import list_children
+    from custom_components.nestquest.const import DEFAULT_HORIZON_DAYS
+    from custom_components.nestquest.dao_instances import QuestInstancesDao
+    from custom_components.nestquest.dao_presence import PresenceOverridesDao
+
+    entry = _wire(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_MANAGE_CHILD,
+        {"action": "create", "display_name": "Ada"},
+    )
+    child = (await list_children(entry.runtime_data.database))[0]
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_CREATE_QUEST_DEFINITION,
+        {
+            "title": "Brush teeth",
+            "rule": {"rule_type": "daily"},
+            "assignee_child_ids": [child.id],
+            "windows": ["morning"],
+        },
+    )
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+    today = datetime.date.today()
+    end = today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+    dao = QuestInstancesDao(entry.runtime_data.database)
+    before = await dao.list_by_date_range(
+        child.id, today.isoformat(), end.isoformat()
+    )
+    assert before
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_CREATE_PRESENCE_OVERRIDE,
+        {
+            "child_id": child.id,
+            "start_date": today.isoformat(),
+            "end_date": end.isoformat(),
+            "is_present": False,
+        },
+    )
+    assert (
+        await dao.list_by_date_range(
+            child.id, today.isoformat(), end.isoformat()
+        )
+        == []
+    )
+    override = (
+        await PresenceOverridesDao(
+            entry.runtime_data.database
+        ).list_by_child_and_range(
+            child.id, today.isoformat(), end.isoformat()
+        )
+    )[0]
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_DELETE_PRESENCE_OVERRIDE,
+        {"override_id": override.id},
+    )
+    after = await dao.list_by_date_range(
+        child.id, today.isoformat(), end.isoformat()
+    )
+    assert len(after) == len(before)
 
 
 async def test_export_history_csv_raises_home_assistant_error(
