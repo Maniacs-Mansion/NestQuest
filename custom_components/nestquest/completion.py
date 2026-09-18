@@ -6,9 +6,10 @@ validation and the UTC occurred-at stamp here, and never talk to the
 DAO or SQL directly.  This module is the only Feature-08 caller of
 :meth:`~.dao_instances.CompletionEventsDao.append`.  Completing an
 instance (no-op if already done) is :func:`complete_instance`;
-un-completing arrives in a later task.  Instance current state is
-derived from the latest event via :func:`instance_state`
-(``open`` / ``done``); there is no status column.
+un-completing (no-op if already open) is :func:`uncomplete_instance`.
+Instance current state is derived from the latest event via
+:func:`instance_state` (``open`` / ``done``); there is no status
+column.
 
 Actor policy matches the schema CHECKs (D-008): ``actor_source`` is
 ``'user'`` or ``'panel'`` only — never ``'service'``.  ``'user'``
@@ -104,9 +105,10 @@ def _reentrant_connection_lock(database) -> _TaskReentrantLock:
     """Return the shared connection lock, made task-reentrant.
 
     ``CompletionEventsDao.append`` also acquires this lock, so
-    check+append in :func:`complete_instance` must re-enter on the
-    same task.  The wrapper is stored in the shared dict so the DAO
-    sees the same object.
+    check+append in :func:`complete_instance` and
+    :func:`uncomplete_instance` must re-enter on the same task.  The
+    wrapper is stored in the shared dict so the DAO sees the same
+    object.
     """
     loop = asyncio.get_running_loop()
     key = (id(database), id(loop))
@@ -314,3 +316,54 @@ async def complete_instance(
             now=now,
         )
     return "done"
+
+
+async def uncomplete_instance(
+    database: NestQuestDatabase,
+    instance_id: int,
+    *,
+    actor_source: str,
+    actor_user_id: str | None = None,
+    actor_child_id: int | None = None,
+    now: datetime.datetime | None = None,
+) -> str:
+    """Append an uncompleted event unless the instance is already open.
+
+    Returns the derived state ``open``.  An already-open instance is a
+    no-op: nothing is appended.  Unknown ``instance_id`` raises
+    ValueError naming the field.  Existence, latest-event, and the
+    append run under one connection lock so a concurrent uncomplete
+    cannot double-append.  The original completed row is not modified.
+    """
+    instance_id = _validate_int_id(instance_id, "instance_id")
+    actor_source, actor_user_id, actor_child_id = _validate_actor(
+        actor_source, actor_user_id, actor_child_id
+    )
+    async with _reentrant_connection_lock(database):
+        instance = await QuestInstancesDao(database).get_by_id(instance_id)
+        if instance is None:
+            raise ValueError(
+                f"instance_id: quest instance {instance_id} does not exist"
+            )
+        latest = await CompletionEventsDao(database).get_latest_for_instance(
+            instance_id
+        )
+        if latest is None or latest.event_type == EVENT_UNCOMPLETED:
+            return "open"
+        if latest.event_type != EVENT_COMPLETED:
+            raise ValueError(
+                f"event_type must be '{EVENT_COMPLETED}' or "
+                f"'{EVENT_UNCOMPLETED}', got {latest.event_type!r}"
+            )
+        await append_event(
+            database,
+            instance.id,
+            instance.child_id,
+            EVENT_UNCOMPLETED,
+            actor_source=actor_source,
+            actor_user_id=actor_user_id,
+            actor_child_id=actor_child_id,
+            was_on_time=None,
+            now=now,
+        )
+    return "open"

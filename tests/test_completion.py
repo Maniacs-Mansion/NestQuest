@@ -12,6 +12,7 @@ from custom_components.nestquest.completion import (
     append_event,
     complete_instance,
     instance_state,
+    uncomplete_instance,
 )
 from custom_components.nestquest.dao_children import ChildrenDao
 from custom_components.nestquest.dao_instances import (
@@ -338,7 +339,7 @@ def test_module_never_exposes_update_or_delete() -> None:
     assert "append_event" in public
     assert "instance_state" in public
     assert "complete_instance" in public
-    assert "uncomplete_instance" not in public
+    assert "uncomplete_instance" in public
     source = inspect.getsource(completion)
     assert "UPDATE" not in source
     assert "DELETE" not in source
@@ -680,6 +681,243 @@ def test_complete_instance_concurrent_second_call_is_noop(tmp_path) -> None:
             )
             assert len(rows) == 1
             assert rows[0].actor_user_id == "user-1"
+        finally:
+            await database.close()
+
+    _run(_main())
+
+
+# ---------------------------------------------------------------------------
+# uncomplete_instance: append uncompleted, no-op if already open
+# ---------------------------------------------------------------------------
+
+
+def test_uncomplete_instance_appends_and_leaves_original_untouched(
+    tmp_path,
+) -> None:
+    async def _body(database, child, instance):
+        completed_at = datetime.datetime(
+            2026, 9, 18, 8, 0, 0, tzinfo=datetime.timezone.utc
+        )
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            now=completed_at,
+        )
+        events = CompletionEventsDao(database)
+        before = await events.list_by_instance(instance.id)
+        assert len(before) == 1
+        original = before[0]
+        assert original.event_type == EVENT_COMPLETED
+        assert original.occurred_at == "2026-09-18T08:00:00+00:00"
+        assert original.actor_source == "user"
+        assert original.actor_user_id == "user-1"
+        assert original.actor_child_id is None
+        uncompleted_at = completed_at + datetime.timedelta(seconds=1)
+        state = await uncomplete_instance(
+            database,
+            instance.id,
+            actor_source="panel",
+            actor_child_id=child.id,
+            now=uncompleted_at,
+        )
+        assert state == "open"
+        assert await instance_state(database, instance.id) == "open"
+        after = await events.list_by_instance(instance.id)
+        assert len(after) == 2
+        assert after[0].id == original.id
+        assert after[0].event_type == EVENT_COMPLETED
+        assert after[0].occurred_at == original.occurred_at
+        assert after[0].actor_source == original.actor_source
+        assert after[0].actor_user_id == original.actor_user_id
+        assert after[0].actor_child_id == original.actor_child_id
+        assert after[1].event_type == EVENT_UNCOMPLETED
+        assert after[1].actor_source == "panel"
+        assert after[1].actor_child_id == child.id
+        assert after[1].was_on_time is None
+
+    _with_db(tmp_path, "uncomplete-append.db")(_body)
+
+
+def test_uncomplete_instance_already_open_is_noop(tmp_path) -> None:
+    async def _body(database, child, instance):
+        events = CompletionEventsDao(database)
+        assert await events.list_by_instance(instance.id) == []
+        first = await uncomplete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+        )
+        after_first = await events.list_by_instance(instance.id)
+        assert first == "open"
+        assert after_first == []
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+        )
+        await uncomplete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+        )
+        before = await events.list_by_instance(instance.id)
+        assert len(before) == 2
+        second = await uncomplete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-2",
+        )
+        after = await events.list_by_instance(instance.id)
+        assert second == "open"
+        assert after == before
+        assert after[0].actor_user_id == "user-1"
+        assert after[1].actor_user_id == "user-1"
+
+    _with_db(tmp_path, "uncomplete-noop.db")(_body)
+
+
+def test_uncomplete_instance_unknown_instance_id_raises(tmp_path) -> None:
+    async def _body(database, child, instance):
+        with pytest.raises(ValueError, match="instance_id"):
+            await uncomplete_instance(
+                database,
+                instance.id + 999,
+                actor_source="user",
+                actor_user_id="user-1",
+            )
+
+    _with_db(tmp_path, "uncomplete-unknown.db")(_body)
+
+
+def test_uncomplete_instance_rejects_non_integer_id() -> None:
+    async def _body():
+        with pytest.raises(ValueError, match="instance_id"):
+            await uncomplete_instance(
+                object(),
+                "1",
+                actor_source="user",
+                actor_user_id="user-1",
+            )
+        with pytest.raises(ValueError, match="instance_id"):
+            await uncomplete_instance(
+                object(),
+                True,
+                actor_source="user",
+                actor_user_id="user-1",
+            )
+
+    _run(_body())
+
+
+def test_uncomplete_instance_now_pins_occurred_at(tmp_path) -> None:
+    async def _body(database, child, instance):
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            now=datetime.datetime(
+                2026, 9, 18, 8, 0, 0, tzinfo=datetime.timezone.utc
+            ),
+        )
+        pinned = datetime.datetime(
+            2026, 9, 18, 8, 0, 1, tzinfo=datetime.timezone.utc
+        )
+        await uncomplete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            now=pinned,
+        )
+        rows = await CompletionEventsDao(database).list_by_instance(
+            instance.id
+        )
+        assert rows[1].occurred_at == "2026-09-18T08:00:01+00:00"
+
+    _with_db(tmp_path, "uncomplete-pinned.db")(_body)
+
+
+def test_uncomplete_instance_concurrent_second_call_is_noop(tmp_path) -> None:
+    """Two racing uncompletes cannot both append.
+
+    Deterministic gate: task A is paused at its INSERT (it holds the
+    connection lock); task B is then started and must queue.  A
+    finishes, B sees open and appends nothing.
+    """
+    async def _main():
+        armed = {"active": False, "gated": False}
+        gate_open = asyncio.Event()
+        a_started = asyncio.Event()
+        hass = _gated_hass(armed, gate_open, a_started)
+        database = NestQuestDatabase(hass)
+        await database.open(tmp_path / "uncomplete-race.db")
+        try:
+            await apply_migrations(database)
+            children = ChildrenDao(database)
+            rules = ScheduleRulesDao(database)
+            definitions = QuestDefinitionsDao(database)
+            instances = QuestInstancesDao(database)
+            child = await children.create("Ada", _now_stamp())
+            rule = await rules.create("daily", D1)
+            definition = await definitions.create(
+                "Brush teeth",
+                rule.id,
+                _now_stamp(),
+                assignee_child_ids=[child.id],
+            )
+            instance = await instances.upsert(
+                definition.id,
+                child.id,
+                D1,
+                _now_stamp(),
+                window="morning",
+            )
+            await complete_instance(
+                database,
+                instance.id,
+                actor_source="user",
+                actor_user_id="user-1",
+            )
+
+            armed["active"] = True
+            task_a = asyncio.ensure_future(
+                uncomplete_instance(
+                    database,
+                    instance.id,
+                    actor_source="user",
+                    actor_user_id="user-1",
+                )
+            )
+            await a_started.wait()
+            armed["active"] = False
+            task_b = asyncio.ensure_future(
+                uncomplete_instance(
+                    database,
+                    instance.id,
+                    actor_source="user",
+                    actor_user_id="user-2",
+                )
+            )
+            await asyncio.sleep(0)
+            gate_open.set()
+            state_a, state_b = await asyncio.gather(task_a, task_b)
+            assert state_a == "open"
+            assert state_b == "open"
+            rows = await CompletionEventsDao(database).list_by_instance(
+                instance.id
+            )
+            assert len(rows) == 2
+            assert rows[0].event_type == EVENT_COMPLETED
+            assert rows[1].event_type == EVENT_UNCOMPLETED
+            assert rows[1].actor_user_id == "user-1"
         finally:
             await database.close()
 
