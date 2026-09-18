@@ -12,6 +12,7 @@ from custom_components.nestquest.completion import (
     append_event,
     complete_instance,
     instance_state,
+    list_missed_for_child,
     uncomplete_instance,
 )
 from custom_components.nestquest.dao_children import ChildrenDao
@@ -340,6 +341,7 @@ def test_module_never_exposes_update_or_delete() -> None:
     assert "instance_state" in public
     assert "complete_instance" in public
     assert "uncomplete_instance" in public
+    assert "list_missed_for_child" in public
     source = inspect.getsource(completion)
     assert "UPDATE" not in source
     assert "DELETE" not in source
@@ -1123,3 +1125,239 @@ def test_uncomplete_instance_concurrent_second_call_is_noop(tmp_path) -> None:
             await database.close()
 
     _run(_main())
+
+
+# ---------------------------------------------------------------------------
+# missed: derived for past-due open instances, never stored
+# ---------------------------------------------------------------------------
+
+
+def test_append_event_rejects_missed_event_type() -> None:
+    async def _body():
+        with pytest.raises(ValueError, match="event_type"):
+            await append_event(
+                object(),
+                1,
+                1,
+                "missed",
+                actor_source="user",
+                actor_user_id="user-1",
+                was_on_time=True,
+            )
+
+    _run(_body())
+
+
+def test_instance_state_missed_when_past_due_and_open(tmp_path) -> None:
+    async def _body(database, child, instance):
+        due = datetime.date.fromisoformat(instance.due_date)
+        later = due + datetime.timedelta(days=1)
+        assert await instance_state(database, instance.id, today=later) == "missed"
+        rows = await CompletionEventsDao(database).list_by_instance(instance.id)
+        assert rows == []
+
+    _with_db(tmp_path, "state-missed-open.db")(_body)
+
+
+def test_instance_state_open_when_due_today(tmp_path) -> None:
+    async def _body(database, child, instance):
+        due = datetime.date.fromisoformat(instance.due_date)
+        assert await instance_state(database, instance.id, today=due) == "open"
+
+    _with_db(tmp_path, "state-open-due-today.db")(_body)
+
+
+def test_instance_state_done_when_past_due_and_completed(tmp_path) -> None:
+    async def _body(database, child, instance):
+        due = datetime.date.fromisoformat(instance.due_date)
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            today=due,
+        )
+        later = due + datetime.timedelta(days=1)
+        assert await instance_state(database, instance.id, today=later) == "done"
+
+    _with_db(tmp_path, "state-done-past-due.db")(_body)
+
+
+def test_instance_state_missed_after_uncompleted_when_past_due(tmp_path) -> None:
+    async def _body(database, child, instance):
+        due = datetime.date.fromisoformat(instance.due_date)
+        await append_event(
+            database,
+            instance.id,
+            child.id,
+            EVENT_COMPLETED,
+            actor_source="user",
+            actor_user_id="user-1",
+            was_on_time=True,
+        )
+        await append_event(
+            database,
+            instance.id,
+            child.id,
+            EVENT_UNCOMPLETED,
+            actor_source="user",
+            actor_user_id="user-1",
+        )
+        later = due + datetime.timedelta(days=1)
+        assert await instance_state(database, instance.id, today=later) == "missed"
+
+    _with_db(tmp_path, "state-missed-uncompleted.db")(_body)
+
+
+def test_instance_state_missed_uses_host_today_when_unthreaded(tmp_path) -> None:
+    async def _body(database, child, instance):
+        yesterday = datetime.date.today() - datetime.timedelta(days=1)
+        past = await QuestInstancesDao(database).upsert(
+            instance.definition_id,
+            child.id,
+            yesterday.isoformat(),
+            _now_stamp(),
+            window="afternoon",
+            today=yesterday,
+        )
+        assert await instance_state(database, past.id) == "missed"
+        rows = await CompletionEventsDao(database).list_by_instance(past.id)
+        assert rows == []
+        assert all(row.event_type != "missed" for row in rows)
+
+    _with_db(tmp_path, "state-missed-host-today.db")(_body)
+
+
+def test_uncomplete_past_due_done_returns_missed_not_done(tmp_path) -> None:
+    async def _body(database, child, instance):
+        due = datetime.date.fromisoformat(instance.due_date)
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            today=due,
+        )
+        later = due + datetime.timedelta(days=1)
+        assert await instance_state(database, instance.id, today=later) == "done"
+        state = await uncomplete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            today=later,
+        )
+        assert state == "missed"
+        assert await instance_state(database, instance.id, today=later) == "missed"
+        rows = await CompletionEventsDao(database).list_by_instance(instance.id)
+        assert [row.event_type for row in rows] == [
+            EVENT_COMPLETED,
+            EVENT_UNCOMPLETED,
+        ]
+        assert all(row.event_type != "missed" for row in rows)
+
+    _with_db(tmp_path, "uncomplete-past-due-missed.db")(_body)
+
+
+def test_uncomplete_past_due_already_open_is_noop_missed(tmp_path) -> None:
+    async def _body(database, child, instance):
+        later = datetime.date.fromisoformat(instance.due_date) + datetime.timedelta(
+            days=1
+        )
+        events = CompletionEventsDao(database)
+        assert await events.list_by_instance(instance.id) == []
+        state = await uncomplete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            today=later,
+        )
+        assert state == "missed"
+        assert await events.list_by_instance(instance.id) == []
+
+    _with_db(tmp_path, "uncomplete-past-due-noop.db")(_body)
+
+
+def test_complete_instance_of_missed_returns_done(tmp_path) -> None:
+    async def _body(database, child, instance):
+        due = datetime.date.fromisoformat(instance.due_date)
+        later = due + datetime.timedelta(days=1)
+        assert await instance_state(database, instance.id, today=later) == "missed"
+        state = await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            now=_ha_local(later, 8, 0),
+            today=later,
+        )
+        assert state == "done"
+        assert await instance_state(database, instance.id, today=later) == "done"
+        rows = await CompletionEventsDao(database).list_by_instance(instance.id)
+        assert len(rows) == 1
+        assert rows[0].event_type == EVENT_COMPLETED
+        assert rows[0].was_on_time is False
+
+    _with_db(tmp_path, "complete-missed.db")(_body)
+
+
+def test_list_missed_for_child_over_date_range(tmp_path) -> None:
+    async def _body(database, child, instance):
+        due = datetime.date.fromisoformat(instance.due_date)
+        later_due = due + datetime.timedelta(days=1)
+        other = await QuestInstancesDao(database).upsert(
+            instance.definition_id,
+            child.id,
+            later_due.isoformat(),
+            _now_stamp(),
+            window="morning",
+        )
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            today=due,
+        )
+        today = later_due + datetime.timedelta(days=1)
+        found = await list_missed_for_child(
+            database,
+            child.id,
+            instance.due_date,
+            later_due.isoformat(),
+            today=today,
+        )
+        assert [row.id for row in found] == [other.id]
+        events = CompletionEventsDao(database)
+        assert await events.list_by_instance(other.id) == []
+        done_rows = await events.list_by_instance(instance.id)
+        assert [row.event_type for row in done_rows] == [EVENT_COMPLETED]
+        assert all(row.event_type != "missed" for row in done_rows)
+
+    _with_db(tmp_path, "list-missed-range.db")(_body)
+
+
+def test_list_missed_for_child_empty_when_due_today(tmp_path) -> None:
+    async def _body(database, child, instance):
+        due = datetime.date.fromisoformat(instance.due_date)
+        found = await list_missed_for_child(
+            database,
+            child.id,
+            instance.due_date,
+            instance.due_date,
+            today=due,
+        )
+        assert found == []
+
+    _with_db(tmp_path, "list-missed-due-today.db")(_body)
+
+
+def test_list_missed_for_child_rejects_non_integer_id() -> None:
+    async def _body():
+        with pytest.raises(ValueError, match="child_id"):
+            await list_missed_for_child(object(), "1", D1, D1)
+        with pytest.raises(ValueError, match="child_id"):
+            await list_missed_for_child(object(), True, D1, D1)
+
+    _run(_body())

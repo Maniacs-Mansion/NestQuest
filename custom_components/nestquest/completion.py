@@ -8,8 +8,10 @@ DAO or SQL directly.  This module is the only Feature-08 caller of
 instance (no-op if already done) is :func:`complete_instance`;
 un-completing (no-op if already open) is :func:`uncomplete_instance`.
 Instance current state is derived from the latest event via
-:func:`instance_state` (``open`` / ``done``); there is no status
-column.
+:func:`instance_state` (``open`` / ``done`` / ``missed``); there is
+no status column.  ``missed`` is derived for past-due open instances
+(``due_date`` before HA-local ``today``) and is never stored as an
+event_type.
 
 Actor policy matches the schema CHECKs (D-008): ``actor_source`` is
 ``'user'`` or ``'panel'`` only — never ``'service'``.  ``'user'``
@@ -93,6 +95,37 @@ def _completion_moment(
     if now is None:
         return completion_date, None
     return completion_date, now.time()
+
+
+def _resolve_today(today: datetime.date | None) -> datetime.date:
+    """Return the threaded HA-local date, or the host calendar date."""
+    if today is None:
+        return datetime.date.today()
+    return today
+
+
+def _derived_state(
+    instance: QuestInstanceRecord,
+    latest: CompletionEventRecord | None,
+    today: datetime.date,
+) -> str:
+    """Return ``open``, ``done``, or ``missed`` from event plus due date.
+
+    A latest completed event is ``done`` even when past due.  No events
+    or a latest uncompleted event is ``open``, or ``missed`` when
+    ``due_date`` is before ``today``.  ``missed`` is never an event_type.
+    """
+    if latest is None or latest.event_type == EVENT_UNCOMPLETED:
+        due_date = datetime.date.fromisoformat(instance.due_date)
+        if due_date < today:
+            return "missed"
+        return "open"
+    if latest.event_type == EVENT_COMPLETED:
+        return "done"
+    raise ValueError(
+        f"event_type must be '{EVENT_COMPLETED}' or "
+        f"'{EVENT_UNCOMPLETED}', got {latest.event_type!r}"
+    )
 
 
 def _was_on_time(
@@ -291,15 +324,21 @@ async def append_event(
 async def instance_state(
     database: NestQuestDatabase,
     instance_id: int,
+    *,
+    today: datetime.date | None = None,
 ) -> str:
-    """Return ``open`` or ``done`` from the instance's latest event.
+    """Return ``open``, ``done``, or ``missed`` from the latest event.
 
-    No events, or a latest event of uncompleted, is ``open``.  A latest
-    event of completed is ``done``.  Unknown ``instance_id`` raises
-    ValueError naming the field.  Existence and the latest event are
-    read inside the connection lock so the answer is one snapshot.
+    No events, or a latest event of uncompleted, is ``open`` unless
+    ``due_date`` is before ``today`` (HA-local, threaded), in which
+    case it is ``missed``.  A latest event of completed is ``done``
+    even when past due.  ``missed`` is never stored as an event_type.
+    Unknown ``instance_id`` raises ValueError naming the field.
+    Existence and the latest event are read inside the connection lock
+    so the answer is one snapshot.
     """
     instance_id = _validate_int_id(instance_id, "instance_id")
+    today_date = _resolve_today(today)
     async with _connection_lock(database):
         instance = await QuestInstancesDao(database).get_by_id(instance_id)
         if instance is None:
@@ -309,14 +348,7 @@ async def instance_state(
         latest = await CompletionEventsDao(database).get_latest_for_instance(
             instance_id
         )
-    if latest is None or latest.event_type == EVENT_UNCOMPLETED:
-        return "open"
-    if latest.event_type == EVENT_COMPLETED:
-        return "done"
-    raise ValueError(
-        f"event_type must be '{EVENT_COMPLETED}' or "
-        f"'{EVENT_UNCOMPLETED}', got {latest.event_type!r}"
-    )
+    return _derived_state(instance, latest, today_date)
 
 
 async def complete_instance(
@@ -385,19 +417,23 @@ async def uncomplete_instance(
     actor_user_id: str | None = None,
     actor_child_id: int | None = None,
     now: datetime.datetime | None = None,
+    today: datetime.date | None = None,
 ) -> str:
     """Append an uncompleted event unless the instance is already open.
 
-    Returns the derived state ``open``.  An already-open instance is a
-    no-op: nothing is appended.  Unknown ``instance_id`` raises
-    ValueError naming the field.  Existence, latest-event, and the
-    append run under one connection lock so a concurrent uncomplete
-    cannot double-append.  The original completed row is not modified.
+    Returns the derived state ``open``, or ``missed`` when the instance
+    is past due (``due_date`` before HA-local ``today``).  An
+    already-open instance is a no-op: nothing is appended.  Unknown
+    ``instance_id`` raises ValueError naming the field.  Existence,
+    latest-event, and the append run under one connection lock so a
+    concurrent uncomplete cannot double-append.  The original completed
+    row is not modified.
     """
     instance_id = _validate_int_id(instance_id, "instance_id")
     actor_source, actor_user_id, actor_child_id = _validate_actor(
         actor_source, actor_user_id, actor_child_id
     )
+    today_date = _resolve_today(today)
     async with _reentrant_connection_lock(database):
         instance = await QuestInstancesDao(database).get_by_id(instance_id)
         if instance is None:
@@ -408,13 +444,13 @@ async def uncomplete_instance(
             instance_id
         )
         if latest is None or latest.event_type == EVENT_UNCOMPLETED:
-            return "open"
+            return _derived_state(instance, latest, today_date)
         if latest.event_type != EVENT_COMPLETED:
             raise ValueError(
                 f"event_type must be '{EVENT_COMPLETED}' or "
                 f"'{EVENT_UNCOMPLETED}', got {latest.event_type!r}"
             )
-        await append_event(
+        latest = await append_event(
             database,
             instance.id,
             instance.child_id,
@@ -425,4 +461,35 @@ async def uncomplete_instance(
             was_on_time=None,
             now=now,
         )
-    return "open"
+    return _derived_state(instance, latest, today_date)
+
+
+async def list_missed_for_child(
+    database: NestQuestDatabase,
+    child_id: int,
+    range_start: str,
+    range_end: str,
+    *,
+    today: datetime.date | None = None,
+) -> list[QuestInstanceRecord]:
+    """Return the child's missed instances due in the closed date range.
+
+    Missed means the latest event state is open and ``due_date`` is
+    before ``today`` (HA-local, threaded).  Uses
+    :meth:`QuestInstancesDao.list_by_date_range` plus derived state.
+    Never appends a missed event.  Instances and latest events are
+    read inside the connection lock so the list is one snapshot.
+    """
+    child_id = _validate_int_id(child_id, "child_id")
+    today_date = _resolve_today(today)
+    async with _connection_lock(database):
+        instances = await QuestInstancesDao(database).list_by_date_range(
+            child_id, range_start, range_end
+        )
+        events = CompletionEventsDao(database)
+        missed: list[QuestInstanceRecord] = []
+        for instance in instances:
+            latest = await events.get_latest_for_instance(instance.id)
+            if _derived_state(instance, latest, today_date) == "missed":
+                missed.append(instance)
+    return missed
