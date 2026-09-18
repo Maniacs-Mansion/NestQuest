@@ -177,7 +177,11 @@ _data_entry_flow_mock.RESULT_TYPE_ABORT = "abort"
 _data_entry_flow_mock.FlowResult = dict
 
 
-class ConfigEntryNotReady(Exception):
+class HomeAssistantError(Exception):
+    """Stand-in mirroring homeassistant.exceptions.HomeAssistantError."""
+
+
+class ConfigEntryNotReady(HomeAssistantError):
     """Stand-in mirroring homeassistant.exceptions.ConfigEntryNotReady.
 
     HA retries setup when this is raised; the tests assert the corrupt
@@ -185,6 +189,7 @@ class ConfigEntryNotReady(Exception):
     """
 
 
+_exceptions_mock.HomeAssistantError = HomeAssistantError
 _exceptions_mock.ConfigEntryNotReady = ConfigEntryNotReady
 
 import voluptuous as vol
@@ -325,7 +330,7 @@ class ServiceRegistry:
         self._services: dict[tuple[str, str], object] = {}
 
     def async_register(self, domain, service, func, schema=None, supports_response=None):
-        self._services[(domain, service)] = func
+        self._services[(domain, service)] = (func, schema)
         return None
 
     def has_service(self, domain, service):
@@ -335,11 +340,26 @@ class ServiceRegistry:
         self._services.pop((domain, service), None)
         return None
 
-    async def call(self, domain, service, data=None):
-        func = self._services.get((domain, service))
-        if func is None:
+    async def call(self, domain, service, data=None, context=None):
+        registered = self._services.get((domain, service))
+        if registered is None:
             raise KeyError(f"service {domain}.{service} not registered")
-        call = SimpleNamespace(domain=domain, service=service, data=data or {})
+        func, schema = registered
+        payload = dict(data or {})
+        if schema is not None:
+            payload = schema(payload)
+        if context is None:
+            context_obj = SimpleNamespace(user_id=None)
+        elif isinstance(context, dict):
+            context_obj = SimpleNamespace(**context)
+        else:
+            context_obj = context
+        call = SimpleNamespace(
+            domain=domain,
+            service=service,
+            data=payload,
+            context=context_obj,
+        )
         result = func(call)
         if inspect.isawaitable(result):
             await result
