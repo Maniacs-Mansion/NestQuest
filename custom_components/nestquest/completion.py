@@ -68,30 +68,31 @@ def _stamp_occurred_at(now: datetime.datetime | None) -> str:
 def _completion_moment(
     now: datetime.datetime | None,
     today: datetime.date | None,
-) -> tuple[datetime.date, datetime.time]:
-    """Return the HA-local completion date and wall-clock time.
+) -> tuple[datetime.date, datetime.time | None]:
+    """Return the HA-local completion date and optional wall-clock time.
 
-    ``today`` is the calendar date when the caller threaded one (Feature
-    07 style).  ``now`` supplies the clock time; a timezone-aware value
-    is read as HA-local wall clock (hour/minute/second as given), not
-    converted.  When ``today`` is omitted the date comes from ``now``.
-    When both are omitted the UTC clock used for occurred_at is the
-    fallback — host ``date.today()`` is never the authority.
+    ``today`` is the HA-local calendar date when threaded (Feature 07
+    style).  ``now`` is a timezone-aware HA-local datetime; its wall
+    clock is used as-is and is never converted to UTC.  When ``today``
+    is omitted the date comes from ``now``.  When both are omitted the
+    host calendar date is the Feature 07 fallback — never the UTC
+    clock.  Time-of-day is None unless ``now`` is supplied; comparing
+    against ``due_time`` requires ``now``.
     """
-    if now is None:
-        moment = datetime.datetime.now(datetime.timezone.utc)
-    else:
+    if now is not None:
         if not isinstance(now, datetime.datetime):
             raise ValueError(f"now must be a datetime, got {now!r}")
-        moment = now
-    if today is None:
-        completion_date = moment.date()
-    else:
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+    if today is not None:
         completion_date = today
-    completion_time = datetime.time(
-        moment.hour, moment.minute, moment.second
-    )
-    return completion_date, completion_time
+    elif now is not None:
+        completion_date = now.date()
+    else:
+        completion_date = datetime.date.today()
+    if now is None:
+        return completion_date, None
+    return completion_date, datetime.time(now.hour, now.minute, now.second)
 
 
 def _was_on_time(
@@ -104,7 +105,9 @@ def _was_on_time(
     On ``due_date`` before ``due_time`` is on time; on ``due_date``
     after ``due_time``, or any later date, is late.  With no
     ``due_time``, on time if the completion date equals ``due_date``
-    (or is earlier); late if after ``due_date``.
+    (or is earlier); late if after ``due_date``.  Same-day
+    ``due_time`` comparison requires ``now``; UTC time-of-day is never
+    substituted.
     """
     completion_date, completion_time = _completion_moment(now, today)
     due_date = datetime.date.fromisoformat(instance.due_date)
@@ -114,6 +117,8 @@ def _was_on_time(
         return False
     if instance.due_time is None:
         return True
+    if completion_time is None:
+        raise ValueError("now is required to compare due_time")
     due_time = datetime.datetime.strptime(instance.due_time, "%H:%M").time()
     return completion_time <= due_time
 
@@ -334,8 +339,9 @@ async def complete_instance(
 
     ``was_on_time`` is computed from the HA-local completion moment
     (threaded ``now`` / ``today``) against the instance ``due_date``
-    and optional ``due_time``.  Host ``date.today()`` is never the
-    authority.
+    and optional ``due_time``.  ``now`` is the timezone-aware HA-local
+    datetime; its wall clock is never converted to UTC.  Same-day
+    ``due_time`` comparison requires ``now``.
     """
     instance_id = _validate_int_id(instance_id, "instance_id")
     actor_source, actor_user_id, actor_child_id = _validate_actor(

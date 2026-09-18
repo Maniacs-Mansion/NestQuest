@@ -687,10 +687,13 @@ def test_complete_instance_concurrent_second_call_is_noop(tmp_path) -> None:
     _run(_main())
 
 
+_HA_TZ = datetime.timezone(datetime.timedelta(hours=-8))
+
+
 def _ha_local(day: datetime.date, hour: int, minute: int = 0) -> datetime.datetime:
     return datetime.datetime(
         day.year, day.month, day.day, hour, minute, 0,
-        tzinfo=datetime.timezone.utc,
+        tzinfo=_HA_TZ,
     )
 
 
@@ -795,6 +798,63 @@ def test_complete_instance_no_due_time_after_due_date_is_late(
         assert rows[0].was_on_time is False
 
     _with_db(tmp_path, "late-after-due-date.db")(_body)
+
+
+def test_complete_instance_ha_local_wall_clock_not_utc(tmp_path) -> None:
+    """HA-local 11:00 with due_time 12:00 is on time even when UTC is 19:00.
+
+    The helper's zone is UTC-8, so 11:00 local is 19:00 UTC.  Converting
+    to UTC before comparing would mark this late.
+    """
+    async def _body(database, child, instance):
+        due_date = datetime.date.fromisoformat(instance.due_date)
+        instance = await QuestInstancesDao(database).upsert(
+            instance.definition_id,
+            child.id,
+            instance.due_date,
+            _now_stamp(),
+            window=instance.window,
+            due_time="12:00",
+        )
+        now = _ha_local(due_date, 11, 0)
+        assert now.astimezone(datetime.timezone.utc).hour == 19
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            now=now,
+            today=due_date,
+        )
+        rows = await CompletionEventsDao(database).list_by_instance(
+            instance.id
+        )
+        assert rows[0].was_on_time is True
+
+    _with_db(tmp_path, "ontime-ha-local-not-utc.db")(_body)
+
+
+def test_complete_instance_due_time_requires_now_on_due_date(tmp_path) -> None:
+    async def _body(database, child, instance):
+        due_date = datetime.date.fromisoformat(instance.due_date)
+        instance = await QuestInstancesDao(database).upsert(
+            instance.definition_id,
+            child.id,
+            instance.due_date,
+            _now_stamp(),
+            window=instance.window,
+            due_time="12:00",
+        )
+        with pytest.raises(ValueError, match="now is required to compare due_time"):
+            await complete_instance(
+                database,
+                instance.id,
+                actor_source="user",
+                actor_user_id="user-1",
+                today=due_date,
+            )
+
+    _with_db(tmp_path, "due-time-requires-now.db")(_body)
 
 
 # ---------------------------------------------------------------------------
