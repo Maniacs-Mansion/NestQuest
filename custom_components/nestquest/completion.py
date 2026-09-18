@@ -35,6 +35,7 @@ from .dao_instances import (
     EVENT_UNCOMPLETED,
     CompletionEventRecord,
     CompletionEventsDao,
+    QuestInstanceRecord,
     QuestInstancesDao,
 )
 from .db import NestQuestDatabase
@@ -62,6 +63,59 @@ def _stamp_occurred_at(now: datetime.datetime | None) -> str:
     return now.astimezone(datetime.timezone.utc).strftime(
         _UTC_TIMESTAMP_FORMAT
     )
+
+
+def _completion_moment(
+    now: datetime.datetime | None,
+    today: datetime.date | None,
+) -> tuple[datetime.date, datetime.time]:
+    """Return the HA-local completion date and wall-clock time.
+
+    ``today`` is the calendar date when the caller threaded one (Feature
+    07 style).  ``now`` supplies the clock time; a timezone-aware value
+    is read as HA-local wall clock (hour/minute/second as given), not
+    converted.  When ``today`` is omitted the date comes from ``now``.
+    When both are omitted the UTC clock used for occurred_at is the
+    fallback — host ``date.today()`` is never the authority.
+    """
+    if now is None:
+        moment = datetime.datetime.now(datetime.timezone.utc)
+    else:
+        if not isinstance(now, datetime.datetime):
+            raise ValueError(f"now must be a datetime, got {now!r}")
+        moment = now
+    if today is None:
+        completion_date = moment.date()
+    else:
+        completion_date = today
+    completion_time = datetime.time(
+        moment.hour, moment.minute, moment.second
+    )
+    return completion_date, completion_time
+
+
+def _was_on_time(
+    instance: QuestInstanceRecord,
+    now: datetime.datetime | None,
+    today: datetime.date | None,
+) -> bool:
+    """Return whether the completion moment is on time for ``instance``.
+
+    On ``due_date`` before ``due_time`` is on time; on ``due_date``
+    after ``due_time``, or any later date, is late.  With no
+    ``due_time``, on time if the completion date equals ``due_date``
+    (or is earlier); late if after ``due_date``.
+    """
+    completion_date, completion_time = _completion_moment(now, today)
+    due_date = datetime.date.fromisoformat(instance.due_date)
+    if completion_date < due_date:
+        return True
+    if completion_date > due_date:
+        return False
+    if instance.due_time is None:
+        return True
+    due_time = datetime.datetime.strptime(instance.due_time, "%H:%M").time()
+    return completion_time <= due_time
 
 
 class _TaskReentrantLock:
@@ -278,11 +332,10 @@ async def complete_instance(
     append run under one connection lock so a concurrent complete
     cannot double-append.
 
-    ``was_on_time`` is recorded as True — a placeholder until the
-    on-time task computes it from ``now`` / ``today`` against the
-    instance due_date and optional due_time.  ``today`` is accepted so
-    callers can thread the HA-local date through without a signature
-    change; it is unused here.
+    ``was_on_time`` is computed from the HA-local completion moment
+    (threaded ``now`` / ``today``) against the instance ``due_date``
+    and optional ``due_time``.  Host ``date.today()`` is never the
+    authority.
     """
     instance_id = _validate_int_id(instance_id, "instance_id")
     actor_source, actor_user_id, actor_child_id = _validate_actor(
@@ -312,7 +365,7 @@ async def complete_instance(
             actor_source=actor_source,
             actor_user_id=actor_user_id,
             actor_child_id=actor_child_id,
-            was_on_time=True,
+            was_on_time=_was_on_time(instance, now, today),
             now=now,
         )
     return "done"

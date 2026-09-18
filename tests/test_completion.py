@@ -687,6 +687,116 @@ def test_complete_instance_concurrent_second_call_is_noop(tmp_path) -> None:
     _run(_main())
 
 
+def _ha_local(day: datetime.date, hour: int, minute: int = 0) -> datetime.datetime:
+    return datetime.datetime(
+        day.year, day.month, day.day, hour, minute, 0,
+        tzinfo=datetime.timezone.utc,
+    )
+
+
+def test_complete_instance_on_due_date_before_due_time_is_on_time(
+    tmp_path,
+) -> None:
+    async def _body(database, child, instance):
+        due_date = datetime.date.fromisoformat(instance.due_date)
+        instance = await QuestInstancesDao(database).upsert(
+            instance.definition_id,
+            child.id,
+            instance.due_date,
+            _now_stamp(),
+            window=instance.window,
+            due_time="12:00",
+        )
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            now=_ha_local(due_date, 11, 0),
+            today=due_date,
+        )
+        rows = await CompletionEventsDao(database).list_by_instance(
+            instance.id
+        )
+        assert rows[0].was_on_time is True
+
+    _with_db(tmp_path, "ontime-before-due-time.db")(_body)
+
+
+def test_complete_instance_on_due_date_after_due_time_is_late(
+    tmp_path,
+) -> None:
+    async def _body(database, child, instance):
+        due_date = datetime.date.fromisoformat(instance.due_date)
+        instance = await QuestInstancesDao(database).upsert(
+            instance.definition_id,
+            child.id,
+            instance.due_date,
+            _now_stamp(),
+            window=instance.window,
+            due_time="12:00",
+        )
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            now=_ha_local(due_date, 12, 1),
+            today=due_date,
+        )
+        rows = await CompletionEventsDao(database).list_by_instance(
+            instance.id
+        )
+        assert rows[0].was_on_time is False
+
+    _with_db(tmp_path, "late-after-due-time.db")(_body)
+
+
+def test_complete_instance_no_due_time_on_due_date_is_on_time(
+    tmp_path,
+) -> None:
+    async def _body(database, child, instance):
+        due_date = datetime.date.fromisoformat(instance.due_date)
+        assert instance.due_time is None
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            now=_ha_local(due_date, 23, 59),
+            today=due_date,
+        )
+        rows = await CompletionEventsDao(database).list_by_instance(
+            instance.id
+        )
+        assert rows[0].was_on_time is True
+
+    _with_db(tmp_path, "ontime-no-due-time.db")(_body)
+
+
+def test_complete_instance_no_due_time_after_due_date_is_late(
+    tmp_path,
+) -> None:
+    async def _body(database, child, instance):
+        due_date = datetime.date.fromisoformat(instance.due_date)
+        later = due_date + datetime.timedelta(days=1)
+        assert instance.due_time is None
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            now=_ha_local(later, 8, 0),
+            today=later,
+        )
+        rows = await CompletionEventsDao(database).list_by_instance(
+            instance.id
+        )
+        assert rows[0].was_on_time is False
+
+    _with_db(tmp_path, "late-after-due-date.db")(_body)
+
+
 # ---------------------------------------------------------------------------
 # uncomplete_instance: append uncompleted, no-op if already open
 # ---------------------------------------------------------------------------
