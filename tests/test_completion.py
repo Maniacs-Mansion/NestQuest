@@ -592,3 +592,95 @@ def test_complete_instance_now_pins_occurred_at(tmp_path) -> None:
         assert rows[0].occurred_at == "2026-09-18T08:00:00+00:00"
 
     _with_db(tmp_path, "complete-pinned.db")(_body)
+
+
+def _gated_hass(armed: dict, gate_open: asyncio.Event, a_started: asyncio.Event):
+    """A hass mock whose executor gates the FIRST ``_execute`` job after
+    arming — the INSERT of whichever ``complete_instance`` starts first
+    — proving that caller holds the connection lock and the second
+    caller must queue behind it."""
+    from unittest.mock import MagicMock
+
+    hass = MagicMock()
+
+    async def _gated_executor(fn, *args):
+        if armed["active"]:
+            if getattr(fn, "__name__", "") == "_execute" and not armed["gated"]:
+                armed["gated"] = True
+                a_started.set()
+                await gate_open.wait()
+        return fn(*args)
+
+    hass.async_add_executor_job = _gated_executor
+    return hass
+
+
+def test_complete_instance_concurrent_second_call_is_noop(tmp_path) -> None:
+    """Two racing completes cannot both append.
+
+    Deterministic gate: task A is paused at its INSERT (it holds the
+    connection lock); task B is then started and must queue.  A
+    finishes, B sees done and appends nothing.
+    """
+    async def _main():
+        armed = {"active": False, "gated": False}
+        gate_open = asyncio.Event()
+        a_started = asyncio.Event()
+        hass = _gated_hass(armed, gate_open, a_started)
+        database = NestQuestDatabase(hass)
+        await database.open(tmp_path / "complete-race.db")
+        try:
+            await apply_migrations(database)
+            children = ChildrenDao(database)
+            rules = ScheduleRulesDao(database)
+            definitions = QuestDefinitionsDao(database)
+            instances = QuestInstancesDao(database)
+            child = await children.create("Ada", _now_stamp())
+            rule = await rules.create("daily", D1)
+            definition = await definitions.create(
+                "Brush teeth",
+                rule.id,
+                _now_stamp(),
+                assignee_child_ids=[child.id],
+            )
+            instance = await instances.upsert(
+                definition.id,
+                child.id,
+                D1,
+                _now_stamp(),
+                window="morning",
+            )
+
+            armed["active"] = True
+            task_a = asyncio.ensure_future(
+                complete_instance(
+                    database,
+                    instance.id,
+                    actor_source="user",
+                    actor_user_id="user-1",
+                )
+            )
+            await a_started.wait()
+            armed["active"] = False
+            task_b = asyncio.ensure_future(
+                complete_instance(
+                    database,
+                    instance.id,
+                    actor_source="user",
+                    actor_user_id="user-2",
+                )
+            )
+            await asyncio.sleep(0)
+            gate_open.set()
+            state_a, state_b = await asyncio.gather(task_a, task_b)
+            assert state_a == "done"
+            assert state_b == "done"
+            rows = await CompletionEventsDao(database).list_by_instance(
+                instance.id
+            )
+            assert len(rows) == 1
+            assert rows[0].actor_user_id == "user-1"
+        finally:
+            await database.close()
+
+    _run(_main())
