@@ -4,11 +4,11 @@ Sits between the Feature 09 service gate and the typed
 :class:`~.dao_instances.CompletionEventsDao`: callers get actor-shape
 validation and the UTC occurred-at stamp here, and never talk to the
 DAO or SQL directly.  This module is the only Feature-08 caller of
-:meth:`~.dao_instances.CompletionEventsDao.append`.  Completing and
-un-completing an instance (no-op-if-already-done) arrive in later
-tasks.  Instance current state is derived from the latest event via
-:func:`instance_state` (``open`` / ``done``); there is no status
-column.
+:meth:`~.dao_instances.CompletionEventsDao.append`.  Completing an
+instance (no-op if already done) is :func:`complete_instance`;
+un-completing arrives in a later task.  Instance current state is
+derived from the latest event via :func:`instance_state`
+(``open`` / ``done``); there is no status column.
 
 Actor policy matches the schema CHECKs (D-008): ``actor_source`` is
 ``'user'`` or ``'panel'`` only — never ``'service'``.  ``'user'``
@@ -25,9 +25,10 @@ is no permission check here (that is Feature 09).
 """
 from __future__ import annotations
 
+import asyncio
 import datetime
 
-from .dao_children import _connection_lock
+from .dao_children import _CONNECTION_LOCKS, _connection_lock
 from .dao_instances import (
     EVENT_COMPLETED,
     EVENT_UNCOMPLETED,
@@ -60,6 +61,63 @@ def _stamp_occurred_at(now: datetime.datetime | None) -> str:
     return now.astimezone(datetime.timezone.utc).strftime(
         _UTC_TIMESTAMP_FORMAT
     )
+
+
+class _TaskReentrantLock:
+    """Shared connection lock the owning task may re-enter."""
+
+    def __init__(self, inner: asyncio.Lock) -> None:
+        self._inner = inner
+        self._task: asyncio.Task | None = None
+        self._depth = 0
+
+    def locked(self) -> bool:
+        return self._inner.locked()
+
+    async def acquire(self) -> bool:
+        task = asyncio.current_task()
+        if self._task is task:
+            self._depth += 1
+            return True
+        await self._inner.acquire()
+        self._task = task
+        self._depth = 1
+        return True
+
+    def release(self) -> None:
+        if self._task is not asyncio.current_task():
+            raise RuntimeError("lock released by a non-owner")
+        self._depth -= 1
+        if self._depth == 0:
+            self._task = None
+            self._inner.release()
+
+    async def __aenter__(self) -> _TaskReentrantLock:
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.release()
+
+
+def _reentrant_connection_lock(database) -> _TaskReentrantLock:
+    """Return the shared connection lock, made task-reentrant.
+
+    ``CompletionEventsDao.append`` also acquires this lock, so
+    check+append in :func:`complete_instance` must re-enter on the
+    same task.  The wrapper is stored in the shared dict so the DAO
+    sees the same object.
+    """
+    loop = asyncio.get_running_loop()
+    key = (id(database), id(loop))
+    lock = _CONNECTION_LOCKS.get(key)
+    if isinstance(lock, _TaskReentrantLock):
+        return lock
+    wrapped = _TaskReentrantLock(
+        lock if lock is not None else asyncio.Lock()
+    )
+    _CONNECTION_LOCKS[key] = wrapped
+    return wrapped
 
 
 def _validate_int_id(value: object, field: str) -> int:
@@ -198,3 +256,61 @@ async def instance_state(
         f"event_type must be '{EVENT_COMPLETED}' or "
         f"'{EVENT_UNCOMPLETED}', got {latest.event_type!r}"
     )
+
+
+async def complete_instance(
+    database: NestQuestDatabase,
+    instance_id: int,
+    *,
+    actor_source: str,
+    actor_user_id: str | None = None,
+    actor_child_id: int | None = None,
+    now: datetime.datetime | None = None,
+    today: datetime.date | None = None,
+) -> str:
+    """Append a completed event unless the instance is already done.
+
+    Returns the derived state ``done``.  An already-done instance is a
+    no-op: nothing is appended.  Unknown ``instance_id`` raises
+    ValueError naming the field.  Existence, latest-event, and the
+    append run under one connection lock so a concurrent complete
+    cannot double-append.
+
+    ``was_on_time`` is recorded as True — a placeholder until the
+    on-time task computes it from ``now`` / ``today`` against the
+    instance due_date and optional due_time.  ``today`` is accepted so
+    callers can thread the HA-local date through without a signature
+    change; it is unused here.
+    """
+    instance_id = _validate_int_id(instance_id, "instance_id")
+    actor_source, actor_user_id, actor_child_id = _validate_actor(
+        actor_source, actor_user_id, actor_child_id
+    )
+    async with _reentrant_connection_lock(database):
+        instance = await QuestInstancesDao(database).get_by_id(instance_id)
+        if instance is None:
+            raise ValueError(
+                f"instance_id: quest instance {instance_id} does not exist"
+            )
+        latest = await CompletionEventsDao(database).get_latest_for_instance(
+            instance_id
+        )
+        if latest is not None and latest.event_type == EVENT_COMPLETED:
+            return "done"
+        if latest is not None and latest.event_type != EVENT_UNCOMPLETED:
+            raise ValueError(
+                f"event_type must be '{EVENT_COMPLETED}' or "
+                f"'{EVENT_UNCOMPLETED}', got {latest.event_type!r}"
+            )
+        await append_event(
+            database,
+            instance.id,
+            instance.child_id,
+            EVENT_COMPLETED,
+            actor_source=actor_source,
+            actor_user_id=actor_user_id,
+            actor_child_id=actor_child_id,
+            was_on_time=True,
+            now=now,
+        )
+    return "done"

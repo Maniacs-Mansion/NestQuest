@@ -8,7 +8,11 @@ import re
 
 import pytest
 
-from custom_components.nestquest.completion import append_event, instance_state
+from custom_components.nestquest.completion import (
+    append_event,
+    complete_instance,
+    instance_state,
+)
 from custom_components.nestquest.dao_children import ChildrenDao
 from custom_components.nestquest.dao_instances import (
     EVENT_COMPLETED,
@@ -333,7 +337,7 @@ def test_module_never_exposes_update_or_delete() -> None:
     )
     assert "append_event" in public
     assert "instance_state" in public
-    assert "complete_instance" not in public
+    assert "complete_instance" in public
     assert "uncomplete_instance" not in public
     source = inspect.getsource(completion)
     assert "UPDATE" not in source
@@ -444,3 +448,239 @@ def test_instance_state_three_events_returns_done_and_preserves_rows(
         assert len(after) == 3
 
     _with_db(tmp_path, "state-three.db")(_body)
+
+
+# ---------------------------------------------------------------------------
+# complete_instance: append completed, no-op if already done
+# ---------------------------------------------------------------------------
+
+
+def test_complete_instance_appends_and_returns_done(tmp_path) -> None:
+    async def _body(database, child, instance):
+        events = CompletionEventsDao(database)
+        assert await events.list_by_instance(instance.id) == []
+        state = await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+        )
+        assert state == "done"
+        assert await instance_state(database, instance.id) == "done"
+        rows = await events.list_by_instance(instance.id)
+        assert len(rows) == 1
+        assert rows[0].event_type == EVENT_COMPLETED
+        assert rows[0].actor_source == "user"
+        assert rows[0].actor_user_id == "user-1"
+        assert rows[0].was_on_time is True
+
+    _with_db(tmp_path, "complete-open.db")(_body)
+
+
+def test_complete_instance_already_done_is_noop(tmp_path) -> None:
+    async def _body(database, child, instance):
+        first = await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+        )
+        events = CompletionEventsDao(database)
+        before = await events.list_by_instance(instance.id)
+        assert first == "done"
+        assert len(before) == 1
+        second = await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-2",
+        )
+        after = await events.list_by_instance(instance.id)
+        assert second == "done"
+        assert after == before
+        assert after[0].actor_user_id == "user-1"
+
+    _with_db(tmp_path, "complete-noop.db")(_body)
+
+
+def test_complete_instance_unknown_instance_id_raises(tmp_path) -> None:
+    async def _body(database, child, instance):
+        with pytest.raises(ValueError, match="instance_id"):
+            await complete_instance(
+                database,
+                instance.id + 999,
+                actor_source="user",
+                actor_user_id="user-1",
+            )
+
+    _with_db(tmp_path, "complete-unknown.db")(_body)
+
+
+def test_complete_instance_rejects_non_integer_id() -> None:
+    async def _body():
+        with pytest.raises(ValueError, match="instance_id"):
+            await complete_instance(
+                object(),
+                "1",
+                actor_source="user",
+                actor_user_id="user-1",
+            )
+        with pytest.raises(ValueError, match="instance_id"):
+            await complete_instance(
+                object(),
+                True,
+                actor_source="user",
+                actor_user_id="user-1",
+            )
+
+    _run(_body())
+
+
+def test_complete_instance_after_uncompleted_appends(tmp_path) -> None:
+    async def _body(database, child, instance):
+        await append_event(
+            database,
+            instance.id,
+            child.id,
+            EVENT_COMPLETED,
+            actor_source="user",
+            actor_user_id="user-1",
+            was_on_time=True,
+        )
+        await append_event(
+            database,
+            instance.id,
+            child.id,
+            EVENT_UNCOMPLETED,
+            actor_source="user",
+            actor_user_id="user-1",
+        )
+        events = CompletionEventsDao(database)
+        before = await events.list_by_instance(instance.id)
+        assert await instance_state(database, instance.id) == "open"
+        state = await complete_instance(
+            database,
+            instance.id,
+            actor_source="panel",
+            actor_child_id=child.id,
+        )
+        assert state == "done"
+        after = await events.list_by_instance(instance.id)
+        assert len(after) == len(before) + 1
+        assert after[-1].event_type == EVENT_COMPLETED
+        assert after[-1].actor_source == "panel"
+        assert after[-1].was_on_time is True
+
+    _with_db(tmp_path, "complete-reopen.db")(_body)
+
+
+def test_complete_instance_now_pins_occurred_at(tmp_path) -> None:
+    async def _body(database, child, instance):
+        pinned = datetime.datetime(
+            2026, 9, 18, 8, 0, 0, tzinfo=datetime.timezone.utc
+        )
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            now=pinned,
+        )
+        rows = await CompletionEventsDao(database).list_by_instance(
+            instance.id
+        )
+        assert rows[0].occurred_at == "2026-09-18T08:00:00+00:00"
+
+    _with_db(tmp_path, "complete-pinned.db")(_body)
+
+
+def _gated_hass(armed: dict, gate_open: asyncio.Event, a_started: asyncio.Event):
+    """A hass mock whose executor gates the FIRST ``_execute`` job after
+    arming — the INSERT of whichever ``complete_instance`` starts first
+    — proving that caller holds the connection lock and the second
+    caller must queue behind it."""
+    from unittest.mock import MagicMock
+
+    hass = MagicMock()
+
+    async def _gated_executor(fn, *args):
+        if armed["active"]:
+            if getattr(fn, "__name__", "") == "_execute" and not armed["gated"]:
+                armed["gated"] = True
+                a_started.set()
+                await gate_open.wait()
+        return fn(*args)
+
+    hass.async_add_executor_job = _gated_executor
+    return hass
+
+
+def test_complete_instance_concurrent_second_call_is_noop(tmp_path) -> None:
+    """Two racing completes cannot both append.
+
+    Deterministic gate: task A is paused at its INSERT (it holds the
+    connection lock); task B is then started and must queue.  A
+    finishes, B sees done and appends nothing.
+    """
+    async def _main():
+        armed = {"active": False, "gated": False}
+        gate_open = asyncio.Event()
+        a_started = asyncio.Event()
+        hass = _gated_hass(armed, gate_open, a_started)
+        database = NestQuestDatabase(hass)
+        await database.open(tmp_path / "complete-race.db")
+        try:
+            await apply_migrations(database)
+            children = ChildrenDao(database)
+            rules = ScheduleRulesDao(database)
+            definitions = QuestDefinitionsDao(database)
+            instances = QuestInstancesDao(database)
+            child = await children.create("Ada", _now_stamp())
+            rule = await rules.create("daily", D1)
+            definition = await definitions.create(
+                "Brush teeth",
+                rule.id,
+                _now_stamp(),
+                assignee_child_ids=[child.id],
+            )
+            instance = await instances.upsert(
+                definition.id,
+                child.id,
+                D1,
+                _now_stamp(),
+                window="morning",
+            )
+
+            armed["active"] = True
+            task_a = asyncio.ensure_future(
+                complete_instance(
+                    database,
+                    instance.id,
+                    actor_source="user",
+                    actor_user_id="user-1",
+                )
+            )
+            await a_started.wait()
+            armed["active"] = False
+            task_b = asyncio.ensure_future(
+                complete_instance(
+                    database,
+                    instance.id,
+                    actor_source="user",
+                    actor_user_id="user-2",
+                )
+            )
+            await asyncio.sleep(0)
+            gate_open.set()
+            state_a, state_b = await asyncio.gather(task_a, task_b)
+            assert state_a == "done"
+            assert state_b == "done"
+            rows = await CompletionEventsDao(database).list_by_instance(
+                instance.id
+            )
+            assert len(rows) == 1
+            assert rows[0].actor_user_id == "user-1"
+        finally:
+            await database.close()
+
+    _run(_main())
