@@ -1,5 +1,87 @@
 # NestQuest Release Notes
 
+## Version 0.5.0 — 2026-09-18
+
+### Scope
+
+Fifth release of NestQuest, promoting Features 06, 07, and 08 from `dev` onto 0.4.0 (quest model, children registry, presence engine):
+
+- **Feature 06 — quest definitions and assignment:** business layer `quest_definitions.py` over the multi-assignee / multi-window model (D-008). Create/edit/deactivate definitions; assign/unassign children; query helpers for materialization. `ScheduleRule` ⇄ `schedule_rules` storage mapping in the DAO layer.
+- **Feature 07 — instance materialization:** `materialize.py` fans out one instance per (definition, child, window, firing date) when the recurrence rule fires and the child is present. Idempotent on `(definition_id, child_id, due_date, window)`; skips completed instances; never generates past dates. HA-local `today` and configured `horizon_days` threaded end-to-end. Regeneration on definition/assignee/presence changes; daily rollover listener; startup backfill; `nestquest.regenerate` service.
+- **Feature 08 — completion and event log:** business layer `completion.py` wrapping the existing append-only `CompletionEventsDao`. `complete_instance` / `uncomplete_instance` (reversal event, original row untouched); state derived from the latest event; HA-local `was_on_time`; derived `missed` (never stored). Actor shapes `'user'` / `'panel'` with `actor_child_id` (D-008). Permission gating of un-complete is Feature 09.
+
+### Requirements
+
+- Minimum Home Assistant version: **2024.6.0**.
+
+### Breaking changes
+
+- None at the schema layer. Schema remains **version 6** (advanced in 0.4.0). This release adds application code only.
+
+### Known Limitations
+
+- No permission decorator yet (Feature 09): `complete_instance` / `uncomplete_instance` are Python APIs, not gated HA services. The only HA service in this release is `nestquest.regenerate`.
+- No entity or event surface (Feature 10): no sensors, no `nestquest_quest_completed` bus events.
+- No panel or admin Lovelace cards (Features 12/13).
+- Un-complete is implemented but not admin-gated until Feature 09.
+- Single-instance only.
+
+### Rollback
+
+Schema version is unchanged from 0.4.0 (still 6). A code downgrade to 0.4.0 does not require a database restore for schema compatibility, but **back up `nestquest.db` (plus `-wal`/`-shm`) before upgrading** — generated instances and completion events written by 0.5.0 remain in the file after downgrade; 0.4.0 will not generate or complete them.
+
+**HACS installs:**
+
+1. Downgrade via HACS (HACS > Integrations > NestQuest > Redownload > 0.4.0).
+2. Restart Home Assistant.
+
+**Manual installs:**
+
+1. Replace `custom_components/nestquest/` with the 0.4.0 tree.
+2. Restart Home Assistant.
+
+**Repository operators:** git-revert the 0.5.0 release merge on `main`.
+
+## Version 0.4.0 — 2026-09-15
+
+### Scope
+
+Fourth release of NestQuest, shipping three completed features on top of the data layer and recurrence engine:
+
+- **Feature 14 — quest domain model (BREAKING rename, D-007/D-008):** `task_definitions`/`task_instances` are now `quest_definitions`/`quest_instances` everywhere; definitions are multi-assignee (`quest_definition_assignees`, no single child column) and multi-window (`quest_definition_windows` — morning/afternoon/evening, clock ranges in `const.py`); the instance key widens to `(definition_id, child_id, due_date, window)` so twice-daily and shared quests materialise one instance per child per window per day; `completion_events` gains `actor_child_id` (the tapped panel profile; admin events stay NULL) with a second actor-pair CHECK. Schema version advances to **6**.
+- **Feature 03 — children registry & admin allowlist:** typed business layer for child profiles (create/edit with trimmed required names and duplicate-name warnings, whole-table reorder, deactivation as the only removal path — history is never touched); the admin allowlist with a fail-closed `is_admin` resolver (empty allowlist denies everyone; the last admin cannot be removed); automatic seeding on first setup (the config-flow user is persisted in entry data, with the options-flow list and HA owner accounts as fallbacks) so the owner is never locked out; the options flow gains a multi-select picker of existing Home Assistant users.
+- **Feature 05 — presence & custody engine:** a pure `PresenceSchedule`/`PresenceOverride` model with total validation and lossless round-trips; anchor-date cycle arithmetic (D-004 — never ISO week numbers or parity); `PresenceEngine.is_present` with the always-present default for schedule-free children; date overrides beat the repeating pattern; a `next_present_dates` preview for the admin schedule UI; a full-year regression guard walking 2020 (366 days, ISO week 53) and 2015 (365 days, ISO week 53) proving the rotation never inverts at a year boundary.
+
+### Requirements
+
+- Minimum Home Assistant version: **2024.6.0**.
+
+### Breaking changes
+
+- The database schema advances from version 1 to version 6. Upgrades are automatic and data-preserving (legacy `task_*` tables are renamed; the definitions table is rebuilt for multi-assignee; legacy instances pin to the morning window; panel events backfill `actor_child_id`). **Back up `nestquest.db` before upgrading** — see Rollback.
+- Dev installs from before 2026-09-15 migrate automatically on first start.
+
+### Known Limitations
+
+- Still no entities, services, calendar platforms, or panel cards: nothing is user-visible in Home Assistant yet (Features 06-10 land the business layer, materialisation, permission gate, and entity surface).
+- No materialisation yet: instances are not generated from definitions + presence yet (Feature 07).
+- Single-instance only.
+
+### Rollback
+
+**Back up `nestquest.db` (plus `-wal`/`-shm` sidecars) BEFORE upgrading.** This release migrates the database to schema version 6 with renamed tables; an older NestQuest build refuses a version-6 database ("newer than this integration understands") and cannot read renamed tables at all — a plain downgrade is NOT possible once the database has been migrated.
+
+**Rollback procedure (after a migrated database):**
+
+1. Stop Home Assistant.
+2. Restore the pre-upgrade `nestquest.db` backup (and sidecars) you made before upgrading.
+3. Downgrade the integration (HACS > Integrations > NestQuest > Redownload > 0.3.0) or replace `custom_components/nestquest/` manually.
+4. Restart Home Assistant.
+
+Without a backup, the only path is staying on 0.4.0 (recommended) or deleting the integration and its database to start fresh (Settings > Devices & Services > NestQuest > Delete, then remove `nestquest.db`).
+
+**Repository operators:** instead of uninstalling, git-revert the release merge on `main` and restore the pre-upgrade database.
+
 ## Version 0.3.0 — 2026-09-14
 
 ### Scope
