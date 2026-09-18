@@ -24,11 +24,11 @@ from .const import (
     DEFAULT_HORIZON_DAYS,
     DOMAIN,
     LOGGER,
-    SERVICE_REGENERATE,
 )
 from .db import NestQuestDatabase
 from .materialize import materialize as _materialize_run
 from .migrations import apply_migrations
+from .services import async_deregister_services, async_register_services
 from .store import async_get_db_path
 from .admin_allowlist import seed_setup_admin
 
@@ -356,21 +356,8 @@ def _find_live_runtime_data(hass: HomeAssistant) -> NestQuestRuntimeData | None:
     return None
 
 
-def _register_regenerate_service(hass: HomeAssistant) -> None:
-    """Register ``nestquest.regenerate`` once at domain scope.
-
-    The service triggers a full on-demand regeneration over the rolling
-    horizon, running the SAME idempotent materialize path
-    (:func:`_run_horizon_materialization`) as the startup backfill and the
-    daily rollover listener.  It is DOMAIN-global — registered exactly once
-    (guarded by ``has_service``) and NOT bound to any config entry — so the
-    handler resolves the currently-live database at call time and a name
-    collision or duplicate setup is impossible.  Removal is handled by the
-    unload path only once the LAST entry is removed (see
-    :func:`_deregister_regenerate_service`).
-    """
-    if hass.services.has_service(DOMAIN, SERVICE_REGENERATE):
-        return
+def _make_regenerate_handler(hass: HomeAssistant):
+    """Return the Feature 07 ``regenerate`` handler closed over ``hass``."""
 
     async def _regenerate(_call: Any) -> None:
         runtime_data = _find_live_runtime_data(hass)
@@ -385,13 +372,29 @@ def _register_regenerate_service(hass: HomeAssistant) -> None:
             hass, runtime_data.database, horizon_days
         )
 
-    hass.services.async_register(DOMAIN, SERVICE_REGENERATE, _regenerate)
+    return _regenerate
 
 
-def _deregister_regenerate_service(hass: HomeAssistant) -> None:
-    """Remove ``nestquest.regenerate`` when the last entry unloads."""
-    if hass.services.has_service(DOMAIN, SERVICE_REGENERATE):
-        hass.services.async_remove(DOMAIN, SERVICE_REGENERATE)
+def _register_services(hass: HomeAssistant) -> None:
+    """Register domain-global NestQuest services once.
+
+    Services are DOMAIN-global — registered exactly once (guarded by
+    ``has_service`` on regenerate) and NOT bound to any config entry —
+    so each handler resolves the currently-live database at call time
+    and a name collision or duplicate setup is impossible.  Removal is
+    handled by the unload path only once the LAST entry is removed
+    (see :func:`_deregister_services`).
+    """
+    async_register_services(
+        hass,
+        find_runtime=_find_live_runtime_data,
+        regenerate_handler=_make_regenerate_handler(hass),
+    )
+
+
+def _deregister_services(hass: HomeAssistant) -> None:
+    """Remove domain-global NestQuest services when the last entry unloads."""
+    async_deregister_services(hass)
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
@@ -489,7 +492,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await _run_horizon_materialization(
             hass, database, _configured_horizon_days(dict(entry.options))
         )
-        _register_regenerate_service(hass)
+        _register_services(hass)
     except BaseException:
         # A failure anywhere after the database is open must not leak the
         # listeners already registered against that (now-closed) database:
@@ -562,11 +565,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             database = getattr(runtime_data, "database", None)
             if database is not None:
                 await database.close()
-    # The ``regenerate`` service is DOMAIN-global: it is torn down only
-    # once the FINAL entry unloads (``hass.data[DOMAIN]`` is now empty),
-    # never when a sibling entry is still loaded.
+    # Domain-global services are torn down only once the FINAL entry
+    # unloads (``hass.data[DOMAIN]`` is now empty), never when a sibling
+    # entry is still loaded.
     if is_last:
-        _deregister_regenerate_service(hass)
+        _deregister_services(hass)
     if getattr(entry, "runtime_data", None) is not None:
         entry.runtime_data = None
     if unload_error is not None:

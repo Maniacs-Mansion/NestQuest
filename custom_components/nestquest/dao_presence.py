@@ -270,6 +270,15 @@ class PresenceOverridesDao:
         )
         return [_override_from_row(row) for row in rows]
 
+    async def get(self, override_id: int) -> PresenceOverrideRecord | None:
+        """Return one override by id, or None when it does not exist."""
+        row = await self._database.fetch_one(
+            f"SELECT {_OVERRIDE_COLUMNS} FROM presence_overrides "
+            "WHERE id = ?",
+            (override_id,),
+        )
+        return _override_from_row(row) if row is not None else None
+
     async def delete(self, override_id: int) -> bool:
         """Remove one override by id; True if a row was removed."""
         result = await self._database.execute(
