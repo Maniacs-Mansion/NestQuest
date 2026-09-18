@@ -755,6 +755,37 @@ def test_complete_instance_on_due_date_after_due_time_is_late(
     _with_db(tmp_path, "late-after-due-time.db")(_body)
 
 
+def test_complete_instance_microsecond_after_due_time_is_late(tmp_path) -> None:
+    async def _body(database, child, instance):
+        due_date = datetime.date.fromisoformat(instance.due_date)
+        instance = await QuestInstancesDao(database).upsert(
+            instance.definition_id,
+            child.id,
+            instance.due_date,
+            _now_stamp(),
+            window=instance.window,
+            due_time="12:00",
+        )
+        now = datetime.datetime(
+            due_date.year, due_date.month, due_date.day, 12, 0, 0, 500,
+            tzinfo=_HA_TZ,
+        )
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            now=now,
+            today=due_date,
+        )
+        rows = await CompletionEventsDao(database).list_by_instance(
+            instance.id
+        )
+        assert rows[0].was_on_time is False
+
+    _with_db(tmp_path, "late-microsecond-after-due-time.db")(_body)
+
+
 def test_complete_instance_no_due_time_on_due_date_is_on_time(
     tmp_path,
 ) -> None:

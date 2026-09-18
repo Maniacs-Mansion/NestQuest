@@ -92,7 +92,7 @@ def _completion_moment(
         completion_date = datetime.date.today()
     if now is None:
         return completion_date, None
-    return completion_date, datetime.time(now.hour, now.minute, now.second)
+    return completion_date, now.time()
 
 
 def _was_on_time(
