@@ -8,12 +8,13 @@ import re
 
 import pytest
 
-from custom_components.nestquest.completion import append_event
+from custom_components.nestquest.completion import append_event, instance_state
 from custom_components.nestquest.dao_children import ChildrenDao
 from custom_components.nestquest.dao_instances import (
     EVENT_COMPLETED,
     EVENT_UNCOMPLETED,
     CompletionEventRecord,
+    CompletionEventsDao,
     QuestInstancesDao,
 )
 from custom_components.nestquest.dao_rules import (
@@ -331,9 +332,115 @@ def test_module_never_exposes_update_or_delete() -> None:
         f"completion.py exposed mutation methods: {forbidden}"
     )
     assert "append_event" in public
+    assert "instance_state" in public
     assert "complete_instance" not in public
     assert "uncomplete_instance" not in public
     source = inspect.getsource(completion)
     assert "UPDATE" not in source
     assert "DELETE" not in source
     assert "INSERT" not in source
+
+
+# ---------------------------------------------------------------------------
+# instance_state: derived from the latest event
+# ---------------------------------------------------------------------------
+
+
+def test_instance_state_open_when_no_events(tmp_path) -> None:
+    async def _body(database, child, instance):
+        assert await instance_state(database, instance.id) == "open"
+
+    _with_db(tmp_path, "state-none.db")(_body)
+
+
+def test_instance_state_open_when_latest_uncompleted(tmp_path) -> None:
+    async def _body(database, child, instance):
+        await append_event(
+            database,
+            instance.id,
+            child.id,
+            EVENT_COMPLETED,
+            actor_source="user",
+            actor_user_id="user-1",
+            was_on_time=True,
+        )
+        await append_event(
+            database,
+            instance.id,
+            child.id,
+            EVENT_UNCOMPLETED,
+            actor_source="user",
+            actor_user_id="user-1",
+        )
+        assert await instance_state(database, instance.id) == "open"
+
+    _with_db(tmp_path, "state-uncompleted.db")(_body)
+
+
+def test_instance_state_unknown_instance_id_raises(tmp_path) -> None:
+    async def _body(database, child, instance):
+        with pytest.raises(ValueError, match="instance_id"):
+            await instance_state(database, instance.id + 999)
+
+    _with_db(tmp_path, "state-unknown.db")(_body)
+
+
+def test_instance_state_rejects_non_integer_id() -> None:
+    async def _body():
+        with pytest.raises(ValueError, match="instance_id"):
+            await instance_state(object(), "1")
+        with pytest.raises(ValueError, match="instance_id"):
+            await instance_state(object(), True)
+
+    _run(_body())
+
+
+def test_instance_state_three_events_returns_done_and_preserves_rows(
+    tmp_path,
+) -> None:
+    async def _body(database, child, instance):
+        base = datetime.datetime(
+            2026, 9, 18, 8, 0, 0, tzinfo=datetime.timezone.utc
+        )
+        await append_event(
+            database,
+            instance.id,
+            child.id,
+            EVENT_COMPLETED,
+            actor_source="user",
+            actor_user_id="user-1",
+            was_on_time=True,
+            now=base,
+        )
+        await append_event(
+            database,
+            instance.id,
+            child.id,
+            EVENT_UNCOMPLETED,
+            actor_source="user",
+            actor_user_id="user-1",
+            now=base + datetime.timedelta(seconds=1),
+        )
+        await append_event(
+            database,
+            instance.id,
+            child.id,
+            EVENT_COMPLETED,
+            actor_source="user",
+            actor_user_id="user-1",
+            was_on_time=False,
+            now=base + datetime.timedelta(seconds=2),
+        )
+        events = CompletionEventsDao(database)
+        before = await events.list_by_instance(instance.id)
+        assert [e.event_type for e in before] == [
+            EVENT_COMPLETED,
+            EVENT_UNCOMPLETED,
+            EVENT_COMPLETED,
+        ]
+        assert await instance_state(database, instance.id) == "done"
+        after = await events.list_by_instance(instance.id)
+        assert after == before
+        assert len(after) == 3
+
+    _with_db(tmp_path, "state-three.db")(_body)

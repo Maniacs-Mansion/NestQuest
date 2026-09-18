@@ -5,8 +5,10 @@ Sits between the Feature 09 service gate and the typed
 validation and the UTC occurred-at stamp here, and never talk to the
 DAO or SQL directly.  This module is the only Feature-08 caller of
 :meth:`~.dao_instances.CompletionEventsDao.append`.  Completing and
-un-completing an instance (no-op-if-already-done, derived state) arrive
-in later tasks; this module is the append wrapper only.
+un-completing an instance (no-op-if-already-done) arrive in later
+tasks.  Instance current state is derived from the latest event via
+:func:`instance_state` (``open`` / ``done``); there is no status
+column.
 
 Actor policy matches the schema CHECKs (D-008): ``actor_source`` is
 ``'user'`` or ``'panel'`` only — never ``'service'``.  ``'user'``
@@ -25,11 +27,13 @@ from __future__ import annotations
 
 import datetime
 
+from .dao_children import _connection_lock
 from .dao_instances import (
     EVENT_COMPLETED,
     EVENT_UNCOMPLETED,
     CompletionEventRecord,
     CompletionEventsDao,
+    QuestInstancesDao,
 )
 from .db import NestQuestDatabase
 
@@ -162,4 +166,35 @@ async def append_event(
         was_on_time,
         actor_user_id=actor_user_id,
         actor_child_id=actor_child_id,
+    )
+
+
+async def instance_state(
+    database: NestQuestDatabase,
+    instance_id: int,
+) -> str:
+    """Return ``open`` or ``done`` from the instance's latest event.
+
+    No events, or a latest event of uncompleted, is ``open``.  A latest
+    event of completed is ``done``.  Unknown ``instance_id`` raises
+    ValueError naming the field.  Existence and the latest event are
+    read inside the connection lock so the answer is one snapshot.
+    """
+    instance_id = _validate_int_id(instance_id, "instance_id")
+    async with _connection_lock(database):
+        instance = await QuestInstancesDao(database).get_by_id(instance_id)
+        if instance is None:
+            raise ValueError(
+                f"instance_id: quest instance {instance_id} does not exist"
+            )
+        latest = await CompletionEventsDao(database).get_latest_for_instance(
+            instance_id
+        )
+    if latest is None or latest.event_type == EVENT_UNCOMPLETED:
+        return "open"
+    if latest.event_type == EVENT_COMPLETED:
+        return "done"
+    raise ValueError(
+        f"event_type must be '{EVENT_COMPLETED}' or "
+        f"'{EVENT_UNCOMPLETED}', got {latest.event_type!r}"
     )
