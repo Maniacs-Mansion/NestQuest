@@ -1361,3 +1361,90 @@ def test_list_missed_for_child_rejects_non_integer_id() -> None:
             await list_missed_for_child(object(), True, D1, D1)
 
     _run(_body())
+
+
+# ---------------------------------------------------------------------------
+# lifecycle: complete → uncomplete → complete
+# ---------------------------------------------------------------------------
+
+
+def test_complete_uncomplete_complete_three_events_final_done(
+    tmp_path,
+) -> None:
+    async def _body(database, child, instance):
+        due_date = datetime.date.fromisoformat(instance.due_date)
+        later = due_date + datetime.timedelta(days=1)
+        instance = await QuestInstancesDao(database).upsert(
+            instance.definition_id,
+            child.id,
+            instance.due_date,
+            _now_stamp(),
+            window=instance.window,
+            due_time="12:00",
+        )
+        events = CompletionEventsDao(database)
+
+        first = await complete_instance(
+            database,
+            instance.id,
+            actor_source="panel",
+            actor_child_id=child.id,
+            now=_ha_local(due_date, 11, 0),
+            today=due_date,
+        )
+        assert first == "done"
+        before_uncomplete = await events.list_by_instance(instance.id)
+        assert len(before_uncomplete) == 1
+        original = before_uncomplete[0]
+        assert original.event_type == EVENT_COMPLETED
+        assert original.was_on_time is True
+        assert original.actor_source == "panel"
+        assert original.actor_user_id is None
+        assert original.actor_child_id == child.id
+        assert await instance_state(database, instance.id, today=later) == "done"
+
+        reversed_state = await uncomplete_instance(
+            database,
+            instance.id,
+            actor_source="user",
+            actor_user_id="user-1",
+            now=_ha_local(later, 8, 0),
+            today=later,
+        )
+        assert reversed_state == "missed"
+        assert await instance_state(database, instance.id, today=later) == "missed"
+
+        second = await complete_instance(
+            database,
+            instance.id,
+            actor_source="panel",
+            actor_child_id=child.id,
+            now=_ha_local(later, 9, 0),
+            today=later,
+        )
+        assert second == "done"
+        assert await instance_state(database, instance.id, today=later) == "done"
+
+        after = await events.list_by_instance(instance.id)
+        assert [row.event_type for row in after] == [
+            EVENT_COMPLETED,
+            EVENT_UNCOMPLETED,
+            EVENT_COMPLETED,
+        ]
+        assert after[0].id == original.id
+        assert after[0].occurred_at == original.occurred_at
+        assert after[0].actor_source == original.actor_source
+        assert after[0].actor_user_id == original.actor_user_id
+        assert after[0].actor_child_id == original.actor_child_id
+        assert after[0].was_on_time is True
+        assert after[1].actor_source == "user"
+        assert after[1].actor_user_id == "user-1"
+        assert after[1].actor_child_id is None
+        assert after[1].was_on_time is None
+        assert after[2].actor_source == "panel"
+        assert after[2].actor_user_id is None
+        assert after[2].actor_child_id == child.id
+        assert after[2].was_on_time is False
+        assert all(row.event_type != "missed" for row in after)
+
+    _with_db(tmp_path, "lifecycle-three.db")(_body)
