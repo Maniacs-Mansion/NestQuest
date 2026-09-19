@@ -65,14 +65,17 @@ def stamp_value_template(bp: dict) -> str:
 
 
 def trigger_payload(child_id: int, child_name: str) -> dict:
-    """A nestquest_child_day_complete trigger payload fixture."""
+    """A nestquest_child_day_complete trigger fixture: HA exposes an
+    event trigger's payload as trigger.event.data."""
     return {
-        "payload": {
-            "child_id": child_id,
-            "child_name": child_name,
-            "quests_due": 3,
-            "quests_completed": 3,
-            "occurred_at": "2026-09-19T15:00:00+00:00",
+        "event": {
+            "data": {
+                "child_id": child_id,
+                "child_name": child_name,
+                "quests_due": 3,
+                "quests_completed": 3,
+                "occurred_at": "2026-09-19T15:00:00+00:00",
+            }
         }
     }
 
@@ -294,3 +297,17 @@ def test_every_blueprint_event_reference_is_real() -> None:
     assert celebration()["triggers"][0]["event_type"] == (
         "nestquest_child_day_complete"
     )
+
+
+def test_celebration_uses_the_event_trigger_data_path() -> None:
+    """HA exposes an event trigger's payload as trigger.event.data —
+    never trigger.payload (Codex review regression)."""
+    bp = celebration()
+    for value in iter_strings(bp):
+        assert "trigger.payload" not in value, value
+    default_message = bp["blueprint"]["input"]["celebration_message"][
+        "default"
+    ]
+    assert "trigger.event.data.child_name" in default_message
+    for condition in celebration_conditions(bp):
+        assert "trigger.payload" not in condition["value_template"]

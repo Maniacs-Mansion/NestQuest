@@ -60,7 +60,7 @@ triggers:
     event_type: nestquest_child_day_complete
 conditions:
   - condition: template
-    value_template: "{{ trigger.payload.child_name == 'Declan' }}"
+    value_template: "{{ trigger.event.data.child_name == 'Declan' }}"
 actions:
   - action: notify.mobile_app_declans_phone
     data:
@@ -134,7 +134,7 @@ day-rollover time.
 # afternoon_reminder: afternoon_time 15:00, same notify target
 # end_of_day_report:  report_time 20:00, send_even_when_clear false, same target
 # day_complete_celebration: input_text.nestquest_last_celebrated,
-#                            celebration_message "Legendary! {{ trigger.payload.child_name }} cleared every quest today!"
+#                            celebration_message "Legendary! {{ trigger.event.data.child_name }} cleared every quest today!"
 #
 # Every blueprint has its own send/celebrate toggle input; turn an
 # automation off entirely from HA's automation menu.

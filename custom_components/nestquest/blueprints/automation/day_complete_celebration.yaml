@@ -34,9 +34,9 @@ blueprint:
       name: Celebration message
       description: >-
         The message sent when a child clears every quest today. May
-        use the event payload: trigger.payload.child_name,
-        trigger.payload.quests_due and trigger.payload.quests_completed.
-      default: "Legendary! {{ trigger.payload.child_name }} cleared every quest today!"
+        use the event payload: trigger.event.data.child_name,
+        trigger.event.data.quests_due and trigger.event.data.quests_completed.
+      default: "Legendary! {{ trigger.event.data.child_name }} cleared every quest today!"
       selector:
         text: {}
     celebrate:
@@ -80,7 +80,7 @@ conditions:
   # reads as '' and celebrates.
   - condition: template
     value_template: >-
-      {{ (trigger.payload.child_id ~ ':' ~ now().strftime('%Y-%m-%d'))
+      {{ (trigger.event.data.child_id ~ ':' ~ now().strftime('%Y-%m-%d'))
          not in ((states(last_celebrated_helper) or '')
                   .split(',')
                   | select('ne', '')
@@ -106,4 +106,4 @@ actions:
             {%- set ns.entries = ns.entries + [entry] -%}
           {%- endif -%}
         {%- endfor -%}
-        {{ (ns.entries + [trigger.payload.child_id ~ ':' ~ today]) | join(',') }}
+        {{ (ns.entries + [trigger.event.data.child_id ~ ':' ~ today]) | join(',') }}
