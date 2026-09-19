@@ -256,3 +256,19 @@ def test_celebration_never_hard_codes_notify_target() -> None:
         "the input description should show a placeholder example"
     )
     assert bp["actions"][0]["action"] == BlueprintInput("notify_target")
+
+def test_celebration_dedupe_entry_equality_not_substring() -> None:
+    """Child ids sharing a prefix must not suppress each other: after
+    child 11 is celebrated, child 1 still celebrates (whole-entry
+    comparison, not substring)."""
+    assert render_dedupe("11:2026-09-19", child_id=11) == "False"
+    assert render_dedupe("11:2026-09-19", child_id=1) == "True", (
+        "child 1's entry must not be found inside child 11's entry"
+    )
+    assert render_dedupe("1:2026-09-19", child_id=11) == "True"
+
+
+def test_celebration_mode_is_queued() -> None:
+    """Two children completing at nearly the same time must both be
+    processed: queued mode does not drop the second event."""
+    assert celebration()["mode"] == "queued"

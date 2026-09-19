@@ -60,7 +60,7 @@ blueprint:
           filter:
             - domain: input_text
 
-mode: single
+mode: queued
 
 variables:
   celebrate: !input celebrate
@@ -74,12 +74,17 @@ conditions:
   - condition: template
     value_template: "{{ celebrate | bool }}"
   # Once-per-child-per-day dedupe: celebrate only when THIS child has
-  # no entry for today in the helper. An unset or missing helper reads
-  # as '' and celebrates.
+  # no equal entry for today in the helper. Entries compare as whole
+  # comma-separated tokens — a substring check would wrongly suppress
+  # child 1 after child 11 was celebrated. An unset or missing helper
+  # reads as '' and celebrates.
   - condition: template
     value_template: >-
       {{ (trigger.payload.child_id ~ ':' ~ now().strftime('%Y-%m-%d'))
-         not in (states(last_celebrated_helper) or '') }}
+         not in ((states(last_celebrated_helper) or '')
+                  .split(',')
+                  | select('ne', '')
+                  | list) }}
 
 actions:
   - action: !input notify_target
