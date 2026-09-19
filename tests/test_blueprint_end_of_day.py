@@ -294,3 +294,45 @@ def test_end_of_day_report_never_hard_codes_notify_target() -> None:
         "the input description should show a placeholder example"
     )
     assert single_action(bp)["action"] == BlueprintInput("notify_target")
+
+def test_end_of_day_report_guard_true_when_remaining_unavailable() -> None:
+    """A present child whose remaining sensor is missing or reads
+    'unavailable' must NOT look like all-clear: the degraded state
+    reaches the parent (Codex review regression)."""
+    states = make_states(
+        sensors=[
+            TemplateState(
+                "sensor.nestquest_alice_quests_due_today",
+                "3",
+                {"child_name": "Alice", "child_id": 1, "present": True},
+            ),
+            TemplateState(
+                "sensor.nestquest_alice_quests_remaining_today",
+                "unavailable",
+                {"child_id": 1},
+            ),
+        ],
+    )
+    rendered = render(
+        clear_guard(end_of_day_report()),
+        states=states,
+        send_even_when_clear=False,
+    )
+    assert rendered.strip() == "True"
+
+    # A missing remaining sensor entirely: also report-worthy.
+    states_missing = make_states(
+        sensors=[
+            TemplateState(
+                "sensor.nestquest_alice_quests_due_today",
+                "3",
+                {"child_name": "Alice", "child_id": 1, "present": True},
+            ),
+        ],
+    )
+    rendered_missing = render(
+        clear_guard(end_of_day_report()),
+        states=states_missing,
+        send_even_when_clear=False,
+    )
+    assert rendered_missing.strip() == "True"

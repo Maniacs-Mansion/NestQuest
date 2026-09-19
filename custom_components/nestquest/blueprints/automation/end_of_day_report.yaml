@@ -66,8 +66,10 @@ conditions:
   - condition: template
     value_template: "{{ send_report | bool }}"
   # Skip an all-clear day unless the household opted into
-  # send-even-when-clear: the guard is false when no present child
-  # has any quests remaining today.
+  # send-even-when-clear: the guard is false only when every present
+  # child has a usable remaining count of zero. A MISSING or
+  # non-numeric remaining sensor reads as -1 and counts as open —
+  # a degraded state must reach the parent, not look like all-clear.
   - condition: template
     value_template: |
       {%- set ns = namespace(any_open=false) -%}
@@ -79,7 +81,7 @@ conditions:
                 | selectattr('attributes.child_id', 'eq', due.attributes.child_id)
                 | map(attribute='state')
                 | list -%}
-          {%- if remaining_values and (remaining_values | first | int) > 0 -%}
+          {%- if not remaining_values or (remaining_values | first | int(-1)) != 0 -%}
             {%- set ns.any_open = true -%}
           {%- endif -%}
         {%- endif -%}
