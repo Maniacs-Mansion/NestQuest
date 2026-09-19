@@ -278,3 +278,102 @@ async def test_day_complete_ignored_for_backdated_completion(
     # path fires), and the follow-up service call on the now-done
     # future instance was a no-op: today's single completion stands.
     assert len(hass.bus.fired(EVENT_QUEST_COMPLETED)) == len(instances)
+
+
+async def test_completion_updates_entities_immediately(
+    hass, make_entry
+) -> None:
+    """The remaining-today sensor reflects the completion the moment
+    the service call returns — no manual refresh — and the day-complete
+    event fired exactly once when the day became clear."""
+    from custom_components.nestquest.const import EVENT_CHILD_DAY_COMPLETE
+
+    entry, child, instances = await _setup_and_seed(hass, make_entry)
+    from conftest import wire_entry_to_registry  # noqa: F401
+
+    coordinator = entry.runtime_data.coordinator
+    # Entities only exist after one refresh since they were seeded
+    # after setup; create them, then prove the service path refreshes.
+    await coordinator.async_refresh()
+    remaining_before = hass.entities[
+        f"nestquest_child_{child.id}_quests_remaining_today"
+    ].native_value
+    assert remaining_before == len(instances)
+
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_COMPLETE_QUEST,
+        {
+            "instance_id": instances[0].id,
+            "actor": "panel",
+            "actor_child_id": child.id,
+        },
+    )
+    remaining_after = hass.entities[
+        f"nestquest_child_{child.id}_quests_remaining_today"
+    ].native_value
+    assert remaining_after == len(instances) - 1, (
+        "sensor must reflect the completion without a manual refresh"
+    )
+    assert len(hass.bus.fired(EVENT_CHILD_DAY_COMPLETE)) == (
+        1 if len(instances) == 1 else 0
+    )
+
+
+async def test_uncompletion_updates_entities_immediately(
+    hass, make_entry
+) -> None:
+    entry, child, instances = await _setup_and_seed(hass, make_entry)
+    coordinator = entry.runtime_data.coordinator
+    await coordinator.async_refresh()
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_COMPLETE_QUEST,
+        {
+            "instance_id": instances[0].id,
+            "actor": "panel",
+            "actor_child_id": child.id,
+        },
+    )
+    completed_after_complete = hass.entities[
+        f"nestquest_child_{child.id}_quests_completed_today"
+    ].native_value
+    assert completed_after_complete == 1
+
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_UNCOMPLETE_QUEST,
+        {"instance_id": instances[0].id, "actor": "user"},
+        context=ADMIN_CTX,
+    )
+    completed_after_uncomplete = hass.entities[
+        f"nestquest_child_{child.id}_quests_completed_today"
+    ].native_value
+    assert completed_after_uncomplete == 0, (
+        "sensor must reflect the reversal without a manual refresh"
+    )
+
+
+async def test_forced_refreshes_serialize_no_stale_publish(
+    hass, make_entry
+) -> None:
+    """Overlapping forced refreshes never interleave: a slow pass
+    pauses mid-snapshot, and the queued pass still publishes AFTER
+    it, so the last published snapshot reflects the latest mutation."""
+    import asyncio
+
+    entry, child, instances = await _setup_and_seed(hass, make_entry)
+    coordinator = entry.runtime_data.coordinator
+    order: list[str] = []
+
+    async def _slow_update():
+        order.append("start")
+        await asyncio.sleep(0.01)
+        order.append("end")
+        return coordinator.data
+
+    coordinator._async_update_data = _slow_update
+    await asyncio.gather(coordinator.async_refresh(), coordinator.async_refresh())
+    assert order == ["start", "end", "start", "end"], (
+        "overlapping refreshes must serialize: " + str(order)
+    )

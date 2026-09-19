@@ -25,6 +25,7 @@ the admin header degrades to a harmless zero instead of guessing.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
@@ -97,7 +98,16 @@ class NestQuestSnapshot:
 
 
 class NestQuestCoordinator(DataUpdateCoordinator):
-    """Shared refresh cycle for every NestQuest entity."""
+    """Shared refresh cycle for every NestQuest entity.
+
+    Forced refreshes (the service paths pushing an immediate update
+    after a completion) are SERIALIZED per entry: overlapping
+    complete/uncomplete calls must not interleave their snapshot
+    passes, or an older pass could publish a stale snapshot AFTER a
+    newer one and leave entities wrong until the next poll.  Real
+    HA's coordinator already serializes internally; the lock keeps
+    the same guarantee on the stand-in and costs nothing upstream.
+    """
 
     def __init__(
         self,
@@ -122,6 +132,14 @@ class NestQuestCoordinator(DataUpdateCoordinator):
         )
         self.entry_id = entry_id
         self.database = database
+        self._refresh_lock = asyncio.Lock()
+
+    async def async_refresh(self) -> None:
+        """One refresh at a time; a queued refresh runs AFTER the
+        in-flight one publishes, so the last snapshot always reflects
+        the latest mutation."""
+        async with self._refresh_lock:
+            await super().async_refresh()
 
     def _local_now(self) -> datetime.datetime:
         time_zone = ZoneInfo(self.hass.config.time_zone)
