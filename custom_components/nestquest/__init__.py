@@ -20,11 +20,14 @@ from .const import (
     CONF_ADMIN_USER_IDS,
     CONF_DAY_ROLLOVER_TIME,
     CONF_HORIZON_DAYS,
+    CONF_UPDATE_INTERVAL,
     DEFAULT_DAY_ROLLOVER_TIME,
     DEFAULT_HORIZON_DAYS,
+    DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     LOGGER,
 )
+from .coordinator import NestQuestCoordinator
 from .db import NestQuestDatabase
 from .materialize import materialize as _materialize_run
 from .migrations import apply_migrations
@@ -238,6 +241,7 @@ class NestQuestRuntimeData:
     database: NestQuestDatabase
     remove_update_listener: Callable[[], Any]
     remove_time_change_listener: Callable[[], Any]
+    coordinator: Any = None
 
 
 async def _async_owner_user_ids(hass: HomeAssistant) -> list[str]:
@@ -493,6 +497,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass, database, _configured_horizon_days(dict(entry.options))
         )
         _register_services(hass)
+        # The shared Feature 10 coordinator: one refresh cycle every
+        # entity reads from (CONF_UPDATE_INTERVAL seconds, default
+        # five minutes).  Created AFTER services so a failure below
+        # unwinds them through the except path's listener handling.
+        coordinator = NestQuestCoordinator(
+            hass,
+            entry_id=entry.entry_id,
+            database=database,
+            update_interval_seconds=entry.options.get(
+                CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
+            ),
+        )
+        await coordinator.async_config_entry_first_refresh()
     except BaseException:
         # A failure anywhere after the database is open must not leak the
         # listeners already registered against that (now-closed) database:
@@ -521,6 +538,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         database=database,
         remove_update_listener=remove_update_listener,
         remove_time_change_listener=remove_time_change_listener,
+        coordinator=coordinator,
     )
     entry.runtime_data = runtime_data
     hass.data[DOMAIN][entry.entry_id] = runtime_data
@@ -565,6 +583,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             database = getattr(runtime_data, "database", None)
             if database is not None:
                 await database.close()
+            # Tear the shared coordinator down after the DB close: no
+            # listener may outlive the connection it reads.
+            coordinator = getattr(runtime_data, "coordinator", None)
+            if coordinator is not None:
+                shutdown = getattr(coordinator, "async_shutdown", None)
+                if shutdown is not None:
+                    await shutdown()
     # Domain-global services are torn down only once the FINAL entry
     # unloads (``hass.data[DOMAIN]`` is now empty), never when a sibling
     # entry is still loaded.

@@ -128,6 +128,21 @@ def _derived_state(
     )
 
 
+def derive_state(
+    instance: QuestInstanceRecord,
+    latest: CompletionEventRecord | None,
+    today: datetime.date,
+) -> str:
+    """Public state derivation for the Feature 10 coordinator.
+
+    Thin wrapper over :func:`_derived_state`: ``open``, ``done``, or
+    ``missed`` from the latest event plus the due date (``missed`` is
+    derived, never an event_type).  ``today`` is the caller-resolved
+    HA-local date.
+    """
+    return _derived_state(instance, latest, today)
+
+
 def _was_on_time(
     instance: QuestInstanceRecord,
     now: datetime.datetime | None,
