@@ -272,3 +272,25 @@ def test_celebration_mode_is_queued() -> None:
     """Two children completing at nearly the same time must both be
     processed: queued mode does not drop the second event."""
     assert celebration()["mode"] == "queued"
+
+
+def test_every_blueprint_event_reference_is_real() -> None:
+    """Every event a blueprint triggers on is one NestQuest actually
+    fires or defines (Feature 10/11) — no invented event names."""
+    from tests.blueprint_helpers import load_blueprints
+
+    real_events = {
+        "nestquest_quest_completed",
+        "nestquest_quest_uncompleted",
+        "nestquest_quest_missed",
+        "nestquest_child_day_complete",
+    }
+    for name, bp in load_blueprints().items():
+        for trigger in bp.get("triggers", []):
+            if trigger.get("trigger") == "event":
+                assert trigger["event_type"] in real_events, (
+                    f"{name}: invented event {trigger['event_type']!r}"
+                )
+    assert celebration()["triggers"][0]["event_type"] == (
+        "nestquest_child_day_complete"
+    )
