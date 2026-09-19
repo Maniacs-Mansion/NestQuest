@@ -26,6 +26,7 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     LOGGER,
+    PLATFORMS,
 )
 from .coordinator import NestQuestCoordinator
 from .db import NestQuestDatabase
@@ -511,6 +512,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ),
         )
         await coordinator.async_config_entry_first_refresh()
+        runtime_data = NestQuestRuntimeData(
+            entry_id=entry.entry_id,
+            options=dict(entry.options),
+            database=database,
+            remove_update_listener=remove_update_listener,
+            remove_time_change_listener=remove_time_change_listener,
+            coordinator=coordinator,
+        )
+        # runtime_data is assigned BEFORE the platforms forward so each
+        # platform's async_setup_entry reads its coordinator off the
+        # entry (the HA runtime-data contract); a forward failure below
+        # unwinds it through the except path.
+        entry.runtime_data = runtime_data
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except BaseException:
         # A failure anywhere after the database is open must not leak the
         # listeners already registered against that (now-closed) database:
@@ -538,19 +553,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await coordinator.async_shutdown()
             except BaseException:
                 pass
+        # A platform-forward failure reached this unwind AFTER
+        # runtime_data was assigned: clear it so no later unload path
+        # closes the already-closed database through the stale record.
+        if getattr(entry, "runtime_data", None) is not None:
+            entry.runtime_data = None
         await database.close()
         raise
     assert remove_update_listener is not None
     assert remove_time_change_listener is not None
-    runtime_data = NestQuestRuntimeData(
-        entry_id=entry.entry_id,
-        options=dict(entry.options),
-        database=database,
-        remove_update_listener=remove_update_listener,
-        remove_time_change_listener=remove_time_change_listener,
-        coordinator=coordinator,
-    )
-    entry.runtime_data = runtime_data
     hass.data[DOMAIN][entry.entry_id] = runtime_data
     return True
 
@@ -564,6 +575,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data.pop(DOMAIN, None)
     if runtime_data is None:
         runtime_data = getattr(entry, "runtime_data", None)
+    # Platforms unload FIRST (mirroring HA conventions): entity
+    # listeners must not outlive the database and coordinator the
+    # teardown below closes.
+    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     unload_error: BaseException | None = None
     if runtime_data is not None:
         remove_update_listener = getattr(runtime_data, "remove_update_listener", None)
