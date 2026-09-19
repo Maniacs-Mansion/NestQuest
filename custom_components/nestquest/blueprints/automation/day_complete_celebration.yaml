@@ -1,0 +1,109 @@
+blueprint:
+  name: NestQuest day complete celebration
+  description: >-
+    Celebrates the moment a child clears every quest for the day: the
+    automation is driven by the nestquest_child_day_complete event,
+    which NestQuest only fires when quests were owed and all of them
+    are complete — a zero-quest day can never trigger this
+    celebration. Once-per-child-per-day dedupe: point
+    last_celebrated_helper at ONE input_text helper (create it under
+    Settings, Devices and Services, Helpers — plain text). The
+    automation records each celebrated child as
+    "<child_id>:<today>" inside that helper, and a child who
+    un-completes a quest and completes it again the same day is
+    celebrated once, not twice — while a SECOND child clearing their
+    day the same date is still celebrated in full. The helper is
+    pruned to today's entries on every celebration, so it never
+    grows past one entry per child per day. A helper that does not
+    exist yet, or has never been set, lets the first celebration
+    through. The notification message may use the event payload's
+    child_name, quests_due and quests_completed. The notify service
+    is chosen by the household when importing this blueprint —
+    NestQuest never hard-codes a personal notify target.
+  domain: automation
+  input:
+    notify_target:
+      name: Notify service
+      description: >-
+        The Home Assistant notify service to call for the celebration,
+        for example notify.mobile_app_your_phone — a placeholder;
+        pick the notify service for your own device.
+      selector:
+        text: {}
+    celebration_message:
+      name: Celebration message
+      description: >-
+        The message sent when a child clears every quest today. May
+        use the event payload: trigger.payload.child_name,
+        trigger.payload.quests_due and trigger.payload.quests_completed.
+      default: "Legendary! {{ trigger.payload.child_name }} cleared every quest today!"
+      selector:
+        text: {}
+    celebrate:
+      name: Send the celebration
+      description: >-
+        Turn off to keep the automation installed but skip the
+        notification entirely.
+      default: true
+      selector:
+        boolean: {}
+    last_celebrated_helper:
+      name: Last-celebrated helper
+      description: >-
+        A single input_text helper remembering which children were
+        already celebrated today, as "<child_id>:<date>" entries
+        separated by commas. The automation skips a child whose entry
+        for today is already stored, and rewrites the helper with only
+        today's entries plus the new one after each celebration.
+      selector:
+        entity:
+          filter:
+            - domain: input_text
+
+mode: queued
+
+variables:
+  celebrate: !input celebrate
+  last_celebrated_helper: !input last_celebrated_helper
+
+triggers:
+  - trigger: event
+    event_type: nestquest_child_day_complete
+
+conditions:
+  - condition: template
+    value_template: "{{ celebrate | bool }}"
+  # Once-per-child-per-day dedupe: celebrate only when THIS child has
+  # no equal entry for today in the helper. Entries compare as whole
+  # comma-separated tokens — a substring check would wrongly suppress
+  # child 1 after child 11 was celebrated. An unset or missing helper
+  # reads as '' and celebrates.
+  - condition: template
+    value_template: >-
+      {{ (trigger.payload.child_id ~ ':' ~ now().strftime('%Y-%m-%d'))
+         not in ((states(last_celebrated_helper) or '')
+                  .split(',')
+                  | select('ne', '')
+                  | list) }}
+
+actions:
+  - action: !input notify_target
+    data:
+      title: NestQuest day complete
+      message: !input celebration_message
+  # Record this child's celebration, keeping only today's entries so the
+  # helper never outgrows its text limit and stale entries cannot block
+  # next week's celebrations.
+  - action: input_text.set_value
+    target:
+      entity_id: !input last_celebrated_helper
+    data:
+      value: >-
+        {%- set today = now().strftime('%Y-%m-%d') -%}
+        {%- set ns = namespace(entries=[]) -%}
+        {%- for entry in (states(last_celebrated_helper) or '').split(',') -%}
+          {%- if entry and entry.endswith(':' ~ today) -%}
+            {%- set ns.entries = ns.entries + [entry] -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{ (ns.entries + [trigger.payload.child_id ~ ':' ~ today]) | join(',') }}
