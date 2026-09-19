@@ -71,22 +71,24 @@ async def _instance_payload(
 
 
 async def fire_quest_completed(
-    hass, database: NestQuestDatabase, instance_id: int
+    hass,
+    database: NestQuestDatabase,
+    instance_id: int,
+    *,
+    was_on_time: bool | None,
 ) -> None:
     """Fire ``nestquest_quest_completed`` and, when the completion
     cleared the child's whole day, ``nestquest_child_day_complete``.
 
     Called by the complete_quest service handler AFTER an actual
-    completion transition; a no-op re-complete never reaches here.
+    completion transition, with the completion's ``was_on_time`` —
+    computed under the completion lock and carried on the result — so
+    the payload never re-reads mutable latest state a racing reversal
+    could have replaced.  A no-op re-complete never reaches here.
     """
     now_stamp = _now_stamp()
     payload = await _instance_payload(database, instance_id, now_stamp)
-    latest = await CompletionEventsDao(database).get_latest_for_instance(
-        instance_id
-    )
-    payload["was_on_time"] = (
-        latest.was_on_time if latest is not None else None
-    )
+    payload["was_on_time"] = was_on_time
     hass.bus.async_fire(EVENT_QUEST_COMPLETED, payload)
 
     # Day-complete: quests were owed today and none remain (the same

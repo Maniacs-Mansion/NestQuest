@@ -374,14 +374,25 @@ class CompletionResult(str):
     appended an event (decided under the same lock as the append), so
     a caller — the Feature 09 service path firing bus events —
     announces a transition exactly once even under a concurrent
-    duplicate call where the loser's write is a no-op.
+    duplicate call where the loser's write is a no-op.  A completion
+    also carries the ``was_on_time`` verdict computed under that same
+    lock, so the event payload never re-reads mutable latest state a
+    racing reversal could have replaced.
     """
 
     appended: bool
+    was_on_time: bool | None
 
-    def __new__(cls, state: str, *, appended: bool) -> "CompletionResult":
+    def __new__(
+        cls,
+        state: str,
+        *,
+        appended: bool,
+        was_on_time: bool | None = None,
+    ) -> "CompletionResult":
         obj = super().__new__(cls, state)
         obj.appended = appended
+        obj.was_on_time = was_on_time
         return obj
 
 
@@ -429,6 +440,10 @@ async def complete_instance(
                 f"event_type must be '{EVENT_COMPLETED}' or "
                 f"'{EVENT_UNCOMPLETED}', got {latest.event_type!r}"
             )
+        # Computed under the completion lock and carried on the result:
+        # the bus event must report THIS completion's timing, never a
+        # re-read of the latest event a racing reversal could replace.
+        on_time = _was_on_time(instance, now, today)
         await append_event(
             database,
             instance.id,
@@ -437,10 +452,10 @@ async def complete_instance(
             actor_source=actor_source,
             actor_user_id=actor_user_id,
             actor_child_id=actor_child_id,
-            was_on_time=_was_on_time(instance, now, today),
+            was_on_time=on_time,
             now=now,
         )
-    return CompletionResult("done", appended=True)
+    return CompletionResult("done", appended=True, was_on_time=on_time)
 
 
 async def uncomplete_instance(

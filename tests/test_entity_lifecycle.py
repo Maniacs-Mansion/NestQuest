@@ -157,3 +157,31 @@ async def test_restart_equivalent_restores_all_entity_states(
     assert hass.entities[
         "nestquest_household_quests_completed_today"
     ].native_value == 1
+
+
+async def test_unload_shuts_coordinator_before_closing_database(
+    hass, make_entry
+) -> None:
+    """The coordinator's listeners are cleared while the database is
+    still connected: a scheduled refresh must never race the close."""
+    entry = wire_entry_to_registry(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    coordinator = entry.runtime_data.coordinator
+    database = entry.runtime_data.database
+    seen_connected = []
+
+    async def _probe_shutdown():
+        seen_connected.append(database.connected)
+
+    original_close = database.close
+
+    async def _recording_close():
+        seen_connected.append("closing")
+        await original_close()
+
+    coordinator.async_shutdown = _probe_shutdown
+    database.close = _recording_close
+    assert await async_unload_entry(hass, entry) is True
+    assert seen_connected == [True, "closing"], (
+        "coordinator shutdown must precede the database close"
+    )

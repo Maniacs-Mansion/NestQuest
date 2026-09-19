@@ -317,7 +317,12 @@ def _complete_quest(
             **_actor_kwargs(call),
         )
         if result.appended:
-            await fire_quest_completed(hass, runtime.database, instance_id)
+            await fire_quest_completed(
+                hass,
+                runtime.database,
+                instance_id,
+                was_on_time=result.was_on_time,
+            )
             await _refresh_entities(runtime)
 
     return _with_errors(_handler)

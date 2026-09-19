@@ -615,16 +615,19 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if unload_error is None:
                         unload_error = err
         finally:
-            database = getattr(runtime_data, "database", None)
-            if database is not None:
-                await database.close()
-            # Tear the shared coordinator down after the DB close: no
-            # listener may outlive the connection it reads.
+            # The coordinator's entity listeners must stop BEFORE the
+            # database closes: a scheduled refresh starting during the
+            # close await would touch a cleared connection.  (The
+            # platform unload above already removed the entities; this
+            # clears the coordinator's own remaining listeners.)
             coordinator = getattr(runtime_data, "coordinator", None)
             if coordinator is not None:
                 shutdown = getattr(coordinator, "async_shutdown", None)
                 if shutdown is not None:
                     await shutdown()
+            database = getattr(runtime_data, "database", None)
+            if database is not None:
+                await database.close()
     # Domain-global services are torn down only once the FINAL entry
     # unloads (``hass.data[DOMAIN]`` is now empty), never when a sibling
     # entry is still loaded.
