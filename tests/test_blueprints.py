@@ -1,17 +1,17 @@
-"""Tests for the NestQuest automation blueprints.
+"""Tests for the NestQuest morning-summary automation blueprint.
 
 The blueprints are YAML data consumed by Home Assistant's blueprint
 engine; the integration itself never imports yaml or jinja2.  These
 tests therefore exercise them exactly the way HA would: parse the YAML
 (with a loader that understands ``!input`` tags), then render the
 message template with a plain jinja2 environment over a fixture state
-set shaped like HA's template state objects.
+set shaped like HA's template state objects — all via the shared
+harness in :mod:`tests.blueprint_helpers`.
 
-The harness is mock-only (see conftest.py), so the fixtures model just
-the surface the templates touch: ``states.binary_sensor`` /
-``states.sensor`` lists of objects carrying ``entity_id``, ``state`` and
-``attributes``.  Jinja's ``search``/``match`` selectattr tests are
-Home Assistant additions, registered here explicitly.
+This module also carries the directory-wide blueprint discipline tests
+(entity-id shapes, domain mentions, notify-target hygiene), which scan
+EVERY blueprint file under the automation directory, so new blueprint
+files are covered automatically.
 
 Rendering policy under test (settled for the morning summary): a
 PRESENT child always appears — with remaining quests owed, or as "all
@@ -21,109 +21,26 @@ omitted entirely, never listed with zero quests.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from types import SimpleNamespace
-
-import jinja2
-import yaml
 
 from custom_components.nestquest.const import DEFAULT_MORNING_SUMMARY_TIME
 
-REPO_ROOT = Path(__file__).parent.parent
-BLUEPRINT_DIR = (
-    REPO_ROOT / "custom_components" / "nestquest" / "blueprints" / "automation"
+from tests.blueprint_helpers import (
+    notify_data,
+    ALLOWED_ENTITY_SHAPES,
+    BlueprintInput,
+    _ENTITY_LITERAL_RE,
+    _MENTION_RE,
+    iter_strings,
+    load_blueprints,
+    make_states,
+    morning_action,
+    morning_summary,
+    render,
+    TemplateState,
 )
 
 MORNING_TITLE = "NestQuest morning summary"
-
-
-class BlueprintInput(str):
-    """Marker for a parsed blueprint ``!input <name>`` reference."""
-
-
-def _input_constructor(loader: yaml.SafeLoader, node: yaml.Node) -> BlueprintInput:
-    return BlueprintInput(loader.construct_scalar(node))
-
-
-class _BlueprintLoader(yaml.SafeLoader):
-    """SafeLoader extended with Home Assistant's ``!input`` blueprint tag."""
-
-
-_BlueprintLoader.add_constructor("!input", _input_constructor)
-
-
-def load_blueprints() -> dict[str, dict]:
-    """Parse every automation blueprint, asserting the directory exists."""
-    assert BLUEPRINT_DIR.is_dir(), f"missing blueprint directory {BLUEPRINT_DIR}"
-    paths = sorted(BLUEPRINT_DIR.glob("*.yaml"))
-    assert paths, f"no blueprints under {BLUEPRINT_DIR}"
-    return {
-        path.stem: yaml.load(path.read_text(encoding="utf-8"), Loader=_BlueprintLoader)
-        for path in paths
-    }
-
-
-def iter_strings(node: object):
-    """Yield every string value in a parsed YAML structure, recursively."""
-    if isinstance(node, str):
-        yield node
-    elif isinstance(node, dict):
-        for value in node.values():
-            yield from iter_strings(value)
-    elif isinstance(node, list):
-        for value in node:
-            yield from iter_strings(value)
-
-
-def morning_summary() -> dict:
-    """Return the parsed morning-summary blueprint."""
-    blueprints = load_blueprints()
-    assert "morning_summary" in blueprints, "morning_summary.yaml is missing"
-    return blueprints["morning_summary"]
-
-
-def morning_action(bp: dict) -> dict:
-    """Return the single notify action of a summary blueprint."""
-    actions = bp["actions"]
-    assert isinstance(actions, list) and len(actions) == 1
-    return actions[0]
-
-
-class TemplateState:
-    """Stand-in for an HA template state object: entity_id/state/attributes."""
-
-    def __init__(self, entity_id: str, state: str, attributes: dict | None = None):
-        self.entity_id = entity_id
-        self.state = state
-        self.attributes = dict(attributes or {})
-
-
-def make_states(binary_sensors=(), sensors=()) -> SimpleNamespace:
-    """Build the ``states`` fixture: per-domain lists of TemplateState."""
-    return SimpleNamespace(
-        binary_sensor=list(binary_sensors),
-        sensor=list(sensors),
-    )
-
-
-def make_template_environment() -> jinja2.Environment:
-    """A plain jinja2 environment with HA's regex tests and bool filter."""
-    env = jinja2.Environment()
-    env.tests["match"] = lambda value, pattern: re.match(pattern, value) is not None
-    env.tests["search"] = lambda value, pattern: re.search(pattern, value) is not None
-
-    def _bool(value, default=False):
-        if isinstance(value, str):
-            return value.strip().lower() in ("true", "on", "open", "yes", "1")
-        return bool(value) or default
-
-    env.filters["bool"] = _bool
-    return env
-
-
-def render(template: str, **variables) -> str:
-    """Render a template the way HA would substitute its variables."""
-    return make_template_environment().from_string(template).render(**variables)
 
 
 # ---------------------------------------------------------------------------
@@ -172,39 +89,16 @@ def test_morning_summary_wires_inputs_not_literals() -> None:
 
     action = morning_action(bp)
     assert action["action"] == BlueprintInput("notify_target")
-    assert action["title"] == MORNING_TITLE
-    assert isinstance(action["message"], str) and action["message"].strip()
+    data = notify_data(bp)
+    assert data["title"] == MORNING_TITLE
+    assert isinstance(data["message"], str) and data["message"].strip()
 
 
 # ---------------------------------------------------------------------------
-# Entity-reference discipline (Feature 10 shapes only).
+# Entity-reference discipline (Feature 10 shapes only).  These tests
+# scan EVERY blueprint in the directory, so new blueprint files are
+# automatically held to the same rules.
 # ---------------------------------------------------------------------------
-#: Entity shapes Feature 10 actually creates (sensor.py, binary_sensor.py).
-ALLOWED_ENTITY_SHAPES: tuple[re.Pattern, ...] = tuple(
-    re.compile(pattern)
-    for pattern in (
-        r"sensor\.nestquest_[a-z0-9_]+_quests_due_today",
-        r"sensor\.nestquest_[a-z0-9_]+_quests_remaining_today",
-        r"sensor\.nestquest_[a-z0-9_]+_quests_completed_today",
-        r"sensor\.nestquest_[a-z0-9_]+_completion_pct_today",
-        r"sensor\.nestquest_[a-z0-9_]+_next_quest",
-        r"binary_sensor\.nestquest_[a-z0-9_]+_all_done",
-        r"binary_sensor\.nestquest_[a-z0-9_]+_present_today",
-        r"sensor\.nestquest_household_quests_due_today",
-        r"sensor\.nestquest_household_quests_completed_today",
-        r"sensor\.nestquest_cycle_day",
-    )
-)
-
-#: An unescaped, id-like entity reference: any found must be a full
-#: match for one of the Feature 10 shapes above.
-_ENTITY_LITERAL_RE = re.compile(r"(?<![\\\w])(?:sensor|binary_sensor)\.[A-Za-z0-9_]+")
-
-#: A domain-dot mention, ignoring the template's escaped-dot regexes
-#: (one backslash is stripped so ``binary_sensor\\.`` counts too).
-_MENTION_RE = re.compile(r"(?:sensor|binary_sensor)\.([A-Za-z0-9_]+)")
-
-
 def test_entity_literals_match_feature_10_shapes() -> None:
     """Every id-like entity string in the YAML is a Feature 10 shape."""
     for name, bp in load_blueprints().items():
@@ -247,7 +141,7 @@ def test_due_sensor_regex_selects_only_nestquest_due_sensors() -> None:
     including HA collision-suffixed duplicates (a second child with
     the same name gets entity ids ending _2) — and rejects everything
     else."""
-    message = morning_action(morning_summary())["message"]
+    message = notify_data(morning_summary())["message"]
     match = re.search(
         r"\^(sensor\\\\\.nestquest_\.\*_quests_due_today\(_\\\\d\+\)\?\$)", message
     )
@@ -324,7 +218,7 @@ def morning_fixture() -> SimpleNamespace:
 
 def test_morning_summary_lists_present_child_and_omits_absent() -> None:
     """Present Alice appears with her count; absent Bob and decoys never do."""
-    message = morning_action(morning_summary())["message"]
+    message = notify_data(morning_summary())["message"]
     rendered = render(message, states=morning_fixture())
     assert rendered == "Alice owes 2 quest(s) today."
     assert "Bob" not in rendered
@@ -358,7 +252,7 @@ def test_morning_summary_present_child_zero_remaining_is_all_clear() -> None:
             ),
         ],
     )
-    rendered = render(morning_action(morning_summary())["message"], states=states)
+    rendered = render(notify_data(morning_summary())["message"], states=states)
     assert "Alice owes 2 quest(s) today." in rendered
     assert "Carol is all clear today (0 quests remaining)." in rendered
 
@@ -375,7 +269,7 @@ def test_morning_summary_present_child_without_sensors_is_flagged() -> None:
             ),
         ],
     )
-    rendered = render(morning_action(morning_summary())["message"], states=states)
+    rendered = render(notify_data(morning_summary())["message"], states=states)
     assert rendered == "Frances's quest count is unavailable today."
 
 
@@ -407,7 +301,7 @@ def test_morning_summary_collision_suffixed_duplicate_names() -> None:
             ),
         ],
     )
-    rendered = render(morning_action(morning_summary())["message"], states=states)
+    rendered = render(notify_data(morning_summary())["message"], states=states)
     lines = rendered.split("\n")
     assert lines == [
         "Ada owes 1 quest(s) today.",
@@ -431,7 +325,7 @@ def test_morning_summary_no_present_children() -> None:
             ),
         ],
     )
-    rendered = render(morning_action(morning_summary())["message"], states=states)
+    rendered = render(notify_data(morning_summary())["message"], states=states)
     assert rendered == "No children present today."
 
 
