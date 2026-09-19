@@ -97,7 +97,7 @@ async def _complete_first_instance(database, coordinator, child) -> None:
     )
 
 
-async def test_every_active_child_gets_four_sensors_with_documented_identity(
+async def test_every_active_child_gets_five_sensors_with_documented_identity(
     hass, make_entry
 ) -> None:
     entry, coordinator, (ada, bo, cory) = await _setup_seeded_entry(
@@ -109,8 +109,8 @@ async def test_every_active_child_gets_four_sensors_with_documented_identity(
     await coordinator.async_refresh()
 
     # Two quest children plus the zero-quest child: three children x
-    # four sensors, no duplicates.
-    assert len(hass.entities) == 12
+    # five sensors, no duplicates.
+    assert len(hass.entities) == 15
     expected = {
         ada.id: ("Ada", 1, 1, 0, 100),
         bo.id: ("Bo", 1, 0, 1, 0),
@@ -121,6 +121,7 @@ async def test_every_active_child_gets_four_sensors_with_documented_identity(
         completed_entity = _sensor(hass, child_id, "quests_completed_today")
         remaining_entity = _sensor(hass, child_id, "quests_remaining_today")
         pct_entity = _sensor(hass, child_id, "completion_pct_today")
+        next_entity = _sensor(hass, child_id, "next_quest")
         assert due_entity.name == f"NestQuest {name} quests due today"
         assert completed_entity.name == (
             f"NestQuest {name} quests completed today"
@@ -323,7 +324,7 @@ async def test_repeated_refreshes_do_not_duplicate_entities(
     )
     await coordinator.async_refresh()
     await coordinator.async_refresh()
-    assert len(hass.entities) == 12
+    assert len(hass.entities) == 15
 
 
 async def test_setup_with_no_children_registers_no_entities(
@@ -383,3 +384,65 @@ async def test_failed_platform_unload_returns_false_and_retains_runtime(
     assert await async_unload_entry(hass, entry) is False
     assert hass.data[DOMAIN][entry.entry_id] is entry.runtime_data
     assert database.connected is True
+
+async def test_next_quest_sensor_reports_earliest_open_quest(
+    hass, make_entry
+) -> None:
+    """The next-quest sensor carries the earliest open quest's title in
+    state with the full shape in attributes."""
+    entry, coordinator, (ada, _bo, _cory) = await _setup_seeded_entry(
+        hass, make_entry
+    )
+    next_entity = _sensor(hass, ada.id, "next_quest")
+    assert next_entity.name == f"NestQuest Ada next quest"
+    assert next_entity.native_value == "Brush teeth"
+    attributes = next_entity.extra_state_attributes
+    assert attributes["title"] == "Brush teeth"
+    assert attributes["window"] == "morning"
+    assert attributes["instance_id"] == _snapshot_child(
+        coordinator, ada.id
+    ).instances[0].instance_id
+    assert attributes["child_id"] == ada.id
+
+
+async def test_next_quest_sensor_reports_none_sentinel_when_day_clear(
+    hass, make_entry
+) -> None:
+    """A child with every quest done (and a zero-quest child) reports
+    the documented sentinel, never an empty string."""
+    entry, coordinator, (ada, _bo, cory) = await _setup_seeded_entry(
+        hass, make_entry
+    )
+    database = entry.runtime_data.database
+    await _complete_first_instance(database, coordinator, ada)
+    await coordinator.async_refresh()
+    assert _sensor(hass, ada.id, "next_quest").native_value == "none"
+    assert _sensor(hass, cory.id, "next_quest").native_value == "none"
+
+
+async def test_next_quest_state_truncates_over_the_limit(
+    hass, make_entry
+) -> None:
+    """A quest title longer than the state limit is truncated; the
+    attribute keeps the full title."""
+    entry, coordinator, (ada, _bo, _cory) = await _setup_seeded_entry(
+        hass, make_entry
+    )
+    database = entry.runtime_data.database
+    from custom_components.nestquest.quest_definitions import (
+        edit_quest_definition,
+    )
+
+    snapshot_child = _snapshot_child(coordinator, ada.id)
+    await edit_quest_definition(
+        database,
+        snapshot_child.instances[0].definition_id,
+        title="A very long quest title. " * 30,
+    )
+    await coordinator.async_refresh()
+    next_entity = _sensor(hass, ada.id, "next_quest")
+    full_title = _snapshot_child(coordinator, ada.id).instances[0].title
+    assert len(full_title) > 255
+    state = next_entity.native_value
+    assert len(state) <= 255
+    assert next_entity.extra_state_attributes["title"] == full_title

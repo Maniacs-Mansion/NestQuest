@@ -98,6 +98,40 @@ def _instance_payload(
     return payload
 
 
+#: State reported by the next-quest sensor when the child owes nothing
+#: else today.  A documented sentinel, never an empty string (an empty
+#: state reads as "sensor went unavailable" in HA).
+NEXT_QUEST_NONE_STATE = "none"
+
+
+def _next_open_quest(
+    child: ChildDaySnapshot,
+) -> QuestInstanceView | None:
+    """Return the child's earliest open quest from today's snapshot.
+
+    The snapshot carries TODAY's instances, so "next" is the earliest
+    open instance by (due_date, due_time), with ``due_time`` ordering
+    ahead of ``None`` (a window with no due time comes first only
+    within the same date — the materializer snapshots each window's
+    due_time, so a missing one means the window is unscheduled).
+    Missed and completed instances never qualify.
+    """
+    open_views = [
+        view
+        for view in child.instances
+        if view.state == "open"
+    ]
+    if not open_views:
+        return None
+    return min(
+        open_views,
+        key=lambda view: (
+            view.due_date,
+            view.due_time if view.due_time is not None else "",
+        ),
+    )
+
+
 class _NestQuestChildDaySensor(CoordinatorEntity, SensorEntity):
     """Base for the per-child day sensors.
 
@@ -268,15 +302,70 @@ class NestQuestCompletionPctTodaySensor(_NestQuestChildDaySensor):
         return _state_within_limit(child.completion_pct)
 
 
+class NestQuestNextQuestSensor(_NestQuestChildDaySensor):
+    """The child's next open quest today (title in the state).
+
+    State is the quest TITLE, truncated to HA's 255-character state
+    limit (attributes always carry the full title); when the child
+    owes nothing else today the state is the documented sentinel
+    ``none`` (NEXT_QUEST_NONE_STATE), never an empty string.
+    """
+
+    _attr_state_class = None  # a label, not a measurement
+    _name_suffix = "next quest"
+
+    def __init__(
+        self,
+        coordinator: NestQuestCoordinator,
+        child: ChildDaySnapshot,
+    ) -> None:
+        super().__init__(coordinator, child)
+        self._attr_unique_id = (
+            f"{DOMAIN}_child_{child.child_id}_next_quest"
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        child = self._child
+        if child is None:
+            return None
+        quest = _next_open_quest(child)
+        if quest is None:
+            return NEXT_QUEST_NONE_STATE
+        return quest.title[:MAX_STATE_LENGTH]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        child = self._child
+        if child is None:
+            return None
+        quest = _next_open_quest(child)
+        if quest is None:
+            return {"child_id": child.child_id, "child_name": child.child_name}
+        return {
+            "instance_id": quest.instance_id,
+            "definition_id": quest.definition_id,
+            "child_id": quest.child_id,
+            "child_name": child.child_name,
+            "title": quest.title,
+            "icon": quest.icon,
+            "window": quest.window,
+            "due_date": quest.due_date,
+            "due_time": quest.due_time,
+            "overdue": quest.overdue,
+        }
+
+
 def _child_day_sensors(
     coordinator: NestQuestCoordinator, child: ChildDaySnapshot
 ) -> tuple[_NestQuestChildDaySensor, ...]:
-    """Build the four documented day sensors for one active child."""
+    """Build the per-child day sensors for one active child."""
     return (
         NestQuestQuestsDueTodaySensor(coordinator, child),
         NestQuestQuestsCompletedTodaySensor(coordinator, child),
         NestQuestQuestsRemainingTodaySensor(coordinator, child),
         NestQuestCompletionPctTodaySensor(coordinator, child),
+        NestQuestNextQuestSensor(coordinator, child),
     )
 
 
@@ -285,7 +374,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: Callable[..., None],
 ) -> None:
-    """Create the four day sensors per active child.
+    """Create the five day sensors per active child.
 
     Entities are created for the snapshot's children at platform
     setup; a coordinator listener adds sensors for children that
