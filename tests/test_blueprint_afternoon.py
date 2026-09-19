@@ -242,3 +242,27 @@ def test_afternoon_reminder_never_hard_codes_notify_target() -> None:
         "the input description should show a placeholder example"
     )
     assert single_action(bp)["action"] == BlueprintInput("notify_target")
+
+def test_afternoon_reminder_absent_child_regression() -> None:
+    """The Feature 11 guardrail, stated as one regression test: no
+    reminder message is ever produced for an absent child."""
+    states = make_states(
+        sensors=[
+            TemplateState(
+                "sensor.nestquest_bob_quests_due_today",
+                "3",
+                {"child_name": "Bob", "child_id": 1, "present": False},
+            ),
+            TemplateState(
+                "sensor.nestquest_bob_quests_remaining_today",
+                "3",
+                {"child_id": 1},
+            ),
+        ],
+    )
+    guard = afternoon_conditions(afternoon_reminder())[-1]
+    assert render(guard["value_template"], states=states).strip() == "False"
+    message = render(
+        notify_data(afternoon_reminder())["message"], states=states
+    )
+    assert "Bob" not in message
