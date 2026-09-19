@@ -1,0 +1,89 @@
+blueprint:
+  name: NestQuest afternoon reminder
+  description: >-
+    Sends an afternoon nudge listing ONLY the children who still have
+    open quests today. Children who are present and all clear are
+    omitted (the nudge is for stragglers, not a roll call), children
+    who are not present today are omitted entirely, and the household
+    rollup sensors are excluded by the same present guard. When every
+    present child is already done the automation sends NOTHING at all:
+    a template condition stops the run before the notification. The
+    notify service is chosen by the household when importing this
+    blueprint — NestQuest never hard-codes a personal notify target.
+  domain: automation
+  input:
+    afternoon_time:
+      name: Afternoon time
+      description: Local time of day the reminder is sent.
+      default: "15:00"
+      selector:
+        time: {}
+    notify_target:
+      name: Notify service
+      description: >-
+        The Home Assistant notify service to call for the reminder,
+        for example notify.mobile_app_your_phone — a placeholder;
+        pick the notify service for your own device.
+      selector:
+        text: {}
+    send_reminder:
+      name: Send the reminder
+      description: >-
+        Turn off to keep the automation installed but skip the
+        notification entirely.
+      default: true
+      selector:
+        boolean: {}
+
+mode: single
+
+variables:
+  send_reminder: !input send_reminder
+
+triggers:
+  - trigger: time
+    at: !input afternoon_time
+
+conditions:
+  - condition: template
+    value_template: "{{ send_reminder | bool }}"
+  # Send nothing when every present child is already done: the guard is
+  # false unless at least one present child has remaining quests today.
+  - condition: template
+    value_template: |
+      {%- set ns = namespace(any_open=false) -%}
+      {%- for due in states.sensor
+            | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_due_today(_\\d+)?$') -%}
+        {%- if due.attributes.get('present') -%}
+          {%- set remaining_values = states.sensor
+                | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_remaining_today(_\\d+)?$')
+                | selectattr('attributes.child_id', 'eq', due.attributes.child_id)
+                | map(attribute='state')
+                | list -%}
+          {%- if remaining_values and (remaining_values | first | int) > 0 -%}
+            {%- set ns.any_open = true -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{- ns.any_open -}}
+
+actions:
+  - action: !input notify_target
+    title: NestQuest afternoon reminder
+    message: |
+      {%- set ns = namespace(lines=[]) -%}
+      {%- for due in states.sensor
+            | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_due_today(_\\d+)?$') -%}
+        {%- if due.attributes.get('present') -%}
+          {%- set remaining_values = states.sensor
+                | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_remaining_today(_\\d+)?$')
+                | selectattr('attributes.child_id', 'eq', due.attributes.child_id)
+                | map(attribute='state')
+                | list -%}
+          {%- if remaining_values and (remaining_values | first | int) > 0 -%}
+            {%- set line = due.attributes.child_name ~ ' still has ' ~ (remaining_values | first | int) ~ ' quest(s) open.' -%}
+            {%- set ns.lines = ns.lines + [line] -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{- ns.lines | join('\n') -}}
