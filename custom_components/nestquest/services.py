@@ -242,6 +242,19 @@ def _require_runtime(hass: HomeAssistant, find_runtime: FindRuntime):
     return runtime
 
 
+async def _refresh_entities(runtime: Any) -> None:
+    """Force an immediate coordinator refresh after a service mutation.
+
+    Only the SERVICE paths call this — the scheduled materialize and
+    rollover internals are direct function calls and never widen this
+    gate — so entities reflect a completion the moment the service
+    call returns instead of waiting for the poll interval.
+    """
+    coordinator = getattr(runtime, "coordinator", None)
+    if coordinator is not None:
+        await coordinator.async_refresh()
+
+
 def _generation_kwargs(hass: HomeAssistant, runtime: Any) -> dict[str, Any]:
     time_zone = ZoneInfo(hass.config.time_zone)
     today = datetime.datetime.now(time_zone).date()
@@ -293,18 +306,19 @@ def _complete_quest(
     hass: HomeAssistant, find_runtime: FindRuntime
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
-        database = _require_runtime(hass, find_runtime).database
+        runtime = _require_runtime(hass, find_runtime)
         instance_id = call.data["instance_id"]
         # ``appended`` is decided under the same lock as the write, so
         # a concurrent duplicate call (a double tap) can not produce a
         # second transition event: the loser appends nothing.
         result = await completion_layer.complete_instance(
-            database,
+            runtime.database,
             instance_id,
             **_actor_kwargs(call),
         )
         if result.appended:
-            await fire_quest_completed(hass, database, instance_id)
+            await fire_quest_completed(hass, runtime.database, instance_id)
+            await _refresh_entities(runtime)
 
     return _with_errors(_handler)
 
@@ -313,15 +327,18 @@ def _uncomplete_quest(
     hass: HomeAssistant, find_runtime: FindRuntime
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
-        database = _require_runtime(hass, find_runtime).database
+        runtime = _require_runtime(hass, find_runtime)
         instance_id = call.data["instance_id"]
         result = await completion_layer.uncomplete_instance(
-            database,
+            runtime.database,
             instance_id,
             **_actor_kwargs(call),
         )
         if result.appended:
-            await fire_quest_uncompleted(hass, database, instance_id)
+            await fire_quest_uncompleted(
+                hass, runtime.database, instance_id
+            )
+            await _refresh_entities(runtime)
 
     return _with_errors(_handler)
 
