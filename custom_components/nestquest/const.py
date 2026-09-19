@@ -11,6 +11,15 @@ LOGGER = logging.getLogger(LOGGER_NAME)
 # sensors and binary sensors.
 PLATFORMS: list[str] = ["sensor", "binary_sensor"]
 
+# Home Assistant bus events (design/ENTITIES-AND-SERVICES.md §3).  The
+# panel and admin cards listen for these; Feature 10 fires completed,
+# uncompleted, and child_day_complete from the service paths, and
+# Feature 11's nightly sweep fires quest_missed.
+EVENT_QUEST_COMPLETED = "nestquest_quest_completed"
+EVENT_QUEST_UNCOMPLETED = "nestquest_quest_uncompleted"
+EVENT_QUEST_MISSED = "nestquest_quest_missed"
+EVENT_CHILD_DAY_COMPLETE = "nestquest_child_day_complete"
+
 #: Canonical domain-global service names (design/ENTITIES-AND-SERVICES.md §2
 #: plus the existing Feature 07 regenerate service).
 SERVICE_COMPLETE_QUEST = "complete_quest"

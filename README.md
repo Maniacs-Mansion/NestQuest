@@ -38,6 +38,35 @@ After installation and restart:
 2. Click **Add Integration** and search for **NestQuest**.
 3. Follow the on-screen configuration flow.
 
+## Events
+
+NestQuest fires Home Assistant bus events so automations can react to a
+child's progress. Each payload carries `child_id`, `child_name`,
+`instance_id`, `quest_title`, the instance's `window`, `due_date`,
+`due_time`, and `occurred_at` (a strict UTC ISO-8601 timestamp).
+
+| Event | Fires when | Extra payload fields |
+|---|---|---|
+| `nestquest_quest_completed` | a quest is completed (an actual completion, never a re-complete no-op) | `was_on_time` (bool) |
+| `nestquest_quest_uncompleted` | an admin reverses a completion | — |
+| `nestquest_child_day_complete` | a completion clears the child's whole day (quests were owed and none remain; a zero-quest day never fires it) | `quests_due`, `quests_completed` |
+| `nestquest_quest_missed` | the nightly sweep marks a still-open past-due quest missed (integrated in a later release) | — |
+
+Example automation trigger:
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: nestquest_child_day_complete
+conditions:
+  - condition: template
+    value_template: "{{ trigger.payload.child_name == 'Declan' }}"
+actions:
+  - action: notify.mobile_app_declans_phone
+    data:
+      message: "Every quest cleared — legendary!"
+```
+
 ## Developer Setup and Testing
 
 This project uses [`uv`](https://github.com/astral-sh/uv) for fast Python package and dependency management.
