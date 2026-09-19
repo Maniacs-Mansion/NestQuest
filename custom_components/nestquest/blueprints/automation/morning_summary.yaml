@@ -1,0 +1,80 @@
+blueprint:
+  name: NestQuest morning summary
+  description: >-
+    Sends a morning notification listing what each child still owes
+    today. Only children whose NestQuest presence sensor is on are
+    included; children who are not present today are omitted entirely.
+    The notify service is chosen by the household when importing this
+    blueprint — NestQuest never hard-codes a personal notify target.
+  domain: automation
+  input:
+    morning_time:
+      name: Morning time
+      description: Local time of day the summary is sent.
+      default: "08:00"
+      selector:
+        time: {}
+    notify_target:
+      name: Notify service
+      description: >-
+        The Home Assistant notify service to call for the summary,
+        for example notify.mobile_app_your_phone — a placeholder;
+        pick the notify service for your own device.
+      selector:
+        text: {}
+    send_summary:
+      name: Send the summary
+      description: >-
+        Turn off to keep the automation installed but skip the
+        notification entirely.
+      default: true
+      selector:
+        boolean: {}
+
+mode: single
+
+variables:
+  send_summary: !input send_summary
+
+triggers:
+  - trigger: time
+    at: !input morning_time
+
+conditions:
+  - condition: template
+    value_template: "{{ send_summary | bool }}"
+
+actions:
+  - action: !input notify_target
+    title: NestQuest morning summary
+    message: |
+      {%- set ns = namespace(lines=[]) -%}
+      {%- for presence in states.binary_sensor
+            | selectattr('entity_id', 'search', '^binary_sensor\\.nestquest_.*_present_today$')
+            | selectattr('state', 'eq', 'on') -%}
+        {%- set child_id = presence.entity_id.split('.')[1].removeprefix('nestquest_').removesuffix('_present_today') -%}
+        {%- set remaining_values = states.sensor
+              | selectattr('entity_id', 'search', '^sensor\\.nestquest_' ~ child_id ~ '_quests_remaining_today$')
+              | map(attribute='state')
+              | list -%}
+        {%- set due_sensors = states.sensor
+              | selectattr('entity_id', 'search', '^sensor\\.nestquest_' ~ child_id ~ '_quests_due_today$')
+              | list -%}
+        {%- set child_name = due_sensors[0].attributes['child_name'] if due_sensors else (child_id | capitalize) -%}
+        {%- if remaining_values -%}
+          {%- set remaining = remaining_values | first | int -%}
+          {%- if remaining > 0 -%}
+            {%- set line = child_name ~ ' owes ' ~ remaining ~ ' quest(s) today.' -%}
+          {%- else -%}
+            {%- set line = child_name ~ ' is all clear today (0 quests remaining).' -%}
+          {%- endif -%}
+        {%- else -%}
+          {%- set line = child_name ~ "'s quest count is unavailable today." -%}
+        {%- endif -%}
+        {%- set ns.lines = ns.lines + [line] -%}
+      {%- endfor -%}
+      {%- if ns.lines -%}
+        {{- ns.lines | join('\n') -}}
+      {%- else -%}
+        No children present today.
+      {%- endif -%}
