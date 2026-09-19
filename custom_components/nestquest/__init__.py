@@ -35,6 +35,7 @@ from .migrations import apply_migrations
 from .services import async_deregister_services, async_register_services
 from .store import async_get_db_path
 from .admin_allowlist import seed_setup_admin
+from .sweep import run_missed_sweep
 
 _LOGGER = LOGGER
 
@@ -327,18 +328,23 @@ def _register_day_rollover_listener(
     database: NestQuestDatabase,
     options: dict[str, Any],
 ) -> Callable[[], Any]:
-    """Register the daily materialization listener and return its remover.
+    """Register the daily rollover listener and return its remover.
 
-    Fires once per day at the configured local ``day_rollover_time`` and
-    materializes the rolling horizon ``[today, today + horizon_days]``
-    through the shared :func:`_run_horizon_materialization` path, using the
-    entry's configured (validated) ``horizon_days``.
+    Fires once per day at the configured local ``day_rollover_time``:
+    first re-materializes the rolling horizon
+    ``[today, today + horizon_days]`` through the shared
+    :func:`_run_horizon_materialization` path (the entry's configured,
+    validated ``horizon_days``), then runs the Feature 11 missed sweep
+    — announcing yesterday's still-open quests as missed AFTER today's
+    instances exist, watermark-guarded so a re-fire of the listener the
+    same night announces nothing twice.
     """
     hour, minute = _day_rollover_hour_minute(options)
     horizon_days = _configured_horizon_days(options)
 
     async def _run_materialization(_now: datetime.datetime) -> None:
         await _run_horizon_materialization(hass, database, horizon_days)
+        await run_missed_sweep(hass, database)
 
     return async_track_time_change(
         hass, _run_materialization, hour=hour, minute=minute
@@ -498,6 +504,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await _run_horizon_materialization(
             hass, database, _configured_horizon_days(dict(entry.options))
         )
+        # The missed sweep runs at startup too (Feature 11): if HA was
+        # down at the rollover time, the previous night's still-open
+        # quests are announced as missed now instead of waiting for
+        # the next midnight.  Watermark-guarded, so this is a no-op
+        # when the night's sweep already ran.
+        await run_missed_sweep(hass, database)
         _register_services(hass)
         # The shared Feature 10 coordinator: one refresh cycle every
         # entity reads from (CONF_UPDATE_INTERVAL seconds, default

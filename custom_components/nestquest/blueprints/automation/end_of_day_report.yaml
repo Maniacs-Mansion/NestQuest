@@ -1,0 +1,121 @@
+blueprint:
+  name: NestQuest end-of-day report
+  description: >-
+    Sends the parent an end-of-day report on how the day went. It runs
+    deliberately BEFORE NestQuest's midnight missed-quest sweep, so it
+    reads the same day's data (what is still open at report time, and
+    how much of the day was completed) rather than tomorrow-morning's
+    hindsight. Every PRESENT child gets a completion line, so the
+    parent always receives the day's summary; children who still owe
+    quests get their open count called out on that line, and children
+    who are not present today are omitted entirely. A child whose
+    remaining-count sensor is unavailable is reported with the
+    completion line only. By default the report is skipped when every
+    present child is already done — turn on send-even-when-clear to
+    always get the day's completion summary. The notify service is
+    chosen by the household when importing this blueprint — NestQuest
+    never hard-codes a personal notify target.
+  domain: automation
+  input:
+    report_time:
+      name: Report time
+      description: >-
+        Local time of day the report is sent — deliberately before the
+        midnight missed-quest sweep, so the report reads the same
+        day's data.
+      default: "20:00"
+      selector:
+        time: {}
+    notify_target:
+      name: Notify service
+      description: >-
+        The Home Assistant notify service to call for the report,
+        for example notify.mobile_app_your_phone — a placeholder;
+        pick the notify service for your own device.
+      selector:
+        text: {}
+    send_report:
+      name: Send the report
+      description: >-
+        Turn off to keep the automation installed but skip the
+        notification entirely.
+      default: true
+      selector:
+        boolean: {}
+    send_even_when_clear:
+      name: Send even when clear
+      description: >-
+        Send the report even when every present child has already
+        finished their quests today. When off (the default), an
+        all-clear day sends nothing.
+      default: false
+      selector:
+        boolean: {}
+
+mode: single
+
+variables:
+  send_report: !input send_report
+  send_even_when_clear: !input send_even_when_clear
+
+triggers:
+  - trigger: time
+    at: !input report_time
+
+conditions:
+  - condition: template
+    value_template: "{{ send_report | bool }}"
+  # Skip an all-clear day unless the household opted into
+  # send-even-when-clear: the guard is false only when every present
+  # child has a usable remaining count of zero. A MISSING or
+  # non-numeric remaining sensor reads as -1 and counts as open —
+  # a degraded state must reach the parent, not look like all-clear.
+  - condition: template
+    value_template: |
+      {%- set ns = namespace(any_open=false) -%}
+      {%- for due in states.sensor
+            | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_due_today(_\\d+)?$') -%}
+        {%- if due.attributes.get('present') -%}
+          {%- set remaining_values = states.sensor
+                | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_remaining_today(_\\d+)?$')
+                | selectattr('attributes.child_id', 'eq', due.attributes.child_id)
+                | map(attribute='state')
+                | list -%}
+          {%- if not remaining_values or (remaining_values | first | int(-1)) != 0 -%}
+            {%- set ns.any_open = true -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{- send_even_when_clear | bool or ns.any_open -}}
+
+actions:
+  - action: !input notify_target
+    data:
+      title: NestQuest end-of-day report
+      message: |
+            {%- set ns = namespace(lines=[]) -%}
+            {%- for due in states.sensor
+                  | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_due_today(_\\d+)?$') -%}
+              {%- if due.attributes.get('present') -%}
+                {%- set due_count = due.state | int -%}
+                {%- set completed_values = states.sensor
+                      | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_completed_today(_\\d+)?$')
+                      | selectattr('attributes.child_id', 'eq', due.attributes.child_id)
+                      | map(attribute='state')
+                      | list -%}
+                {%- set remaining_values = states.sensor
+                      | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_remaining_today(_\\d+)?$')
+                      | selectattr('attributes.child_id', 'eq', due.attributes.child_id)
+                      | map(attribute='state')
+                      | list -%}
+                {%- set completed_count = (completed_values | first | int) if completed_values else 0 -%}
+                {%- set remaining_count = (remaining_values | first | int) if remaining_values else none -%}
+                {%- if remaining_count is not none and remaining_count > 0 -%}
+                  {%- set line = due.attributes.child_name ~ ': ' ~ remaining_count ~ ' still open (' ~ completed_count ~ '/' ~ due_count ~ ' done).' -%}
+                {%- else -%}
+                  {%- set line = due.attributes.child_name ~ ': ' ~ completed_count ~ '/' ~ due_count ~ ' done.' -%}
+                {%- endif -%}
+                {%- set ns.lines = ns.lines + [line] -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {{- ns.lines | join('\n') -}}

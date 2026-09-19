@@ -60,12 +60,100 @@ triggers:
     event_type: nestquest_child_day_complete
 conditions:
   - condition: template
-    value_template: "{{ trigger.payload.child_name == 'Declan' }}"
+    value_template: "{{ trigger.event.data.child_name == 'Declan' }}"
 actions:
   - action: notify.mobile_app_declans_phone
     data:
       message: "Every quest cleared — legendary!"
 ```
+
+## Automation Blueprints
+
+NestQuest ships four automation blueprints in
+`custom_components/nestquest/blueprints/automation/`. Import them in
+Home Assistant under **Settings → Automations & Scenes → Blueprints**
+(or place the files in your `config/blueprints/automation/` folder),
+then create one automation per blueprint, filling the inputs with your
+household's choices.
+
+### Wiring to the integration's notification settings
+
+The integration's options flow records your notification choices —
+notify target, morning/afternoon/end-of-day times, and a toggle per
+automation. The blueprints take their own inputs at import time;
+fill them from the same values you stored in the options flow (the
+integration does not push its settings into imported automations):
+
+| Blueprint input | Options-flow counterpart |
+|---|---|
+| `morning_time` (default 08:00) | `morning_summary_time` |
+| `afternoon_time` (default 15:00) | `afternoon_reminder_time` |
+| `report_time` (default 20:00) | `end_of_day_report_time` |
+| `send_summary` / `send_reminder` / `send_report` / `celebrate` | the four `*_enabled` toggles |
+| `notify_target` | `notify_target` (your notify service, e.g. `notify.mobile_app_your_phone`) |
+
+The end-of-day report deliberately runs BEFORE the midnight missed
+sweep and reads the same day's data — do not schedule it at the
+day-rollover time.
+
+### The four blueprints
+
+1. **Morning summary** (`morning_summary.yaml`) — at the configured
+   time, lists every child whose `binary_sensor.nestquest_<child>_present_today`
+   is on and what they owe from `sensor.nestquest_<child>_quests_remaining_today`.
+   Children not present today are omitted entirely.
+
+2. **Afternoon reminder** (`afternoon_reminder.yaml`) — at the
+   configured time, notifies only about present children who still
+   have open quests. Sends nothing at all when every present child is
+   clear.
+
+3. **End-of-day report** (`end_of_day_report.yaml`) — one message per
+   evening: each present child's completion count and the quests they
+   still owe (the ones the midnight sweep will mark
+   `nestquest_quest_missed`). Absent children are omitted. Sends
+   nothing on an all-clear day unless `send_even_when_clear` is on.
+
+4. **Day-complete celebration** (`day_complete_celebration.yaml`) —
+   triggers on the `nestquest_child_day_complete` event (which only
+   fires when quests were owed and all are complete, so a zero-quest
+   day never celebrates). Create one `input_text` helper
+   (`nestquest_last_celebrated`) for the dedupe: the automation
+   records each celebrated child as `<child_id>:<today>` and
+   celebrates each child at most once per day — a re-cleared day does
+   not re-fire, but a second child clearing the same day still
+   celebrates.
+
+### Example package
+
+```yaml
+# One automation per blueprint — Settings → Automations & Scenes →
+# Create → Blueprint, then pick each NestQuest blueprint.
+#
+# morning_summary:   morning_time 08:00, notify_target notify.mobile_app_your_phone
+# afternoon_reminder: afternoon_time 15:00, same notify target
+# end_of_day_report:  report_time 20:00, send_even_when_clear false, same target
+# day_complete_celebration: input_text.nestquest_last_celebrated,
+#                            celebration_message "Legendary! {{ trigger.event.data.child_name }} cleared every quest today!"
+#
+# Every blueprint has its own send/celebrate toggle input; turn an
+# automation off entirely from HA's automation menu.
+```
+
+### Events the automations rely on
+
+| Event | Payload |
+|---|---|
+| `nestquest_quest_completed` | child_id, child_name, instance_id, quest_title, window, due_date, due_time, occurred_at (UTC ISO-8601), was_on_time |
+| `nestquest_quest_uncompleted` | child_id, child_name, instance_id, quest_title, window, due_date, due_time, occurred_at |
+| `nestquest_child_day_complete` | child_id, child_name, quests_due, quests_completed, occurred_at |
+| `nestquest_quest_missed` | child_id, child_name, instance_id, quest_title, window, due_date, due_time, occurred_at (fired by the nightly sweep) |
+
+Sensors the automations read: `sensor.nestquest_<child>_quests_due_today`
+(attributes: `child_id`, `child_name`, `present`, `instances`,
+`admin_instances`), `..._quests_remaining_today`,
+`..._quests_completed_today`, and
+`binary_sensor.nestquest_<child>_present_today`.
 
 ## Developer Setup and Testing
 
