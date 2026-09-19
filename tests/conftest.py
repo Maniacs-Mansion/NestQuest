@@ -27,6 +27,7 @@ import inspect
 import sys
 import tempfile
 import weakref
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -44,8 +45,12 @@ _HA_MODULES = (
     "homeassistant.exceptions",
     "homeassistant.helpers",
     "homeassistant.helpers.config_validation",
+    "homeassistant.helpers.entity",
     "homeassistant.helpers.event",
     "homeassistant.helpers.update_coordinator",
+    "homeassistant.components",
+    "homeassistant.components.sensor",
+    "homeassistant.components.binary_sensor",
 )
 
 def _find_spec(name: str):
@@ -85,8 +90,12 @@ for _parent, _child in (
     ("homeassistant", "exceptions"),
     ("homeassistant", "helpers"),
     ("homeassistant.helpers", "config_validation"),
+    ("homeassistant.helpers", "entity"),
     ("homeassistant.helpers", "event"),
     ("homeassistant.helpers", "update_coordinator"),
+    ("homeassistant", "components"),
+    ("homeassistant.components", "sensor"),
+    ("homeassistant.components", "binary_sensor"),
 ):
     setattr(sys.modules[_parent], _child, sys.modules[f"{_parent}.{_child}"])
 
@@ -200,6 +209,154 @@ _exceptions_mock.ConfigEntryNotReady = ConfigEntryNotReady
 _exceptions_mock.Unauthorized = Unauthorized
 
 
+@dataclass
+class DeviceInfo:
+    """Stand-in for homeassistant.helpers.entity.DeviceInfo.
+
+    The kwargs-only shape the integration builds per-child devices
+    with: ``identifiers``, ``name``, ``manufacturer``, ``model``.
+    """
+
+    identifiers: object = None
+    name: str | None = None
+    manufacturer: str | None = None
+    model: str | None = None
+
+
+class Entity:
+    """Stand-in for homeassistant.helpers.entity.Entity.
+
+    Mirrors the ``_attr_*`` attribute contract through the ``name``,
+    ``unique_id``, ``device_info`` and ``extra_state_attributes``
+    properties, and ``async_write_ha_state`` registering the entity
+    into the hass entity registry (``hass.entities``, a dict keyed by
+    ``unique_id`` storing the live object) — the harness's stand-in
+    for HA's state machine, so tests enumerate entities and read
+    their state directly off the registered object.
+    """
+
+    hass = None
+    _attr_name: str | None = None
+    _attr_unique_id: str | None = None
+    _attr_device_info: DeviceInfo | None = None
+    _attr_extra_state_attributes: dict | None = None
+
+    @property
+    def name(self) -> str | None:
+        return self._attr_name
+
+    @property
+    def unique_id(self) -> str | None:
+        return self._attr_unique_id
+
+    @property
+    def device_info(self) -> DeviceInfo | None:
+        return self._attr_device_info
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        return self._attr_extra_state_attributes
+
+    def async_write_ha_state(self) -> None:
+        """Register the entity under its unique_id (the mock state write)."""
+        if self.hass is not None and self.unique_id is not None:
+            self.hass.entities[self.unique_id] = self
+
+
+class CoordinatorEntity(Entity):
+    """Stand-in for homeassistant.helpers.update_coordinator.CoordinatorEntity.
+
+    Real HA subscribes the entity to coordinator notifications in the
+    platform-scheduler-driven ``async_added_to_hass`` lifecycle hook;
+    the stand-in subscribes eagerly in ``__init__`` so the synchronous
+    ``AddEntitiesCallback`` surface stays synchronous (the mock
+    harness has no lifecycle scheduler).  ``_handle_coordinator_update``
+    mirrors HA: one state write per coordinator notification.
+    """
+
+    def __init__(self, coordinator) -> None:
+        self.coordinator = coordinator
+        self.coordinator.async_add_listener(self._handle_coordinator_update)
+
+    def _handle_coordinator_update(self) -> None:
+        self.async_write_ha_state()
+
+
+class SensorStateClass:
+    """Stand-in namespace for homeassistant.components.sensor.SensorStateClass.
+
+    Only the members the integration uses (plus TOTAL for the
+    long-history sensors later tasks add).
+    """
+
+    MEASUREMENT = "measurement"
+    TOTAL = "total"
+
+
+class SensorDeviceClass:
+    """Stand-in namespace for homeassistant.components.sensor.SensorDeviceClass.
+
+    Only the members the integration uses.
+    """
+
+    PERCENTAGE = "percentage"
+
+
+class SensorEntity(Entity):
+    """Stand-in for homeassistant.components.sensor.SensorEntity.
+
+    The ``_attr_*`` passthrough for ``native_value``,
+    ``native_unit_of_measurement``, ``state_class``, ``device_class``
+    and ``suggested_display_precision``.
+    """
+
+    _attr_native_value: object = None
+    _attr_native_unit_of_measurement: str | None = None
+    _attr_state_class: str | None = None
+    _attr_device_class: str | None = None
+    _attr_suggested_display_precision: int | None = None
+
+    @property
+    def native_value(self) -> object:
+        return self._attr_native_value
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        return self._attr_native_unit_of_measurement
+
+    @property
+    def state_class(self) -> str | None:
+        return self._attr_state_class
+
+    @property
+    def device_class(self) -> str | None:
+        return self._attr_device_class
+
+    @property
+    def suggested_display_precision(self) -> int | None:
+        return self._attr_suggested_display_precision
+
+
+class BinarySensorEntity(Entity):
+    """Stand-in for homeassistant.components.binary_sensor.BinarySensorEntity.
+
+    Wired now so PLATFORMS can grow (task 4's all-done / present
+    sensors) without more harness surgery; only the surface the
+    integration uses.
+    """
+
+    _attr_is_on: bool | None = None
+    _attr_device_class: str | None = None
+
+    @property
+    def is_on(self) -> bool | None:
+        return self._attr_is_on
+
+    @property
+    def device_class(self) -> str | None:
+        return self._attr_device_class
+
+
 class DataUpdateCoordinator:
     """Functional stand-in for HA's DataUpdateCoordinator.
 
@@ -258,6 +415,19 @@ class DataUpdateCoordinator:
 
 _update_coordinator_mock = _ha_mock("homeassistant.helpers.update_coordinator")
 _update_coordinator_mock.DataUpdateCoordinator = DataUpdateCoordinator
+_update_coordinator_mock.CoordinatorEntity = CoordinatorEntity
+
+_entity_mock = _ha_mock("homeassistant.helpers.entity")
+_entity_mock.DeviceInfo = DeviceInfo
+_entity_mock.Entity = Entity
+
+_sensor_mock = _ha_mock("homeassistant.components.sensor")
+_sensor_mock.SensorEntity = SensorEntity
+_sensor_mock.SensorDeviceClass = SensorDeviceClass
+_sensor_mock.SensorStateClass = SensorStateClass
+
+_binary_sensor_mock = _ha_mock("homeassistant.components.binary_sensor")
+_binary_sensor_mock.BinarySensorEntity = BinarySensorEntity
 
 import voluptuous as vol
 
@@ -504,6 +674,62 @@ def make_hass() -> tuple:
     # A valid IANA time zone (the day-rollover listener reads it to
     # compute "today" in HA local time).
     hass.config.time_zone = "UTC"
+
+    # The minimal entity registry: entities self-register through
+    # Entity.async_write_ha_state keyed by unique_id, storing the live
+    # object; tests enumerate created entities and read their state
+    # directly.
+    hass.entities: dict[str, Entity] = {}
+
+    def _async_add_entities(new_entities, update_before_add=False):
+        """Mirror HA's AddEntitiesCallback: bind hass and register entities.
+
+        Accepts a single entity or an iterable, mirroring HA's
+        permissive call shape; registration goes through each entity's
+        async_write_ha_state (the mock state write).
+        """
+        if isinstance(new_entities, Entity):
+            new_entities = [new_entities]
+        for entity in new_entities:
+            entity.hass = hass
+            entity.async_write_ha_state()
+
+    async def _async_forward_entry_setups(entry, platforms):
+        """Mirror hass.config_entries.async_forward_entry_setups.
+
+        HA's contract, loosely: import each platform module of the
+        entry's integration and drive its ``async_setup_entry`` with
+        the AddEntitiesCallback above.  A stub entry without a domain
+        defaults to this harness's single integration (NestQuest).
+        """
+        for platform in list(platforms):
+            domain = getattr(entry, "domain", "nestquest")
+            module = importlib.import_module(
+                f"custom_components.{domain}.{platform}"
+            )
+            await module.async_setup_entry(hass, entry, _async_add_entities)
+            hass.config_entries.forwarded_platforms.append(platform)
+
+    async def _async_unload_platforms(entry, platforms):
+        """Mirror hass.config_entries.async_unload_platforms.
+
+        Runs each platform module's ``async_unload_entry`` when it
+        defines one (per-platform unload is optional, like HA's).
+        """
+        for platform in list(platforms):
+            domain = getattr(entry, "domain", "nestquest")
+            module = importlib.import_module(
+                f"custom_components.{domain}.{platform}"
+            )
+            unload = getattr(module, "async_unload_entry", None)
+            if unload is not None:
+                await unload(hass, entry)
+            hass.config_entries.unloaded_platforms.append(platform)
+
+    hass.config_entries.forwarded_platforms: list[str] = []
+    hass.config_entries.unloaded_platforms: list[str] = []
+    hass.config_entries.async_forward_entry_setups = _async_forward_entry_setups
+    hass.config_entries.async_unload_platforms = _async_unload_platforms
 
     async def _async_reload(entry_id: str) -> None:
         registry.reloaded.append(entry_id)

@@ -7,7 +7,9 @@ DOMAIN = "nestquest"
 LOGGER_NAME = "custom_components.nestquest"
 LOGGER = logging.getLogger(LOGGER_NAME)
 
-PLATFORMS: list[str] = []
+# Platforms set up per config entry (Feature 10): the per-child day
+# sensors. binary_sensor joins when task 4's entities land.
+PLATFORMS: list[str] = ["sensor"]
 
 #: Canonical domain-global service names (design/ENTITIES-AND-SERVICES.md §2
 #: plus the existing Feature 07 regenerate service).
