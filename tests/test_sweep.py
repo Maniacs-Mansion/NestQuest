@@ -237,3 +237,23 @@ async def test_v6_database_migrates_to_v7_meta_state(
 async def _count_events(database) -> int:
     rows = await database.fetch_all("SELECT COUNT(*) FROM completion_events")
     return rows[0][0]
+
+
+async def test_overlapping_sweeps_never_double_announce(
+    hass, make_entry
+) -> None:
+    """A startup sweep and a rollover sweep racing on the same night
+    queue on the sweep lock: the winner announces, the loser re-reads
+    the watermark inside the lock and fires nothing."""
+    import asyncio
+
+    entry, _ada, _bo = await _seed(hass, make_entry)
+    database = entry.runtime_data.database
+    tomorrow = datetime.date.today() + datetime.timedelta(days=1)
+
+    first, second = await asyncio.gather(
+        run_missed_sweep(hass, database, today=tomorrow),
+        run_missed_sweep(hass, database, today=tomorrow),
+    )
+    assert first + second == 2, "each instance announced exactly once"
+    assert len(hass.bus.fired(EVENT_QUEST_MISSED)) == 2
