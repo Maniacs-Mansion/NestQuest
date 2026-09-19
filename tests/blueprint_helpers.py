@@ -82,6 +82,16 @@ def morning_action(bp: dict) -> dict:
     return single_action(bp)
 
 
+def notify_data(bp: dict, index: int = 0) -> dict:
+    """Return a notify action's service ``data`` (title/message live
+    there in the modern HA action schema, not at the action's top level)."""
+    action = bp["actions"][index]
+    assert isinstance(action.get("data"), dict), (
+        "notify payload fields must nest under data:"
+    )
+    return action["data"]
+
+
 def iter_strings(node: object):
     """Yield every string value in a parsed YAML structure, recursively."""
     if isinstance(node, str):

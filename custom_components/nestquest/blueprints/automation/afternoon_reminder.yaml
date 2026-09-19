@@ -69,21 +69,22 @@ conditions:
 
 actions:
   - action: !input notify_target
-    title: NestQuest afternoon reminder
-    message: |
-      {%- set ns = namespace(lines=[]) -%}
-      {%- for due in states.sensor
-            | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_due_today(_\\d+)?$') -%}
-        {%- if due.attributes.get('present') -%}
-          {%- set remaining_values = states.sensor
-                | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_remaining_today(_\\d+)?$')
-                | selectattr('attributes.child_id', 'eq', due.attributes.child_id)
-                | map(attribute='state')
-                | list -%}
-          {%- if remaining_values and (remaining_values | first | int) > 0 -%}
-            {%- set line = due.attributes.child_name ~ ' still has ' ~ (remaining_values | first | int) ~ ' quest(s) open.' -%}
-            {%- set ns.lines = ns.lines + [line] -%}
+    data:
+      title: NestQuest afternoon reminder
+      message: |
+        {%- set ns = namespace(lines=[]) -%}
+        {%- for due in states.sensor
+              | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_due_today(_\\d+)?$') -%}
+          {%- if due.attributes.get('present') -%}
+            {%- set remaining_values = states.sensor
+                  | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_remaining_today(_\\d+)?$')
+                  | selectattr('attributes.child_id', 'eq', due.attributes.child_id)
+                  | map(attribute='state')
+                  | list -%}
+            {%- if remaining_values and (remaining_values | first | int) > 0 -%}
+              {%- set line = due.attributes.child_name ~ ' still has ' ~ (remaining_values | first | int) ~ ' quest(s) open.' -%}
+              {%- set ns.lines = ns.lines + [line] -%}
+            {%- endif -%}
           {%- endif -%}
-        {%- endif -%}
-      {%- endfor -%}
-      {{- ns.lines | join('\n') -}}
+        {%- endfor -%}
+        {{- ns.lines | join('\n') -}}

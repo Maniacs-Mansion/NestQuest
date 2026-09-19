@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from custom_components.nestquest.const import DEFAULT_MORNING_SUMMARY_TIME
 
 from tests.blueprint_helpers import (
+    notify_data,
     ALLOWED_ENTITY_SHAPES,
     BlueprintInput,
     _ENTITY_LITERAL_RE,
@@ -88,8 +89,9 @@ def test_morning_summary_wires_inputs_not_literals() -> None:
 
     action = morning_action(bp)
     assert action["action"] == BlueprintInput("notify_target")
-    assert action["title"] == MORNING_TITLE
-    assert isinstance(action["message"], str) and action["message"].strip()
+    data = notify_data(bp)
+    assert data["title"] == MORNING_TITLE
+    assert isinstance(data["message"], str) and data["message"].strip()
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +141,7 @@ def test_due_sensor_regex_selects_only_nestquest_due_sensors() -> None:
     including HA collision-suffixed duplicates (a second child with
     the same name gets entity ids ending _2) — and rejects everything
     else."""
-    message = morning_action(morning_summary())["message"]
+    message = notify_data(morning_summary())["message"]
     match = re.search(
         r"\^(sensor\\\\\.nestquest_\.\*_quests_due_today\(_\\\\d\+\)\?\$)", message
     )
@@ -216,7 +218,7 @@ def morning_fixture() -> SimpleNamespace:
 
 def test_morning_summary_lists_present_child_and_omits_absent() -> None:
     """Present Alice appears with her count; absent Bob and decoys never do."""
-    message = morning_action(morning_summary())["message"]
+    message = notify_data(morning_summary())["message"]
     rendered = render(message, states=morning_fixture())
     assert rendered == "Alice owes 2 quest(s) today."
     assert "Bob" not in rendered
@@ -250,7 +252,7 @@ def test_morning_summary_present_child_zero_remaining_is_all_clear() -> None:
             ),
         ],
     )
-    rendered = render(morning_action(morning_summary())["message"], states=states)
+    rendered = render(notify_data(morning_summary())["message"], states=states)
     assert "Alice owes 2 quest(s) today." in rendered
     assert "Carol is all clear today (0 quests remaining)." in rendered
 
@@ -267,7 +269,7 @@ def test_morning_summary_present_child_without_sensors_is_flagged() -> None:
             ),
         ],
     )
-    rendered = render(morning_action(morning_summary())["message"], states=states)
+    rendered = render(notify_data(morning_summary())["message"], states=states)
     assert rendered == "Frances's quest count is unavailable today."
 
 
@@ -299,7 +301,7 @@ def test_morning_summary_collision_suffixed_duplicate_names() -> None:
             ),
         ],
     )
-    rendered = render(morning_action(morning_summary())["message"], states=states)
+    rendered = render(notify_data(morning_summary())["message"], states=states)
     lines = rendered.split("\n")
     assert lines == [
         "Ada owes 1 quest(s) today.",
@@ -323,7 +325,7 @@ def test_morning_summary_no_present_children() -> None:
             ),
         ],
     )
-    rendered = render(morning_action(morning_summary())["message"], states=states)
+    rendered = render(notify_data(morning_summary())["message"], states=states)
     assert rendered == "No children present today."
 
 

@@ -17,6 +17,7 @@ import re
 from custom_components.nestquest.const import DEFAULT_AFTERNOON_REMINDER_TIME
 
 from tests.blueprint_helpers import (
+    notify_data,
     BlueprintInput,
     blueprint,
     iter_strings,
@@ -80,8 +81,9 @@ def test_afternoon_reminder_wires_inputs_not_literals() -> None:
 
     action = single_action(bp)
     assert action["action"] == BlueprintInput("notify_target")
-    assert action["title"] == AFTERNOON_TITLE
-    assert isinstance(action["message"], str) and action["message"].strip()
+    data = notify_data(afternoon_reminder())
+    assert data["title"] == AFTERNOON_TITLE
+    assert isinstance(data["message"], str) and data["message"].strip()
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +127,7 @@ def test_afternoon_reminder_lists_only_present_children_with_open_quests() -> No
             TemplateState("sensor.nestquest_household_quests_due_today", "7"),
         ],
     )
-    rendered = render(single_action(afternoon_reminder())["message"], states=states)
+    rendered = render(notify_data(afternoon_reminder())["message"], states=states)
     assert rendered == "Alice still has 2 quest(s) open."
     assert "Carol" not in rendered
     assert "Bob" not in rendered
@@ -218,7 +220,7 @@ def test_afternoon_reminder_collision_suffixed_duplicate_names() -> None:
             ),
         ],
     )
-    rendered = render(single_action(afternoon_reminder())["message"], states=states)
+    rendered = render(notify_data(afternoon_reminder())["message"], states=states)
     assert rendered.split("\n") == [
         "Ada still has 1 quest(s) open.",
         "Ada still has 3 quest(s) open.",

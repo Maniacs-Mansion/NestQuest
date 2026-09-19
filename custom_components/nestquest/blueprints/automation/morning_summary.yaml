@@ -46,32 +46,33 @@ conditions:
 
 actions:
   - action: !input notify_target
-    title: NestQuest morning summary
-    message: |
-      {%- set ns = namespace(lines=[]) -%}
-      {%- for due in states.sensor
-            | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_due_today(_\\d+)?$') -%}
-        {%- if due.attributes.get('present') -%}
-          {%- set remaining_values = states.sensor
-                | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_remaining_today(_\\d+)?$')
-                | selectattr('attributes.child_id', 'eq', due.attributes.child_id)
-                | map(attribute='state')
-                | list -%}
-          {%- if remaining_values -%}
-            {%- set remaining = remaining_values | first | int -%}
-            {%- if remaining > 0 -%}
-              {%- set line = due.attributes.child_name ~ ' owes ' ~ remaining ~ ' quest(s) today.' -%}
+    data:
+      title: NestQuest morning summary
+      message: |
+        {%- set ns = namespace(lines=[]) -%}
+        {%- for due in states.sensor
+              | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_due_today(_\\d+)?$') -%}
+          {%- if due.attributes.get('present') -%}
+            {%- set remaining_values = states.sensor
+                  | selectattr('entity_id', 'search', '^sensor\\.nestquest_.*_quests_remaining_today(_\\d+)?$')
+                  | selectattr('attributes.child_id', 'eq', due.attributes.child_id)
+                  | map(attribute='state')
+                  | list -%}
+            {%- if remaining_values -%}
+              {%- set remaining = remaining_values | first | int -%}
+              {%- if remaining > 0 -%}
+                {%- set line = due.attributes.child_name ~ ' owes ' ~ remaining ~ ' quest(s) today.' -%}
+              {%- else -%}
+                {%- set line = due.attributes.child_name ~ ' is all clear today (0 quests remaining).' -%}
+              {%- endif -%}
             {%- else -%}
-              {%- set line = due.attributes.child_name ~ ' is all clear today (0 quests remaining).' -%}
+              {%- set line = due.attributes.child_name ~ "'s quest count is unavailable today." -%}
             {%- endif -%}
-          {%- else -%}
-            {%- set line = due.attributes.child_name ~ "'s quest count is unavailable today." -%}
+            {%- set ns.lines = ns.lines + [line] -%}
           {%- endif -%}
-          {%- set ns.lines = ns.lines + [line] -%}
+        {%- endfor -%}
+        {%- if ns.lines -%}
+          {{- ns.lines | join('\n') -}}
+        {%- else -%}
+          No children present today.
         {%- endif -%}
-      {%- endfor -%}
-      {%- if ns.lines -%}
-        {{- ns.lines | join('\n') -}}
-      {%- else -%}
-        No children present today.
-      {%- endif -%}
