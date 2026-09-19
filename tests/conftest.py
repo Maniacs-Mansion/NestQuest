@@ -45,6 +45,7 @@ _HA_MODULES = (
     "homeassistant.helpers",
     "homeassistant.helpers.config_validation",
     "homeassistant.helpers.event",
+    "homeassistant.helpers.update_coordinator",
 )
 
 def _find_spec(name: str):
@@ -85,6 +86,7 @@ for _parent, _child in (
     ("homeassistant", "helpers"),
     ("homeassistant.helpers", "config_validation"),
     ("homeassistant.helpers", "event"),
+    ("homeassistant.helpers", "update_coordinator"),
 ):
     setattr(sys.modules[_parent], _child, sys.modules[f"{_parent}.{_child}"])
 
@@ -196,6 +198,66 @@ class Unauthorized(HomeAssistantError):
 _exceptions_mock.HomeAssistantError = HomeAssistantError
 _exceptions_mock.ConfigEntryNotReady = ConfigEntryNotReady
 _exceptions_mock.Unauthorized = Unauthorized
+
+
+class DataUpdateCoordinator:
+    """Functional stand-in for HA's DataUpdateCoordinator.
+
+    Mirrors the surface NestQuest's coordinator subclass uses:
+    ``__init__(hass, logger, name=..., update_interval=...)``,
+    ``async_add_listener``/``async_update_listeners`` for entity
+    subscription, ``async_refresh``/``async_config_entry_first_refresh``
+    driving the subclass's ``_async_update_data``, ``last_update_success``,
+    and ``data``.  Interval scheduling is NOT simulated (no real clock
+    ticks in tests) — tests drive refreshes directly.
+    """
+
+    def __init__(self, hass, logger, *, name=None, update_interval=None):
+        self.hass = hass
+        self.logger = logger
+        self.name = name
+        self.update_interval = update_interval
+        self.data = None
+        self.last_update_success = False
+        self._listeners = []
+
+    def async_add_listener(self, update_callback, context=None):
+        """Subscribe; returns an unsubscribe callable like HA's."""
+        entry = (update_callback, context)
+        self._listeners.append(entry)
+
+        def _remove():
+            if entry in self._listeners:
+                self._listeners.remove(entry)
+
+        return _remove
+
+    def async_update_listeners(self):
+        """Notify every listener (entities schedule their writes)."""
+        for callback, _context in list(self._listeners):
+            callback()
+
+    async def async_refresh(self):
+        """Run one update pass and notify listeners."""
+        try:
+            self.data = await self._async_update_data()
+            self.last_update_success = True
+        except BaseException:
+            self.last_update_success = False
+            raise
+        self.async_update_listeners()
+
+    async def async_config_entry_first_refresh(self):
+        """First refresh at config-entry setup (alias of refresh)."""
+        await self.async_refresh()
+
+    async def async_shutdown(self):
+        """Release listeners on teardown."""
+        self._listeners.clear()
+
+
+_update_coordinator_mock = _ha_mock("homeassistant.helpers.update_coordinator")
+_update_coordinator_mock.DataUpdateCoordinator = DataUpdateCoordinator
 
 import voluptuous as vol
 

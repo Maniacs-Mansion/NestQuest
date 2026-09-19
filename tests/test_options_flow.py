@@ -18,6 +18,8 @@ from custom_components.nestquest.const import (
     CONF_DAY_ROLLOVER_TIME,
     CONF_HORIZON_DAYS,
     CONF_PANEL_IDLE_TIMEOUT,
+    CONF_UPDATE_INTERVAL,
+    DEFAULT_UPDATE_INTERVAL,
     DEFAULT_DAY_ROLLOVER_TIME,
     DEFAULT_HORIZON_DAYS,
     DEFAULT_PANEL_IDLE_TIMEOUT,
@@ -129,7 +131,10 @@ def test_options_flow_submits_through_2024_6_surface() -> None:
     result = _run(handler.async_step_init(dict(VALID_INPUT)))
     assert result["type"] == "create_entry"
     assert result["title"] == "NestQuest"
-    assert result["data"] == VALID_INPUT
+    assert result["data"] == {
+        **VALID_INPUT,
+        CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
+    }
 
 
 def test_options_flow_shows_form_initially() -> None:
@@ -208,6 +213,7 @@ def test_options_flow_schema_applies_stored_defaults() -> None:
             CONF_HORIZON_DAYS: 21,
             CONF_DAY_ROLLOVER_TIME: "05:45",
             CONF_PANEL_IDLE_TIMEOUT: 120,
+            CONF_UPDATE_INTERVAL: 90,
         }
     )
     result = _run(_make_flow(entry).async_step_init(None))
@@ -215,6 +221,7 @@ def test_options_flow_schema_applies_stored_defaults() -> None:
         CONF_HORIZON_DAYS: 21,
         CONF_DAY_ROLLOVER_TIME: "05:45",
         CONF_PANEL_IDLE_TIMEOUT: 120,
+        CONF_UPDATE_INTERVAL: 90,
         CONF_ADMIN_USER_IDS: [],
     }
 
@@ -282,8 +289,8 @@ def test_options_flow_rejects_invalid_idle_timeout(bad_timeout) -> None:
     assert result["errors"] == {CONF_PANEL_IDLE_TIMEOUT: "invalid"}
 
 
-def test_options_flow_creates_entry_with_three_keys() -> None:
-    """A valid submit creates an entry with exactly the three validated keys."""
+def test_options_flow_creates_entry_with_four_keys() -> None:
+    """A valid submit creates an entry with exactly the four validated keys."""
     flow = _make_flow(_make_entry())
     result = _run(flow.async_step_init(dict(VALID_INPUT)))
     assert result["type"] == "create_entry"
@@ -292,8 +299,12 @@ def test_options_flow_creates_entry_with_three_keys() -> None:
         CONF_HORIZON_DAYS,
         CONF_DAY_ROLLOVER_TIME,
         CONF_PANEL_IDLE_TIMEOUT,
+        CONF_UPDATE_INTERVAL,
     }
-    assert result["data"] == VALID_INPUT
+    assert result["data"] == {
+        **VALID_INPUT,
+        CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
+    }
 
 
 def test_options_flow_create_entry_data_lands_in_entry_options_and_reloads_once() -> None:
@@ -316,7 +327,10 @@ def test_options_flow_create_entry_data_lands_in_entry_options_and_reloads_once(
     _run(registry.dispatch_options_update(entry))
     assert hass.config_entries.async_reload.call_count == 1
     assert registry.reloaded == [entry.entry_id]
-    assert entry.options == VALID_INPUT
+    assert entry.options == {
+        **VALID_INPUT,
+        CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
+    }
 
 
 def test_options_flow_validation_never_raises() -> None:

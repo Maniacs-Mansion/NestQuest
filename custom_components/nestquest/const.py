@@ -55,6 +55,13 @@ DEFAULT_PANEL_IDLE_TIMEOUT = 300
 # list as a disaster-recovery copy so a lost database can be re-seeded.
 CONF_ADMIN_USER_IDS = "admin_user_ids"
 
+# Shared coordinator refresh interval (Feature 10), in SECONDS.  Every
+# entity reads one snapshot per refresh; completions push an immediate
+# refresh so this poll is only the fallback cadence.
+CONF_UPDATE_INTERVAL = "update_interval"
+DEFAULT_UPDATE_INTERVAL = 300
+MIN_UPDATE_INTERVAL = 30
+
 # Quest windows (D-008): a definition may declare several day windows;
 # each produces its own instance per day and groups the panel's Quest
 # Log into three columns.  The clock ranges are stored here so they stay
