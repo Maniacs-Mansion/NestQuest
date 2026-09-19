@@ -42,6 +42,7 @@ from .const import (
     SERVICE_UPDATE_QUEST_DEFINITION,
 )
 from .dao_presence import PresenceOverridesDao, PresenceSchedulesDao
+from .events import fire_quest_completed, fire_quest_uncompleted
 from .materialize import regenerate_for_child
 from .permissions import permission_gate
 from .presence import PresenceSchedule
@@ -293,11 +294,19 @@ def _complete_quest(
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
         database = _require_runtime(hass, find_runtime).database
+        instance_id = call.data["instance_id"]
+        # Events fire on an ACTUAL transition only: an already-done
+        # instance is a no-op below and must not re-announce itself.
+        state_before = await completion_layer.instance_state(
+            database, instance_id
+        )
         await completion_layer.complete_instance(
             database,
-            call.data["instance_id"],
+            instance_id,
             **_actor_kwargs(call),
         )
+        if state_before != "done":
+            await fire_quest_completed(hass, database, instance_id)
 
     return _with_errors(_handler)
 
@@ -307,11 +316,17 @@ def _uncomplete_quest(
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
         database = _require_runtime(hass, find_runtime).database
+        instance_id = call.data["instance_id"]
+        state_before = await completion_layer.instance_state(
+            database, instance_id
+        )
         await completion_layer.uncomplete_instance(
             database,
-            call.data["instance_id"],
+            instance_id,
             **_actor_kwargs(call),
         )
+        if state_before == "done":
+            await fire_quest_uncompleted(hass, database, instance_id)
 
     return _with_errors(_handler)
 

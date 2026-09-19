@@ -549,6 +549,31 @@ def _async_track_time_change(hass, action, hour=None, minute=None, second=None):
 _ha_mock("homeassistant.helpers.event").async_track_time_change = _async_track_time_change
 
 
+class EventBus:
+    """Models HA's ``hass.bus`` event bus.
+
+    ``async_fire`` is SYNCHRONOUS (matching real HA) and records
+    ``(event_type, payload)`` pairs in order so tests can assert
+    exactly which events fired with which payloads; there is no
+    listener dispatch (entities poll the coordinator, and the cards
+    are not part of this harness).
+    """
+
+    def __init__(self):
+        self.events: list[tuple[str, dict]] = []
+
+    def async_fire(self, event_type: str, payload=None):
+        self.events.append((event_type, dict(payload or {})))
+
+    def fired(self, event_type: str) -> list[dict]:
+        """Return every payload fired for ``event_type``, in order."""
+        return [
+            payload
+            for fired_type, payload in self.events
+            if fired_type == event_type
+        ]
+
+
 class ServiceRegistry:
     """Models HA's ``hass.services`` service registry.
 
@@ -671,6 +696,7 @@ def make_hass() -> tuple:
     registry = ListenerRegistry(hass)
     hass.time_change = TimeChangeRegistry(hass)
     hass.services = ServiceRegistry(hass)
+    hass.bus = EventBus()
     # A valid IANA time zone (the day-rollover listener reads it to
     # compute "today" in HA local time).
     hass.config.time_zone = "UTC"
