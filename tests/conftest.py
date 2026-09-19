@@ -704,28 +704,40 @@ def make_hass() -> tuple:
     # The minimal entity registry: entities self-register through
     # Entity.async_write_ha_state keyed by unique_id, storing the live
     # object; tests enumerate created entities and read their state
-    # directly.
+    # directly.  entities_by_entry mirrors HA's per-entry platform
+    # scoping: unloading an entry's platforms removes exactly that
+    # entry's entities.
     hass.entities: dict[str, Entity] = {}
+    hass.entities_by_entry: dict[str, dict[str, Entity]] = {}
 
-    def _async_add_entities(new_entities, update_before_add=False):
-        """Mirror HA's AddEntitiesCallback: bind hass and register entities.
+    def _make_add_entities(entry):
+        entry_entities = hass.entities_by_entry.setdefault(entry.entry_id, {})
 
-        Accepts a single entity or an iterable, mirroring HA's
-        permissive call shape; registration goes through each entity's
-        async_write_ha_state (the mock state write).
-        """
-        if isinstance(new_entities, Entity):
-            new_entities = [new_entities]
-        for entity in new_entities:
-            entity.hass = hass
-            entity.async_write_ha_state()
+        def _async_add_entities(new_entities, update_before_add=False):
+            """Mirror HA's AddEntitiesCallback: bind hass and register.
+
+            Accepts a single entity or an iterable, mirroring HA's
+            permissive call shape; registration goes through each
+            entity's async_write_ha_state (the mock state write) and
+            is recorded per entry so an unload removes exactly this
+            entry's entities.
+            """
+            if isinstance(new_entities, Entity):
+                new_entities = [new_entities]
+            for entity in new_entities:
+                entity.hass = hass
+                entity.async_write_ha_state()
+                if entity.unique_id is not None:
+                    entry_entities[entity.unique_id] = entity
+
+        return _async_add_entities
 
     async def _async_forward_entry_setups(entry, platforms):
         """Mirror hass.config_entries.async_forward_entry_setups.
 
         HA's contract, loosely: import each platform module of the
-        entry's integration and drive its ``async_setup_entry`` with
-        the AddEntitiesCallback above.  A stub entry without a domain
+        entry's integration and drive its ``async_setup_entry`` with a
+        per-entry AddEntitiesCallback.  A stub entry without a domain
         defaults to this harness's single integration (NestQuest).
         """
         for platform in list(platforms):
@@ -733,14 +745,18 @@ def make_hass() -> tuple:
             module = importlib.import_module(
                 f"custom_components.{domain}.{platform}"
             )
-            await module.async_setup_entry(hass, entry, _async_add_entities)
+            await module.async_setup_entry(
+                hass, entry, _make_add_entities(entry)
+            )
             hass.config_entries.forwarded_platforms.append(platform)
 
     async def _async_unload_platforms(entry, platforms):
         """Mirror hass.config_entries.async_unload_platforms.
 
         Runs each platform module's ``async_unload_entry`` when it
-        defines one (per-platform unload is optional, like HA's).
+        defines one (per-platform unload is optional, like HA's), then
+        removes the entry's entities — unloading an entry's platforms
+        removes exactly that entry's entities, never another entry's.
         """
         for platform in list(platforms):
             domain = getattr(entry, "domain", "nestquest")
@@ -751,6 +767,8 @@ def make_hass() -> tuple:
             if unload is not None:
                 await unload(hass, entry)
             hass.config_entries.unloaded_platforms.append(platform)
+        for unique_id in hass.entities_by_entry.pop(entry.entry_id, {}):
+            hass.entities.pop(unique_id, None)
 
     hass.config_entries.forwarded_platforms: list[str] = []
     hass.config_entries.unloaded_platforms: list[str] = []
