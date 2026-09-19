@@ -578,7 +578,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Platforms unload FIRST (mirroring HA conventions): entity
     # listeners must not outlive the database and coordinator the
     # teardown below closes.
-    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    platforms_unloaded = await hass.config_entries.async_unload_platforms(
+        entry, PLATFORMS
+    )
+    if platforms_unloaded is False and runtime_data is not None:
+        # Home Assistant KEPT one or more platforms loaded — their
+        # entities still live and must keep their database.  Restore
+        # the runtime record popped above and report failure so HA
+        # retries the unload later instead of leaving live entities
+        # backed by a closed database.
+        hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime_data
+        return False
     unload_error: BaseException | None = None
     if runtime_data is not None:
         remove_update_listener = getattr(runtime_data, "remove_update_listener", None)

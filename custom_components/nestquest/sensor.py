@@ -101,13 +101,19 @@ def _instance_payload(
 class _NestQuestChildDaySensor(CoordinatorEntity, SensorEntity):
     """Base for the per-child day sensors.
 
-    Registry identity and the child's NestQuest device grouping are
-    built from the child's database id; the day's numbers are read
-    from the child's CURRENT snapshot so every refresh lands
-    coherently.  A child absent from the latest snapshot (a
+    Registry identity is built from the child's database id and never
+    changes; the DISPLAYED name and device label are derived from the
+    child's CURRENT snapshot on every read, so a rename through
+    ``manage_child`` propagates on the next refresh without orphaning
+    the entity's history.  A child absent from the latest snapshot (a
     deactivation; removal is a later task's scope) yields ``None``
     states rather than stale counts.
     """
+
+    #: Per-subclass label appended to the name (e.g. ``quests due
+    #: today``), set as a class attribute so ``name`` composes from the
+    #: current snapshot.
+    _name_suffix: str = ""
 
     def __init__(
         self,
@@ -116,11 +122,8 @@ class _NestQuestChildDaySensor(CoordinatorEntity, SensorEntity):
     ) -> None:
         super().__init__(coordinator)
         self._child_id = child.child_id
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"child_{child.child_id}")},
-            name=f"NestQuest {child.child_name}",
-            manufacturer="NestQuest",
-        )
+        self._fallback_name = child.child_name
+        self._attr_unique_id = None  # set by the subclass
 
     @property
     def _child(self) -> ChildDaySnapshot | None:
@@ -133,11 +136,28 @@ class _NestQuestChildDaySensor(CoordinatorEntity, SensorEntity):
                 return child
         return None
 
+    def _displayed_child_name(self) -> str:
+        child = self._child
+        return child.child_name if child is not None else self._fallback_name
+
+    @property
+    def name(self) -> str | None:
+        return f"NestQuest {self._displayed_child_name()} {self._name_suffix}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, f"child_{self._child_id}")},
+            name=f"NestQuest {self._displayed_child_name()}",
+            manufacturer="NestQuest",
+        )
+
 
 class NestQuestQuestsDueTodaySensor(_NestQuestChildDaySensor):
     """How many quests the child has due today, with the day payload."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
+    _name_suffix = "quests due today"
 
     def __init__(
         self,
@@ -145,7 +165,6 @@ class NestQuestQuestsDueTodaySensor(_NestQuestChildDaySensor):
         child: ChildDaySnapshot,
     ) -> None:
         super().__init__(coordinator, child)
-        self._attr_name = f"NestQuest {child.child_name} quests due today"
         self._attr_unique_id = (
             f"{DOMAIN}_child_{child.child_id}_quests_due_today"
         )
@@ -179,6 +198,7 @@ class NestQuestQuestsCompletedTodaySensor(_NestQuestChildDaySensor):
     """How many of the child's quests were completed today."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
+    _name_suffix = "quests completed today"
 
     def __init__(
         self,
@@ -186,9 +206,6 @@ class NestQuestQuestsCompletedTodaySensor(_NestQuestChildDaySensor):
         child: ChildDaySnapshot,
     ) -> None:
         super().__init__(coordinator, child)
-        self._attr_name = (
-            f"NestQuest {child.child_name} quests completed today"
-        )
         self._attr_unique_id = (
             f"{DOMAIN}_child_{child.child_id}_quests_completed_today"
         )
@@ -205,6 +222,7 @@ class NestQuestQuestsRemainingTodaySensor(_NestQuestChildDaySensor):
     """How many of the child's quests are still owed today."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
+    _name_suffix = "quests remaining today"
 
     def __init__(
         self,
@@ -212,9 +230,6 @@ class NestQuestQuestsRemainingTodaySensor(_NestQuestChildDaySensor):
         child: ChildDaySnapshot,
     ) -> None:
         super().__init__(coordinator, child)
-        self._attr_name = (
-            f"NestQuest {child.child_name} quests remaining today"
-        )
         self._attr_unique_id = (
             f"{DOMAIN}_child_{child.child_id}_quests_remaining_today"
         )
@@ -233,6 +248,7 @@ class NestQuestCompletionPctTodaySensor(_NestQuestChildDaySensor):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_device_class = SensorDeviceClass.PERCENTAGE
     _attr_native_unit_of_measurement = "%"
+    _name_suffix = "completion pct today"
 
     def __init__(
         self,
@@ -240,9 +256,6 @@ class NestQuestCompletionPctTodaySensor(_NestQuestChildDaySensor):
         child: ChildDaySnapshot,
     ) -> None:
         super().__init__(coordinator, child)
-        self._attr_name = (
-            f"NestQuest {child.child_name} completion pct today"
-        )
         self._attr_unique_id = (
             f"{DOMAIN}_child_{child.child_id}_completion_pct_today"
         )

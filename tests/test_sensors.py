@@ -339,3 +339,47 @@ async def test_unload_unloads_platforms(hass, make_entry) -> None:
     assert await async_setup_entry(hass, entry) is True
     assert await async_unload_entry(hass, entry) is True
     assert hass.config_entries.unloaded_platforms == ["sensor"]
+
+
+async def test_rename_propagates_to_name_and_device_label(
+    hass, make_entry
+) -> None:
+    """A manage_child rename shows on the next refresh: the name and
+    device label re-derive from the snapshot while the unique_id (and
+    therefore history) is untouched."""
+    from custom_components.nestquest.children import edit_child
+
+    entry, coordinator, (ada, _bo, _cory) = await _setup_seeded_entry(
+        hass, make_entry
+    )
+    database = entry.runtime_data.database
+    due_sensor = _sensor(hass, ada.id, "quests_due_today")
+    original_unique_id = due_sensor.unique_id
+    assert due_sensor.name.startswith("NestQuest Ada ")
+
+    await edit_child(database, ada.id, display_name="Mirren")
+    await coordinator.async_refresh()
+
+    assert due_sensor.name.startswith("NestQuest Mirren ")
+    assert due_sensor.device_info.name == "NestQuest Mirren"
+    assert due_sensor.unique_id == original_unique_id
+
+
+async def test_failed_platform_unload_returns_false_and_retains_runtime(
+    hass, make_entry
+) -> None:
+    """When HA reports platforms still loaded, the unload must NOT
+    close the database the live entities read: it returns False and
+    keeps the runtime record for a retry."""
+    entry, _coordinator, _children = await _setup_seeded_entry(
+        hass, make_entry
+    )
+    database = entry.runtime_data.database
+
+    async def _refuse_unload(entry_arg, platforms):
+        return False
+
+    hass.config_entries.async_unload_platforms = _refuse_unload
+    assert await async_unload_entry(hass, entry) is False
+    assert hass.data[DOMAIN][entry.entry_id] is entry.runtime_data
+    assert database.connected is True
