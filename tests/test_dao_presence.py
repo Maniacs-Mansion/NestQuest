@@ -455,6 +455,20 @@ def test_override_list_unknown_child_returns_empty(tmp_path) -> None:
     assert _with_db(tmp_path, "override-list-unknown.db")(_body) == []
 
 
+def test_override_get_round_trip(tmp_path) -> None:
+    async def _body(database, schedules, overrides, children, child):
+        record = await overrides.create(
+            child.id, "2026-09-10", "2026-09-11", True, note="camp"
+        )
+        found = await overrides.get(record.id)
+        assert found == record
+        assert await overrides.get(999) is None
+        return found
+
+    found = _with_db(tmp_path, "override-get.db")(_body)
+    assert found.note == "camp"
+
+
 def test_override_delete_round_trip(tmp_path) -> None:
     async def _body(database, schedules, overrides, children, child):
         record = await overrides.create(

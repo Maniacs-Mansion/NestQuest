@@ -9,8 +9,33 @@ LOGGER = logging.getLogger(LOGGER_NAME)
 
 PLATFORMS: list[str] = []
 
-#: Service name for the on-demand regeneration service (``nestquest.regenerate``).
+#: Canonical domain-global service names (design/ENTITIES-AND-SERVICES.md §2
+#: plus the existing Feature 07 regenerate service).
+SERVICE_COMPLETE_QUEST = "complete_quest"
+SERVICE_UNCOMPLETE_QUEST = "uncomplete_quest"
+SERVICE_CREATE_QUEST_DEFINITION = "create_quest_definition"
+SERVICE_UPDATE_QUEST_DEFINITION = "update_quest_definition"
+SERVICE_SET_QUEST_DEFINITION_ACTIVE = "set_quest_definition_active"
+SERVICE_SET_PRESENCE_PATTERN = "set_presence_pattern"
+SERVICE_CREATE_PRESENCE_OVERRIDE = "create_presence_override"
+SERVICE_DELETE_PRESENCE_OVERRIDE = "delete_presence_override"
+SERVICE_EXPORT_HISTORY_CSV = "export_history_csv"
+SERVICE_MANAGE_CHILD = "manage_child"
 SERVICE_REGENERATE = "regenerate"
+
+DOMAIN_SERVICES: tuple[str, ...] = (
+    SERVICE_COMPLETE_QUEST,
+    SERVICE_UNCOMPLETE_QUEST,
+    SERVICE_CREATE_QUEST_DEFINITION,
+    SERVICE_UPDATE_QUEST_DEFINITION,
+    SERVICE_SET_QUEST_DEFINITION_ACTIVE,
+    SERVICE_SET_PRESENCE_PATTERN,
+    SERVICE_CREATE_PRESENCE_OVERRIDE,
+    SERVICE_DELETE_PRESENCE_OVERRIDE,
+    SERVICE_EXPORT_HISTORY_CSV,
+    SERVICE_MANAGE_CHILD,
+    SERVICE_REGENERATE,
+)
 
 SQLITE_DB_FILENAME = "nestquest.db"
 
