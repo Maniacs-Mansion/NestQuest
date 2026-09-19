@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import datetime
 
+import pytest
+
 from conftest import wire_entry_to_registry
 
 from custom_components.nestquest import async_setup_entry, async_unload_entry
@@ -242,3 +244,38 @@ async def test_coordinator_notifies_listeners_on_refresh(
     await coordinator.async_refresh()
     assert called == ["entity"]
     assert coordinator.last_update_success is True
+
+
+async def test_failed_first_refresh_shuts_coordinator_down(
+    hass, make_entry, monkeypatch
+) -> None:
+    """A setup failure after coordinator creation must not leak its
+    listeners against the database the except path closes."""
+    from custom_components.nestquest import async_setup_entry
+    import custom_components.nestquest.coordinator as coordinator_module
+
+    shutdown_calls = []
+
+    async def _record_shutdown(self):
+        shutdown_calls.append(self.entry_id)
+
+    monkeypatch.setattr(
+        coordinator_module.NestQuestCoordinator,
+        "async_shutdown",
+        _record_shutdown,
+    )
+
+    async def _boom(self):
+        raise RuntimeError("refresh failed")
+
+    monkeypatch.setattr(
+        coordinator_module.NestQuestCoordinator,
+        "_async_update_data",
+        _boom,
+    )
+
+    entry = wire_entry_to_registry(make_entry(), hass.registry)
+    with pytest.raises(RuntimeError, match="refresh failed"):
+        await async_setup_entry(hass, entry)
+    assert shutdown_calls == [entry.entry_id]
+    assert getattr(entry, "runtime_data", None) is None

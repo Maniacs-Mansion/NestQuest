@@ -460,6 +460,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     database = await _async_open_database(hass, await async_get_db_path(hass))
     remove_update_listener: Callable[[], Any] | None = None
     remove_time_change_listener: Callable[[], Any] | None = None
+    coordinator: Any = None
     try:
         # Seed the admin allowlist on first setup so the owner is never
         # locked out: an empty database takes the persisted admin copy
@@ -526,6 +527,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 result = remove_listener()
                 if inspect.isawaitable(result):
                     await result
+            except BaseException:
+                pass
+        # A coordinator created before the failure holds entity
+        # listeners pointed at the database being closed below —
+        # shut it down FIRST so no scheduled refresh can ever run
+        # against a closed connection.
+        if coordinator is not None:
+            try:
+                await coordinator.async_shutdown()
             except BaseException:
                 pass
         await database.close()
