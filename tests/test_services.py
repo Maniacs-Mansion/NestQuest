@@ -26,6 +26,7 @@ from custom_components.nestquest.const import (
     SERVICE_SET_QUEST_DEFINITION_ACTIVE,
     SERVICE_UNCOMPLETE_QUEST,
 )
+from custom_components.nestquest.service_policy import ADMIN_ONLY, SERVICE_POLICY
 
 SERVICES_PATH = (
     Path(__file__).parent.parent
@@ -476,3 +477,117 @@ async def test_unauthorized_is_raised_before_handler_runs(
             context={"user_id": "kiosk-panel"},
         )
     assert await list_children(entry.runtime_data.database) == []
+
+
+_MINIMAL_PAYLOADS = {
+    "uncomplete_quest": {"instance_id": 1, "actor": "user"},
+    "create_quest_definition": {
+        "title": "T",
+        "rule": {"rule_type": "daily"},
+        "assignee_child_ids": [1],
+        "windows": ["morning"],
+    },
+    "update_quest_definition": {"definition_id": 1},
+    "set_quest_definition_active": {"definition_id": 1, "is_active": True},
+    "set_presence_pattern": {
+        "child_id": 1,
+        "cycle_length_weeks": 1,
+        "anchor_date": "2026-09-19",
+        "pattern": {0: [0]},
+    },
+    "create_presence_override": {
+        "child_id": 1,
+        "start_date": "2026-09-19",
+        "end_date": "2026-09-19",
+        "is_present": False,
+    },
+    "delete_presence_override": {"override_id": 1},
+    "export_history_csv": {},
+    "manage_child": {"action": "create", "display_name": "Ada"},
+    "regenerate": {},
+}
+
+_ADMIN_ONLY_SERVICES = [
+    name for name, policy in SERVICE_POLICY.items() if policy == ADMIN_ONLY
+]
+
+
+@pytest.mark.parametrize("service", _ADMIN_ONLY_SERVICES)
+async def test_admin_only_service_fails_closed_without_user_context(
+    hass, make_entry, service
+) -> None:
+    """A call with no user_id is denied on every admin-only service."""
+    entry = _wire(_make_admin_entry(make_entry), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    with pytest.raises(Unauthorized):
+        await hass.services.call(
+            DOMAIN, service, dict(_MINIMAL_PAYLOADS[service])
+        )
+
+
+async def test_complete_quest_proceeds_without_user_context(
+    hass, make_entry
+) -> None:
+    """The open service needs no user context: the kiosk panel taps a
+    child profile and the call goes through with no HA user at all."""
+    import datetime
+
+    from custom_components.nestquest.children import list_children
+    from custom_components.nestquest.completion import instance_state
+    from custom_components.nestquest.const import DEFAULT_HORIZON_DAYS
+    from custom_components.nestquest.dao_instances import QuestInstancesDao
+
+    entry = _wire(_make_admin_entry(make_entry), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_MANAGE_CHILD,
+        {"action": "create", "display_name": "Ada"},
+        context=ADMIN_CTX,
+    )
+    child = (await list_children(entry.runtime_data.database))[0]
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_CREATE_QUEST_DEFINITION,
+        {
+            "title": "Brush teeth",
+            "rule": {"rule_type": "daily"},
+            "assignee_child_ids": [child.id],
+            "windows": ["morning"],
+        },
+        context=ADMIN_CTX,
+    )
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE, context=ADMIN_CTX)
+    today = datetime.date.today().isoformat()
+    end = (
+        datetime.date.today() + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
+    ).isoformat()
+    instance_id = (
+        await QuestInstancesDao(
+            entry.runtime_data.database
+        ).list_by_date_range(child.id, today, end)
+    )[0].id
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_COMPLETE_QUEST,
+        {"instance_id": instance_id, "actor": "panel", "actor_child_id": child.id},
+    )
+    assert (
+        await instance_state(entry.runtime_data.database, instance_id)
+        == "done"
+    )
+
+
+async def test_scheduled_internals_never_call_the_service_layer(
+    hass, make_entry
+) -> None:
+    """The daily rollover and startup backfill run the materialization
+    as direct function calls; they never widen the service gate."""
+    import custom_components.nestquest as nestquest
+
+    assert not hasattr(nestquest, "_run_horizon_materialization_service")
+    source = Path(nestquest.__file__).read_text(encoding="utf-8")
+    assert "hass.services.call" not in source, (
+        "scheduled internals must call the materialization directly, "
+        "never through hass.services.call"
+    )
