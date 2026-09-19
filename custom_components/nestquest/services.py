@@ -295,17 +295,15 @@ def _complete_quest(
     async def _handler(call: Any) -> None:
         database = _require_runtime(hass, find_runtime).database
         instance_id = call.data["instance_id"]
-        # Events fire on an ACTUAL transition only: an already-done
-        # instance is a no-op below and must not re-announce itself.
-        state_before = await completion_layer.instance_state(
-            database, instance_id
-        )
-        await completion_layer.complete_instance(
+        # ``appended`` is decided under the same lock as the write, so
+        # a concurrent duplicate call (a double tap) can not produce a
+        # second transition event: the loser appends nothing.
+        result = await completion_layer.complete_instance(
             database,
             instance_id,
             **_actor_kwargs(call),
         )
-        if state_before != "done":
+        if result.appended:
             await fire_quest_completed(hass, database, instance_id)
 
     return _with_errors(_handler)
@@ -317,15 +315,12 @@ def _uncomplete_quest(
     async def _handler(call: Any) -> None:
         database = _require_runtime(hass, find_runtime).database
         instance_id = call.data["instance_id"]
-        state_before = await completion_layer.instance_state(
-            database, instance_id
-        )
-        await completion_layer.uncomplete_instance(
+        result = await completion_layer.uncomplete_instance(
             database,
             instance_id,
             **_actor_kwargs(call),
         )
-        if state_before == "done":
+        if result.appended:
             await fire_quest_uncompleted(hass, database, instance_id)
 
     return _with_errors(_handler)

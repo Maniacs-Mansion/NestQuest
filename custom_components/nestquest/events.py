@@ -91,7 +91,11 @@ async def fire_quest_completed(
 
     # Day-complete: quests were owed today and none remain (the same
     # rule as the all-done binary sensor; a zero-quest day never fires).
+    # Only a completion of TODAY'S instance evaluates it: completing a
+    # back-dated or future instance must not announce a cleared day.
     today = datetime.datetime.now(ZoneInfo(hass.config.time_zone)).date()
+    if payload["due_date"] != today.isoformat():
+        return
     instances = await QuestInstancesDao(database).list_by_date_range(
         payload["child_id"], today.isoformat(), today.isoformat()
     )
