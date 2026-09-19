@@ -369,6 +369,123 @@ def _child_day_sensors(
     )
 
 
+class _NestQuestHouseholdSensor(CoordinatorEntity, SensorEntity):
+    """Base for the household-level rollup sensors.
+
+    Aggregates the ACTIVE children's snapshots only (the snapshot
+    already excludes inactive children), matching the per-child
+    sensors exactly — a household number is always the sum of the
+    per-child numbers.  Grouped under one household device so the
+    three household sensors render together.
+    """
+
+    _attr_name: str
+
+    def __init__(self, coordinator: NestQuestCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, "household")},
+            name="NestQuest Household",
+            manufacturer="NestQuest",
+        )
+
+
+class NestQuestHouseholdDueTodaySensor(_NestQuestHouseholdSensor):
+    """Total quests due today across active children."""
+
+    _attr_name = "NestQuest household quests due today"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_unique_id = f"{DOMAIN}_household_quests_due_today"
+
+    @property
+    def native_value(self) -> int | None:
+        data = self.coordinator.data
+        if data is None:
+            return None
+        return _state_within_limit(
+            sum(child.due_today for child in data.children)
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        data = self.coordinator.data
+        if data is None:
+            return None
+        return {
+            "children": {
+                str(child.child_id): child.due_today
+                for child in data.children
+            }
+        }
+
+
+class NestQuestHouseholdCompletedTodaySensor(_NestQuestHouseholdSensor):
+    """Total quests completed today across active children."""
+
+    _attr_name = "NestQuest household quests completed today"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_unique_id = f"{DOMAIN}_household_quests_completed_today"
+
+    @property
+    def native_value(self) -> int | None:
+        data = self.coordinator.data
+        if data is None:
+            return None
+        return _state_within_limit(
+            sum(child.completed_today for child in data.children)
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        data = self.coordinator.data
+        if data is None:
+            return None
+        return {
+            "children": {
+                str(child.child_id): child.completed_today
+                for child in data.children
+            }
+        }
+
+
+class NestQuestCycleDaySensor(_NestQuestHouseholdSensor):
+    """Cycle day N of the custody cycle (0 when nobody is scheduled).
+
+    Computed by the coordinator from the first active child with a
+    presence schedule, anchor-date arithmetic only (D-004 — never ISO
+    week parity), so a 53-week year cannot silently invert it.
+    """
+
+    _attr_name = "NestQuest cycle day"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_unique_id = f"{DOMAIN}_cycle_day"
+
+    @property
+    def native_value(self) -> int | None:
+        data = self.coordinator.data
+        if data is None:
+            return None
+        return _state_within_limit(data.cycle_day)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        data = self.coordinator.data
+        if data is None:
+            return None
+        return {"cycle_day": data.cycle_day, "today": data.today_iso}
+
+
+def _household_sensors(
+    coordinator: NestQuestCoordinator,
+) -> tuple[_NestQuestHouseholdSensor, ...]:
+    """Build the three household-level sensors (one set per entry)."""
+    return (
+        NestQuestHouseholdDueTodaySensor(coordinator),
+        NestQuestHouseholdCompletedTodaySensor(coordinator),
+        NestQuestCycleDaySensor(coordinator),
+    )
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -405,6 +522,10 @@ async def async_setup_entry(
     data = coordinator.data
     if data is not None:
         _add_new_children(data.children)
+        # The household rollups are child-independent: created exactly
+        # once at platform setup, they aggregate whatever the snapshot
+        # carries (empty included — an empty household is a valid 0).
+        async_add_entities(_household_sensors(coordinator))
 
     def _handle_coordinator_update() -> None:
         data = coordinator.data

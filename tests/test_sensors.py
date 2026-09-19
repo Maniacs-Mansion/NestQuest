@@ -112,8 +112,9 @@ async def test_every_active_child_gets_five_sensors_with_documented_identity(
     await coordinator.async_refresh()
 
     # Two quest children plus the zero-quest child: three children x
-    # (five sensors + two binary sensors), no duplicates.
-    assert len(hass.entities) == 21
+    # (five sensors + two binary sensors) + three household sensors,
+    # no duplicates.
+    assert len(hass.entities) == 24
     expected = {
         ada.id: ("Ada", 1, 1, 0, 100),
         bo.id: ("Bo", 1, 0, 1, 0),
@@ -327,15 +328,22 @@ async def test_repeated_refreshes_do_not_duplicate_entities(
     )
     await coordinator.async_refresh()
     await coordinator.async_refresh()
-    assert len(hass.entities) == 21
+    assert len(hass.entities) == 24
 
 
-async def test_setup_with_no_children_registers_no_entities(
+async def test_setup_with_no_children_registers_only_household(
     hass, make_entry
 ) -> None:
     entry = wire_entry_to_registry(make_entry(), hass.registry)
     assert await async_setup_entry(hass, entry) is True
-    assert hass.entities == {}
+    # No children means no per-child entities; the three household
+    # rollups still exist (an empty household is a valid 0).
+    assert set(hass.entities) == {
+        "nestquest_household_quests_due_today",
+        "nestquest_household_quests_completed_today",
+        "nestquest_cycle_day",
+    }
+    assert hass.entities["nestquest_household_quests_due_today"].native_value == 0
 
 
 async def test_unload_unloads_platforms(hass, make_entry) -> None:
@@ -452,3 +460,56 @@ async def test_next_quest_state_truncates_over_the_limit(
     state = next_entity.native_value
     assert len(state) <= 255
     assert next_entity.extra_state_attributes["title"] == full_title
+
+
+async def test_household_rollups_sum_the_active_children(
+    hass, make_entry
+) -> None:
+    """Household due/completed equal the sum of the per-child sensors;
+    the cycle-day sensor carries the coordinator's answer."""
+    import datetime as _dt
+
+    from custom_components.nestquest.dao_presence import (
+        PresenceSchedulesDao,
+    )
+
+    entry, coordinator, (ada, bo, cory) = await _setup_seeded_entry(
+        hass, make_entry
+    )
+    database = entry.runtime_data.database
+    await _complete_first_instance(database, coordinator, ada)
+    await coordinator.async_refresh()
+
+    household_due = hass.entities["nestquest_household_quests_due_today"]
+    household_completed = hass.entities[
+        "nestquest_household_quests_completed_today"
+    ]
+    cycle_day_entity = hass.entities["nestquest_cycle_day"]
+    per_child_due = [
+        _sensor(hass, child.id, "quests_due_today").native_value
+        for child in (ada, bo, cory)
+    ]
+    per_child_completed = [
+        _sensor(hass, child.id, "quests_completed_today").native_value
+        for child in (ada, bo, cory)
+    ]
+    assert household_due.native_value == sum(per_child_due)
+    assert household_completed.native_value == sum(per_child_completed)
+    assert household_due.name == "NestQuest household quests due today"
+    assert household_completed.name == (
+        "NestQuest household quests completed today"
+    )
+    assert cycle_day_entity.name == "NestQuest cycle day"
+    assert cycle_day_entity.native_value == 0, "no schedule anywhere"
+
+    # A schedule on the FIRST active child drives cycle day.
+    today = _dt.date.today()
+    await PresenceSchedulesDao(database).upsert_by_child(
+        ada.id, 2, (today - _dt.timedelta(days=3)).isoformat(),
+        "0,1,2,3,4,5,6|",
+    )
+    await coordinator.async_refresh()
+    assert cycle_day_entity.native_value == 4
+    assert cycle_day_entity.extra_state_attributes["today"] == (
+        today.isoformat()
+    )
