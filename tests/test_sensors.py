@@ -104,13 +104,16 @@ async def test_every_active_child_gets_five_sensors_with_documented_identity(
         hass, make_entry
     )
     database = entry.runtime_data.database
-    assert hass.config_entries.forwarded_platforms == ["sensor"]
+    assert hass.config_entries.forwarded_platforms == [
+        "sensor",
+        "binary_sensor",
+    ]
     await _complete_first_instance(database, coordinator, ada)
     await coordinator.async_refresh()
 
     # Two quest children plus the zero-quest child: three children x
-    # five sensors, no duplicates.
-    assert len(hass.entities) == 15
+    # (five sensors + two binary sensors), no duplicates.
+    assert len(hass.entities) == 21
     expected = {
         ada.id: ("Ada", 1, 1, 0, 100),
         bo.id: ("Bo", 1, 0, 1, 0),
@@ -324,7 +327,7 @@ async def test_repeated_refreshes_do_not_duplicate_entities(
     )
     await coordinator.async_refresh()
     await coordinator.async_refresh()
-    assert len(hass.entities) == 15
+    assert len(hass.entities) == 21
 
 
 async def test_setup_with_no_children_registers_no_entities(
@@ -339,7 +342,10 @@ async def test_unload_unloads_platforms(hass, make_entry) -> None:
     entry = wire_entry_to_registry(make_entry(), hass.registry)
     assert await async_setup_entry(hass, entry) is True
     assert await async_unload_entry(hass, entry) is True
-    assert hass.config_entries.unloaded_platforms == ["sensor"]
+    assert hass.config_entries.unloaded_platforms == [
+        "sensor",
+        "binary_sensor",
+    ]
 
 
 async def test_rename_propagates_to_name_and_device_label(
