@@ -98,11 +98,15 @@ def _async_validate(user_input: dict[str, Any]) -> dict[str, str]:
         ):
             errors[time_key] = "invalid_time"
     notify_target = user_input.get(CONF_NOTIFY_TARGET)
-    if notify_target is not None and (
-        not isinstance(notify_target, str)
-        or not notify_target.strip()
-        or notify_target != notify_target.strip()
+    if notify_target is not None and not isinstance(notify_target, str):
+        errors[CONF_NOTIFY_TARGET] = "invalid"
+    elif isinstance(notify_target, str) and notify_target != (
+        notify_target.strip()
     ):
+        # An EMPTY target is valid — it means "no notifications
+        # configured yet" and is the shipped default; a value that
+        # differs from its own trim (padded or whitespace-only) is
+        # malformed and rejected.
         errors[CONF_NOTIFY_TARGET] = "invalid"
     for toggle_key in (
         CONF_MORNING_SUMMARY_ENABLED,

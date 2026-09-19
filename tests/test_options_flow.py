@@ -712,9 +712,22 @@ def test_options_flow_notification_times_must_be_strict_hh_mm() -> None:
         assert result["errors"] == {CONF_MORNING_SUMMARY_TIME: "invalid_time"}
 
 
-def test_options_flow_notify_target_must_be_clean_nonempty_string() -> None:
+def test_options_flow_notify_target_validation() -> None:
+    """The empty target is VALID (it is the shipped default and must be
+    savable); only malformed non-empty values reject."""
     flow = _make_flow(_make_entry())
-    for bad_target in ("", "  notify.x  ", 42):
+    # The empty default saves cleanly.
+    result = _run(
+        flow.async_step_init(
+            {**VALID_INPUT, CONF_NOTIFY_TARGET: ""}
+        )
+    )
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_NOTIFY_TARGET] == ""
+
+    # Malformed non-empty values reject.
+    for bad_target in ("  notify.x  ", "   ", 42):
+        flow = _make_flow(_make_entry())
         result = _run(
             flow.async_step_init(
                 {
