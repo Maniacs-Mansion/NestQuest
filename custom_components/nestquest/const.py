@@ -7,7 +7,18 @@ DOMAIN = "nestquest"
 LOGGER_NAME = "custom_components.nestquest"
 LOGGER = logging.getLogger(LOGGER_NAME)
 
-PLATFORMS: list[str] = []
+# Platforms set up per config entry (Feature 10): the per-child day
+# sensors and binary sensors.
+PLATFORMS: list[str] = ["sensor", "binary_sensor"]
+
+# Home Assistant bus events (design/ENTITIES-AND-SERVICES.md §3).  The
+# panel and admin cards listen for these; Feature 10 fires completed,
+# uncompleted, and child_day_complete from the service paths, and
+# Feature 11's nightly sweep fires quest_missed.
+EVENT_QUEST_COMPLETED = "nestquest_quest_completed"
+EVENT_QUEST_UNCOMPLETED = "nestquest_quest_uncompleted"
+EVENT_QUEST_MISSED = "nestquest_quest_missed"
+EVENT_CHILD_DAY_COMPLETE = "nestquest_child_day_complete"
 
 #: Canonical domain-global service names (design/ENTITIES-AND-SERVICES.md §2
 #: plus the existing Feature 07 regenerate service).
@@ -54,6 +65,13 @@ DEFAULT_PANEL_IDLE_TIMEOUT = 300
 # database allowlist is authoritative; the config entry carries the same
 # list as a disaster-recovery copy so a lost database can be re-seeded.
 CONF_ADMIN_USER_IDS = "admin_user_ids"
+
+# Shared coordinator refresh interval (Feature 10), in SECONDS.  Every
+# entity reads one snapshot per refresh; completions push an immediate
+# refresh so this poll is only the fallback cadence.
+CONF_UPDATE_INTERVAL = "update_interval"
+DEFAULT_UPDATE_INTERVAL = 300
+MIN_UPDATE_INTERVAL = 30
 
 # Quest windows (D-008): a definition may declare several day windows;
 # each produces its own instance per day and groups the panel's Quest

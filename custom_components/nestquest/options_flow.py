@@ -14,10 +14,13 @@ from .const import (
     CONF_DAY_ROLLOVER_TIME,
     CONF_HORIZON_DAYS,
     CONF_PANEL_IDLE_TIMEOUT,
+    CONF_UPDATE_INTERVAL,
     DEFAULT_DAY_ROLLOVER_TIME,
     DEFAULT_HORIZON_DAYS,
     DEFAULT_PANEL_IDLE_TIMEOUT,
+    DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
+    MIN_UPDATE_INTERVAL,
 )
 from .admin_allowlist import list_admin_ids, set_admin_ids
 
@@ -56,6 +59,18 @@ def _async_validate(user_input: dict[str, Any]) -> dict[str, str]:
     ):
         errors[CONF_PANEL_IDLE_TIMEOUT] = "invalid"
 
+    # The coordinator refresh interval (Feature 10) is OPTIONAL in raw
+    # submits: a missing key keeps the current value, so pre-Feature-10
+    # form payloads (and API callers) are unaffected.  Schema-validated
+    # submits always carry it.
+    update_interval = user_input.get(CONF_UPDATE_INTERVAL)
+    if update_interval is not None and (
+        isinstance(update_interval, bool)
+        or not isinstance(update_interval, int)
+        or update_interval < MIN_UPDATE_INTERVAL
+    ):
+        errors[CONF_UPDATE_INTERVAL] = "invalid"
+
     return errors
 
 
@@ -81,6 +96,9 @@ def _build_schema(
         ): str,
         vol.Required(
             CONF_PANEL_IDLE_TIMEOUT, default=current[CONF_PANEL_IDLE_TIMEOUT]
+        ): int,
+        vol.Required(
+            CONF_UPDATE_INTERVAL, default=current[CONF_UPDATE_INTERVAL]
         ): int,
     }
     if admin_choices is not None:
@@ -210,6 +228,10 @@ class NestQuestOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             CONF_HORIZON_DAYS: user_input[CONF_HORIZON_DAYS],
             CONF_DAY_ROLLOVER_TIME: user_input[CONF_DAY_ROLLOVER_TIME],
             CONF_PANEL_IDLE_TIMEOUT: user_input[CONF_PANEL_IDLE_TIMEOUT],
+            CONF_UPDATE_INTERVAL: user_input.get(
+                CONF_UPDATE_INTERVAL,
+                self._current_values()[CONF_UPDATE_INTERVAL],
+            ),
         }
         if admin_ids_present:
             data[CONF_ADMIN_USER_IDS] = admin_ids
@@ -231,6 +253,7 @@ class NestQuestOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             (CONF_HORIZON_DAYS, DEFAULT_HORIZON_DAYS),
             (CONF_DAY_ROLLOVER_TIME, DEFAULT_DAY_ROLLOVER_TIME),
             (CONF_PANEL_IDLE_TIMEOUT, DEFAULT_PANEL_IDLE_TIMEOUT),
+            (CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL),
         ):
             if key in options:
                 values[key] = options[key]

@@ -20,11 +20,15 @@ from .const import (
     CONF_ADMIN_USER_IDS,
     CONF_DAY_ROLLOVER_TIME,
     CONF_HORIZON_DAYS,
+    CONF_UPDATE_INTERVAL,
     DEFAULT_DAY_ROLLOVER_TIME,
     DEFAULT_HORIZON_DAYS,
+    DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     LOGGER,
+    PLATFORMS,
 )
+from .coordinator import NestQuestCoordinator
 from .db import NestQuestDatabase
 from .materialize import materialize as _materialize_run
 from .migrations import apply_migrations
@@ -238,6 +242,7 @@ class NestQuestRuntimeData:
     database: NestQuestDatabase
     remove_update_listener: Callable[[], Any]
     remove_time_change_listener: Callable[[], Any]
+    coordinator: Any = None
 
 
 async def _async_owner_user_ids(hass: HomeAssistant) -> list[str]:
@@ -456,6 +461,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     database = await _async_open_database(hass, await async_get_db_path(hass))
     remove_update_listener: Callable[[], Any] | None = None
     remove_time_change_listener: Callable[[], Any] | None = None
+    coordinator: Any = None
     try:
         # Seed the admin allowlist on first setup so the owner is never
         # locked out: an empty database takes the persisted admin copy
@@ -493,6 +499,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass, database, _configured_horizon_days(dict(entry.options))
         )
         _register_services(hass)
+        # The shared Feature 10 coordinator: one refresh cycle every
+        # entity reads from (CONF_UPDATE_INTERVAL seconds, default
+        # five minutes).  Created AFTER services so a failure below
+        # unwinds them through the except path's listener handling.
+        coordinator = NestQuestCoordinator(
+            hass,
+            entry_id=entry.entry_id,
+            database=database,
+            update_interval_seconds=entry.options.get(
+                CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
+            ),
+        )
+        await coordinator.async_config_entry_first_refresh()
+        runtime_data = NestQuestRuntimeData(
+            entry_id=entry.entry_id,
+            options=dict(entry.options),
+            database=database,
+            remove_update_listener=remove_update_listener,
+            remove_time_change_listener=remove_time_change_listener,
+            coordinator=coordinator,
+        )
+        # runtime_data is assigned BEFORE the platforms forward so each
+        # platform's async_setup_entry reads its coordinator off the
+        # entry (the HA runtime-data contract); a forward failure below
+        # unwinds it through the except path.
+        entry.runtime_data = runtime_data
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except BaseException:
         # A failure anywhere after the database is open must not leak the
         # listeners already registered against that (now-closed) database:
@@ -511,18 +544,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await result
             except BaseException:
                 pass
+        # A coordinator created before the failure holds entity
+        # listeners pointed at the database being closed below —
+        # shut it down FIRST so no scheduled refresh can ever run
+        # against a closed connection.
+        if coordinator is not None:
+            try:
+                await coordinator.async_shutdown()
+            except BaseException:
+                pass
+        # A platform-forward failure reached this unwind AFTER
+        # runtime_data was assigned: clear it so no later unload path
+        # closes the already-closed database through the stale record.
+        if getattr(entry, "runtime_data", None) is not None:
+            entry.runtime_data = None
         await database.close()
         raise
     assert remove_update_listener is not None
     assert remove_time_change_listener is not None
-    runtime_data = NestQuestRuntimeData(
-        entry_id=entry.entry_id,
-        options=dict(entry.options),
-        database=database,
-        remove_update_listener=remove_update_listener,
-        remove_time_change_listener=remove_time_change_listener,
-    )
-    entry.runtime_data = runtime_data
     hass.data[DOMAIN][entry.entry_id] = runtime_data
     return True
 
@@ -536,6 +575,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data.pop(DOMAIN, None)
     if runtime_data is None:
         runtime_data = getattr(entry, "runtime_data", None)
+    # Platforms unload FIRST (mirroring HA conventions): entity
+    # listeners must not outlive the database and coordinator the
+    # teardown below closes.
+    platforms_unloaded = await hass.config_entries.async_unload_platforms(
+        entry, PLATFORMS
+    )
+    if platforms_unloaded is False and runtime_data is not None:
+        # Home Assistant KEPT one or more platforms loaded — their
+        # entities still live and must keep their database.  Restore
+        # the runtime record popped above and report failure so HA
+        # retries the unload later instead of leaving live entities
+        # backed by a closed database.
+        hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime_data
+        return False
     unload_error: BaseException | None = None
     if runtime_data is not None:
         remove_update_listener = getattr(runtime_data, "remove_update_listener", None)
@@ -562,6 +615,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if unload_error is None:
                         unload_error = err
         finally:
+            # The coordinator's entity listeners must stop BEFORE the
+            # database closes: a scheduled refresh starting during the
+            # close await would touch a cleared connection.  (The
+            # platform unload above already removed the entities; this
+            # clears the coordinator's own remaining listeners.)
+            coordinator = getattr(runtime_data, "coordinator", None)
+            if coordinator is not None:
+                shutdown = getattr(coordinator, "async_shutdown", None)
+                if shutdown is not None:
+                    await shutdown()
             database = getattr(runtime_data, "database", None)
             if database is not None:
                 await database.close()
