@@ -73,6 +73,26 @@ CONF_UPDATE_INTERVAL = "update_interval"
 DEFAULT_UPDATE_INTERVAL = 300
 MIN_UPDATE_INTERVAL = 30
 
+# Notification automations (Feature 11).  The notify target is a free-text
+# Home Assistant service name (e.g. "notify.mobile_app_dads_phone") the
+# household fills in — never a hard-coded personal target; the times are
+# strict HH:MM local; each of the four automations has an independent
+# enable toggle.  Per the owner-settled resolution the end-of-day report
+# defaults to 20:00 — deliberately BEFORE the midnight missed sweep —
+# and never defaults to the rollover time.
+CONF_NOTIFY_TARGET = "notify_target"
+CONF_MORNING_SUMMARY_TIME = "morning_summary_time"
+DEFAULT_MORNING_SUMMARY_TIME = "08:00"
+CONF_AFTERNOON_REMINDER_TIME = "afternoon_reminder_time"
+DEFAULT_AFTERNOON_REMINDER_TIME = "15:00"
+CONF_END_OF_DAY_REPORT_TIME = "end_of_day_report_time"
+DEFAULT_END_OF_DAY_REPORT_TIME = "20:00"
+CONF_MORNING_SUMMARY_ENABLED = "morning_summary_enabled"
+CONF_AFTERNOON_REMINDER_ENABLED = "afternoon_reminder_enabled"
+CONF_END_OF_DAY_REPORT_ENABLED = "end_of_day_report_enabled"
+CONF_CELEBRATION_ENABLED = "celebration_enabled"
+DEFAULT_AUTOMATION_ENABLED = True
+
 # Quest windows (D-008): a definition may declare several day windows;
 # each produces its own instance per day and groups the panel's Quest
 # Log into three columns.  The clock ranges are stored here so they stay
