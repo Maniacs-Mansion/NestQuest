@@ -28,10 +28,10 @@ def test_logger() -> None:
 
 
 def test_platforms() -> None:
-    """Verify PLATFORMS is defined as the sensor platform list."""
+    """Verify PLATFORMS is defined as the sensor + binary_sensor list."""
     assert hasattr(const, "PLATFORMS")
     assert isinstance(const.PLATFORMS, list)
-    assert const.PLATFORMS == ["sensor"]
+    assert const.PLATFORMS == ["sensor", "binary_sensor"]
 
 
 def test_sqlite_db_filename() -> None:
