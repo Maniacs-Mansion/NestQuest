@@ -384,6 +384,21 @@ SCHEMA_V1_COMPLETION_EVENTS_DDL: list[str] = [
     """,
 ]
 
+#: Generic integration-owned key/value state (schema version 7,
+#: Feature 11): persistent bookkeeping that belongs to the integration
+#: rather than any domain table — currently the missed-sweep
+#: watermark.  ``value`` is a plain string; callers interpret it.
+META_STATE_TABLE_SQL = """(
+    key TEXT NOT NULL PRIMARY KEY,
+    value TEXT NOT NULL
+)"""
+
+SCHEMA_V7_META_STATE_DDL: list[str] = [
+    f"""
+    CREATE TABLE IF NOT EXISTS nestquest_meta_state {META_STATE_TABLE_SQL}
+    """,
+]
+
 SCHEMA_V1_STATEMENTS: list[str] = [
     *SCHEMA_V1_CHILDREN_DDL,
     *SCHEMA_V1_ADMIN_USERS_DDL,
@@ -395,6 +410,7 @@ SCHEMA_V1_STATEMENTS: list[str] = [
     *SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
     *SCHEMA_V1_QUEST_INSTANCES_DDL,
     *SCHEMA_V1_COMPLETION_EVENTS_DDL,
+    *SCHEMA_V7_META_STATE_DDL,
 ]
 
 
