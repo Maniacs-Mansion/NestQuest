@@ -28,7 +28,10 @@ copying each definition's assignee across.  Migration 4 adds the
 windows table, migration 5 rebuilds ``quest_instances`` onto the
 widened (definition_id, child_id, due_date, window) key, and migration
 6 rebuilds ``completion_events`` with the D-008 ``actor_child_id``
-column.  Each callable migration runs inside its own transaction
+column.  Migration 7 adds the generic ``nestquest_meta_state``
+key/value table for integration-owned bookkeeping (Feature 11's
+missed-sweep watermark).  Each callable migration runs inside its own
+transaction
 together with its version stamp, so a crash mid-step rolls the
 statements and the stamp back together.
 
@@ -80,6 +83,7 @@ from .schema import (
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V1_QUEST_DEFINITION_ASSIGNEES_DDL,
     SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL,
+    SCHEMA_V7_META_STATE_DDL,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -414,6 +418,11 @@ MIGRATIONS: Sequence[MigrationStep] = [
     # actor_child_id column and its actor-pair coherence CHECK,
     # backfilling legacy panel rows to their own child_id.
     _add_actor_child_id,
+    # Migration 7 (Feature 11): the generic meta_state key/value table
+    # — a plain new table, so CREATE IF NOT EXISTS suffices for both
+    # fresh databases (which already made it in migration 1) and
+    # pre-v7 databases.  Strictly additive; no existing table changes.
+    list(SCHEMA_V7_META_STATE_DDL),
 ]
 
 
