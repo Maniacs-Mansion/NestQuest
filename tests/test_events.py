@@ -352,3 +352,28 @@ async def test_uncompletion_updates_entities_immediately(
     assert completed_after_uncomplete == 0, (
         "sensor must reflect the reversal without a manual refresh"
     )
+
+
+async def test_forced_refreshes_serialize_no_stale_publish(
+    hass, make_entry
+) -> None:
+    """Overlapping forced refreshes never interleave: a slow pass
+    pauses mid-snapshot, and the queued pass still publishes AFTER
+    it, so the last published snapshot reflects the latest mutation."""
+    import asyncio
+
+    entry, child, instances = await _setup_and_seed(hass, make_entry)
+    coordinator = entry.runtime_data.coordinator
+    order: list[str] = []
+
+    async def _slow_update():
+        order.append("start")
+        await asyncio.sleep(0.01)
+        order.append("end")
+        return coordinator.data
+
+    coordinator._async_update_data = _slow_update
+    await asyncio.gather(coordinator.async_refresh(), coordinator.async_refresh())
+    assert order == ["start", "end", "start", "end"], (
+        "overlapping refreshes must serialize: " + str(order)
+    )
