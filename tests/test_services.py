@@ -6,12 +6,13 @@ from pathlib import Path
 
 import pytest
 import voluptuous as vol
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, Unauthorized
 
 from conftest import wire_entry_to_registry
 
 from custom_components.nestquest import async_setup_entry, async_unload_entry
 from custom_components.nestquest.const import (
+    CONF_ADMIN_USER_IDS,
     DOMAIN,
     DOMAIN_SERVICES,
     SERVICE_COMPLETE_QUEST,
@@ -36,6 +37,16 @@ SERVICES_PATH = (
 
 def _wire(entry, registry):
     return wire_entry_to_registry(entry, registry)
+
+
+ADMIN_ID = "admin-1"
+ADMIN_CTX = {"user_id": ADMIN_ID}
+
+
+def _make_admin_entry(make_entry):
+    from custom_components.nestquest.const import CONF_ADMIN_USER_IDS
+
+    return make_entry(data={CONF_ADMIN_USER_IDS: [ADMIN_ID]})
 
 
 def _service_section(text: str, name: str) -> str:
@@ -129,12 +140,13 @@ async def test_unload_one_of_two_entries_keeps_services(
 async def test_manage_child_create_persists_child(hass, make_entry) -> None:
     from custom_components.nestquest.children import list_children
 
-    entry = _wire(make_entry(), hass.registry)
+    entry = _wire(_make_admin_entry(make_entry), hass.registry)
     assert await async_setup_entry(hass, entry) is True
     await hass.services.call(
         DOMAIN,
         SERVICE_MANAGE_CHILD,
         {"action": "create", "display_name": "Ada"},
+        context=ADMIN_CTX,
     )
     children = await list_children(entry.runtime_data.database)
     assert [child.display_name for child in children] == ["Ada"]
@@ -149,12 +161,13 @@ async def test_create_and_set_quest_definition_active(
     )
     from custom_components.nestquest.dao_rules import QuestDefinitionsDao
 
-    entry = _wire(make_entry(), hass.registry)
+    entry = _wire(_make_admin_entry(make_entry), hass.registry)
     assert await async_setup_entry(hass, entry) is True
     await hass.services.call(
         DOMAIN,
         SERVICE_MANAGE_CHILD,
         {"action": "create", "display_name": "Ada"},
+        context=ADMIN_CTX,
     )
     child = (await list_children(entry.runtime_data.database))[0]
     await hass.services.call(
@@ -166,6 +179,7 @@ async def test_create_and_set_quest_definition_active(
             "assignee_child_ids": [child.id],
             "windows": ["morning"],
         },
+        context=ADMIN_CTX,
     )
     active = await list_active_definitions(entry.runtime_data.database)
     assert len(active) == 1
@@ -174,6 +188,7 @@ async def test_create_and_set_quest_definition_active(
         DOMAIN,
         SERVICE_SET_QUEST_DEFINITION_ACTIVE,
         {"definition_id": definition_id, "is_active": False},
+        context=ADMIN_CTX,
     )
     assert await list_active_definitions(entry.runtime_data.database) == []
     stored = await QuestDefinitionsDao(entry.runtime_data.database).get(
@@ -193,12 +208,13 @@ async def test_complete_and_uncomplete_quest_call_business_layer(
     from custom_components.nestquest.const import DEFAULT_HORIZON_DAYS
     from custom_components.nestquest.dao_instances import QuestInstancesDao
 
-    entry = _wire(make_entry(), hass.registry)
+    entry = _wire(_make_admin_entry(make_entry), hass.registry)
     assert await async_setup_entry(hass, entry) is True
     await hass.services.call(
         DOMAIN,
         SERVICE_MANAGE_CHILD,
         {"action": "create", "display_name": "Ada"},
+        context=ADMIN_CTX,
     )
     child = (await list_children(entry.runtime_data.database))[0]
     await hass.services.call(
@@ -210,8 +226,9 @@ async def test_complete_and_uncomplete_quest_call_business_layer(
             "assignee_child_ids": [child.id],
             "windows": ["morning"],
         },
+        context=ADMIN_CTX,
     )
-    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE, context=ADMIN_CTX)
     today = datetime.date.today().isoformat()
     end = (
         datetime.date.today() + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
@@ -240,8 +257,9 @@ async def test_complete_and_uncomplete_quest_call_business_layer(
         {
             "instance_id": instance_id,
             "actor": "user",
-            "actor_user_id": "parent-1",
+            "actor_user_id": ADMIN_ID,
         },
+        context=ADMIN_CTX,
     )
     assert (
         await instance_state(entry.runtime_data.database, instance_id)
@@ -258,12 +276,13 @@ async def test_set_presence_pattern_regenerates_child_instances(
     from custom_components.nestquest.const import DEFAULT_HORIZON_DAYS
     from custom_components.nestquest.dao_instances import QuestInstancesDao
 
-    entry = _wire(make_entry(), hass.registry)
+    entry = _wire(_make_admin_entry(make_entry), hass.registry)
     assert await async_setup_entry(hass, entry) is True
     await hass.services.call(
         DOMAIN,
         SERVICE_MANAGE_CHILD,
         {"action": "create", "display_name": "Ada"},
+        context=ADMIN_CTX,
     )
     child = (await list_children(entry.runtime_data.database))[0]
     await hass.services.call(
@@ -275,8 +294,9 @@ async def test_set_presence_pattern_regenerates_child_instances(
             "assignee_child_ids": [child.id],
             "windows": ["morning"],
         },
+        context=ADMIN_CTX,
     )
-    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE, context=ADMIN_CTX)
     today = datetime.date.today().isoformat()
     end = (
         datetime.date.today() + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
@@ -292,6 +312,7 @@ async def test_set_presence_pattern_regenerates_child_instances(
             "anchor_date": today,
             "pattern": {0: []},
         },
+        context=ADMIN_CTX,
     )
     assert await dao.list_by_date_range(child.id, today, end) == []
 
@@ -306,12 +327,13 @@ async def test_presence_override_create_and_delete_regenerate(
     from custom_components.nestquest.dao_instances import QuestInstancesDao
     from custom_components.nestquest.dao_presence import PresenceOverridesDao
 
-    entry = _wire(make_entry(), hass.registry)
+    entry = _wire(_make_admin_entry(make_entry), hass.registry)
     assert await async_setup_entry(hass, entry) is True
     await hass.services.call(
         DOMAIN,
         SERVICE_MANAGE_CHILD,
         {"action": "create", "display_name": "Ada"},
+        context=ADMIN_CTX,
     )
     child = (await list_children(entry.runtime_data.database))[0]
     await hass.services.call(
@@ -323,8 +345,9 @@ async def test_presence_override_create_and_delete_regenerate(
             "assignee_child_ids": [child.id],
             "windows": ["morning"],
         },
+        context=ADMIN_CTX,
     )
-    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE, context=ADMIN_CTX)
     today = datetime.date.today()
     end = today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)
     dao = QuestInstancesDao(entry.runtime_data.database)
@@ -341,6 +364,7 @@ async def test_presence_override_create_and_delete_regenerate(
             "end_date": end.isoformat(),
             "is_present": False,
         },
+        context=ADMIN_CTX,
     )
     assert (
         await dao.list_by_date_range(
@@ -359,6 +383,7 @@ async def test_presence_override_create_and_delete_regenerate(
         DOMAIN,
         SERVICE_DELETE_PRESENCE_OVERRIDE,
         {"override_id": override.id},
+        context=ADMIN_CTX,
     )
     after = await dao.list_by_date_range(
         child.id, today.isoformat(), end.isoformat()
@@ -369,10 +394,12 @@ async def test_presence_override_create_and_delete_regenerate(
 async def test_export_history_csv_raises_home_assistant_error(
     hass, make_entry
 ) -> None:
-    entry = _wire(make_entry(), hass.registry)
+    entry = _wire(_make_admin_entry(make_entry), hass.registry)
     assert await async_setup_entry(hass, entry) is True
     with pytest.raises(HomeAssistantError, match="Feature 13"):
-        await hass.services.call(DOMAIN, SERVICE_EXPORT_HISTORY_CSV)
+        await hass.services.call(
+            DOMAIN, SERVICE_EXPORT_HISTORY_CSV, context=ADMIN_CTX
+        )
 
 
 async def test_invalid_schema_data_surfaces_as_error(hass, make_entry) -> None:
@@ -392,3 +419,60 @@ async def test_invalid_schema_data_surfaces_as_error(hass, make_entry) -> None:
             SERVICE_MANAGE_CHILD,
             {"action": "create"},
         )
+
+
+async def test_admin_only_service_denies_non_admin(hass, make_entry) -> None:
+    entry = _wire(_make_admin_entry(make_entry), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    with pytest.raises(Unauthorized):
+        await hass.services.call(
+            DOMAIN,
+            SERVICE_MANAGE_CHILD,
+            {"action": "create", "display_name": "Ada"},
+            context={"user_id": "kiosk-panel"},
+        )
+
+
+async def test_admin_only_service_denies_missing_user_context(
+    hass, make_entry
+) -> None:
+    entry = _wire(_make_admin_entry(make_entry), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    with pytest.raises(Unauthorized):
+        await hass.services.call(
+            DOMAIN,
+            SERVICE_MANAGE_CHILD,
+            {"action": "create", "display_name": "Ada"},
+        )
+
+
+async def test_admin_only_service_denies_admin_on_empty_allowlist(
+    hass, make_entry
+) -> None:
+    """Even the allowlisted id is denied when the allowlist is empty."""
+    entry = _wire(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    with pytest.raises(Unauthorized):
+        await hass.services.call(
+            DOMAIN,
+            SERVICE_MANAGE_CHILD,
+            {"action": "create", "display_name": "Ada"},
+            context=ADMIN_CTX,
+        )
+
+
+async def test_unauthorized_is_raised_before_handler_runs(
+    hass, make_entry
+) -> None:
+    from custom_components.nestquest.children import list_children
+
+    entry = _wire(_make_admin_entry(make_entry), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    with pytest.raises(Unauthorized):
+        await hass.services.call(
+            DOMAIN,
+            SERVICE_MANAGE_CHILD,
+            {"action": "create", "display_name": "Ada"},
+            context={"user_id": "kiosk-panel"},
+        )
+    assert await list_children(entry.runtime_data.database) == []

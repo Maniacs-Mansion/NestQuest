@@ -43,8 +43,10 @@ from .const import (
 )
 from .dao_presence import PresenceOverridesDao, PresenceSchedulesDao
 from .materialize import regenerate_for_child
+from .permissions import permission_gate
 from .presence import PresenceSchedule
 from .recurrence import ScheduleRule
+from .service_policy import SERVICE_POLICY
 
 FindRuntime = Callable[[HomeAssistant], Any]
 ServiceHandler = Callable[[Any], Awaitable[None]]
@@ -521,72 +523,78 @@ def async_register_services(
     find_runtime: FindRuntime,
     regenerate_handler: ServiceHandler,
 ) -> None:
-    """Register every canonical service once at domain scope."""
+    """Register every canonical service once at domain scope.
+
+    Every service — regenerate included — passes through the Feature
+    09 permission gate before its handler runs; the gate reads
+    :data:`~.service_policy.SERVICE_POLICY`, so no service can be
+    registered exempt from the policy.
+    """
     if hass.services.has_service(DOMAIN, SERVICE_REGENERATE):
         return
-    hass.services.async_register(
-        DOMAIN, SERVICE_REGENERATE, regenerate_handler
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_COMPLETE_QUEST,
-        _complete_quest(hass, find_runtime),
-        schema=SCHEMA_COMPLETE_QUEST,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_UNCOMPLETE_QUEST,
-        _uncomplete_quest(hass, find_runtime),
-        schema=SCHEMA_UNCOMPLETE_QUEST,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_CREATE_QUEST_DEFINITION,
-        _create_quest_definition(hass, find_runtime),
-        schema=SCHEMA_CREATE_QUEST_DEFINITION,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_UPDATE_QUEST_DEFINITION,
-        _update_quest_definition(hass, find_runtime),
-        schema=SCHEMA_UPDATE_QUEST_DEFINITION,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_SET_QUEST_DEFINITION_ACTIVE,
-        _set_quest_definition_active(hass, find_runtime),
-        schema=SCHEMA_SET_QUEST_DEFINITION_ACTIVE,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_SET_PRESENCE_PATTERN,
-        _set_presence_pattern(hass, find_runtime),
-        schema=SCHEMA_SET_PRESENCE_PATTERN,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_CREATE_PRESENCE_OVERRIDE,
-        _create_presence_override(hass, find_runtime),
-        schema=SCHEMA_CREATE_PRESENCE_OVERRIDE,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_DELETE_PRESENCE_OVERRIDE,
-        _delete_presence_override(hass, find_runtime),
-        schema=SCHEMA_DELETE_PRESENCE_OVERRIDE,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_EXPORT_HISTORY_CSV,
-        _export_history_csv,
-        schema=SCHEMA_EXPORT_HISTORY_CSV,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_MANAGE_CHILD,
-        _manage_child(hass, find_runtime),
-        schema=SCHEMA_MANAGE_CHILD,
-    )
+    gate = permission_gate
+    specs: list[tuple[str, ServiceHandler, object]] = [
+        (SERVICE_REGENERATE, regenerate_handler, None),
+        (
+            SERVICE_COMPLETE_QUEST,
+            _complete_quest(hass, find_runtime),
+            SCHEMA_COMPLETE_QUEST,
+        ),
+        (
+            SERVICE_UNCOMPLETE_QUEST,
+            _uncomplete_quest(hass, find_runtime),
+            SCHEMA_UNCOMPLETE_QUEST,
+        ),
+        (
+            SERVICE_CREATE_QUEST_DEFINITION,
+            _create_quest_definition(hass, find_runtime),
+            SCHEMA_CREATE_QUEST_DEFINITION,
+        ),
+        (
+            SERVICE_UPDATE_QUEST_DEFINITION,
+            _update_quest_definition(hass, find_runtime),
+            SCHEMA_UPDATE_QUEST_DEFINITION,
+        ),
+        (
+            SERVICE_SET_QUEST_DEFINITION_ACTIVE,
+            _set_quest_definition_active(hass, find_runtime),
+            SCHEMA_SET_QUEST_DEFINITION_ACTIVE,
+        ),
+        (
+            SERVICE_SET_PRESENCE_PATTERN,
+            _set_presence_pattern(hass, find_runtime),
+            SCHEMA_SET_PRESENCE_PATTERN,
+        ),
+        (
+            SERVICE_CREATE_PRESENCE_OVERRIDE,
+            _create_presence_override(hass, find_runtime),
+            SCHEMA_CREATE_PRESENCE_OVERRIDE,
+        ),
+        (
+            SERVICE_DELETE_PRESENCE_OVERRIDE,
+            _delete_presence_override(hass, find_runtime),
+            SCHEMA_DELETE_PRESENCE_OVERRIDE,
+        ),
+        (
+            SERVICE_EXPORT_HISTORY_CSV,
+            _export_history_csv,
+            SCHEMA_EXPORT_HISTORY_CSV,
+        ),
+        (
+            SERVICE_MANAGE_CHILD,
+            _manage_child(hass, find_runtime),
+            SCHEMA_MANAGE_CHILD,
+        ),
+    ]
+
+    def _database_of(_call: Any) -> Any:
+        return _require_runtime(hass, find_runtime).database
+
+    for service, handler, schema in specs:
+        gated = gate(
+            service, SERVICE_POLICY[service], _database_of
+        )(handler)
+        hass.services.async_register(DOMAIN, service, gated, schema=schema)
 
 
 def async_deregister_services(hass: HomeAssistant) -> None:

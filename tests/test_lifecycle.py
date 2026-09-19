@@ -9,12 +9,20 @@ from conftest import make_config_entry, make_hass, wire_entry_to_registry
 
 from custom_components.nestquest import DOMAIN, async_setup_entry, async_unload_entry
 from custom_components.nestquest.const import (
+    CONF_ADMIN_USER_IDS,
     CONF_DAY_ROLLOVER_TIME,
     CONF_HORIZON_DAYS,
     DEFAULT_HORIZON_DAYS,
     SERVICE_REGENERATE,
     DOMAIN as DOMAIN_CONST,
 )
+
+ADMIN_ID = "admin-1"
+ADMIN_CTX = {"user_id": ADMIN_ID}
+
+
+def _admin_data():
+    return {CONF_ADMIN_USER_IDS: [ADMIN_ID]}
 
 
 def _wire(entry, registry):
@@ -546,7 +554,7 @@ async def test_regenerate_service_registered_and_materializes(
 
     from custom_components.nestquest.dao_instances import QuestInstancesDao
 
-    entry = _wire(make_entry(), hass.registry)
+    entry = _wire(make_entry(data=_admin_data()), hass.registry)
     assert await async_setup_entry(hass, entry) is True
     assert hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
 
@@ -555,7 +563,7 @@ async def test_regenerate_service_registered_and_materializes(
     database = entry.runtime_data.database
     child_id = await _seed_daily_child_and_definition(database, _local_today(hass))
 
-    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE, context=ADMIN_CTX)
 
     today = _local_today(hass)
     end = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
@@ -574,14 +582,15 @@ async def test_regenerate_service_uses_configured_horizon_days(
     from custom_components.nestquest.dao_instances import QuestInstancesDao
 
     entry = _wire(
-        make_entry(options={CONF_HORIZON_DAYS: 5}), hass.registry
+        make_entry(options={CONF_HORIZON_DAYS: 5}, data=_admin_data()),
+        hass.registry,
     )
     assert await async_setup_entry(hass, entry) is True
 
     database = entry.runtime_data.database
     child_id = await _seed_daily_child_and_definition(database, _local_today(hass))
 
-    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE, context=ADMIN_CTX)
 
     today = _local_today(hass)
     end = (today + datetime.timedelta(days=5)).isoformat()
@@ -622,8 +631,12 @@ async def test_regenerate_service_is_domain_scoped_across_entries(
 
     from custom_components.nestquest.dao_instances import QuestInstancesDao
 
-    entry_a = _wire(make_entry(entry_id="entry_a"), hass.registry)
-    entry_b = _wire(make_entry(entry_id="entry_b"), hass.registry)
+    entry_a = _wire(
+        make_entry(entry_id="entry_a", data=_admin_data()), hass.registry
+    )
+    entry_b = _wire(
+        make_entry(entry_id="entry_b", data=_admin_data()), hass.registry
+    )
 
     assert await async_setup_entry(hass, entry_a) is True
     assert await async_setup_entry(hass, entry_b) is True
@@ -634,7 +647,7 @@ async def test_regenerate_service_is_domain_scoped_across_entries(
     child_id = await _seed_daily_child_and_definition(
         database_b, _local_today(hass)
     )
-    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE, context=ADMIN_CTX)
     today = _local_today(hass)
     end = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
     records = await QuestInstancesDao(database_b).list_by_date_range(
@@ -647,7 +660,7 @@ async def test_regenerate_service_is_domain_scoped_across_entries(
     assert hass.services.has_service(DOMAIN, SERVICE_REGENERATE)
 
     # It still works for the remaining entry.
-    await hass.services.call(DOMAIN, SERVICE_REGENERATE)
+    await hass.services.call(DOMAIN, SERVICE_REGENERATE, context=ADMIN_CTX)
 
     # Unloading the final entry removes the domain-global service.
     assert await async_unload_entry(hass, entry_b) is True

@@ -189,8 +189,13 @@ class ConfigEntryNotReady(HomeAssistantError):
     """
 
 
+class Unauthorized(HomeAssistantError):
+    """Stand-in mirroring homeassistant.exceptions.Unauthorized."""
+
+
 _exceptions_mock.HomeAssistantError = HomeAssistantError
 _exceptions_mock.ConfigEntryNotReady = ConfigEntryNotReady
+_exceptions_mock.Unauthorized = Unauthorized
 
 import voluptuous as vol
 
