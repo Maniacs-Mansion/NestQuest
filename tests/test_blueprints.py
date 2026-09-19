@@ -242,19 +242,26 @@ def test_domain_mentions_are_nestquest_prefixed() -> None:
                 )
 
 
-def test_presence_regex_selects_only_nestquest_present_sensors() -> None:
-    """The extracted presence regex matches only Feature 10 presence ids."""
+def test_due_sensor_regex_selects_only_nestquest_due_sensors() -> None:
+    """The extracted due-sensor regex matches Feature 10 due ids —
+    including HA collision-suffixed duplicates (a second child with
+    the same name gets entity ids ending _2) — and rejects everything
+    else."""
     message = morning_action(morning_summary())["message"]
     match = re.search(
-        r"\^(binary_sensor\\\\\.nestquest_\.\*_present_today\$)", message
+        r"\^(sensor\\\\\.nestquest_\.\*_quests_due_today\(_\\\\d\+\)\?\$)", message
     )
-    assert match is not None, "presence pattern missing from the template"
+    assert match is not None, "due-sensor pattern missing from the template"
     pattern = match.group(1).replace("\\\\", "\\")
     assert pattern.endswith("$")
-    assert re.search(pattern, "binary_sensor.nestquest_alice_present_today")
-    assert re.search(pattern, "binary_sensor.nestquest_dave_all_done") is None
-    assert re.search(pattern, "binary_sensor.motion_present_today") is None
-    assert re.search(pattern, "binary_sensor.nestquest_erin_present_today_2") is None
+    assert re.search(pattern, "sensor.nestquest_alice_quests_due_today")
+    assert re.search(pattern, "sensor.nestquest_alice_quests_due_today_2")
+    assert re.search(pattern, "sensor.nestquest_bob_quests_remaining_today") is None
+    # The household rollup due sensor unavoidably matches the pattern;
+    # the template's present-attribute guard excludes it (proven in the
+    # render test below).
+    assert re.search(pattern, "sensor.nestquest_household_quests_due_today")
+    assert re.search(pattern, "sensor.carol_unrelated") is None
 
 
 def test_morning_summary_never_hard_codes_notify_target() -> None:
@@ -292,15 +299,23 @@ def morning_fixture() -> SimpleNamespace:
             TemplateState(
                 "sensor.nestquest_alice_quests_due_today",
                 "3",
-                {"child_name": "Alice"},
+                {"child_name": "Alice", "child_id": 1, "present": True},
             ),
-            TemplateState("sensor.nestquest_alice_quests_remaining_today", "2"),
+            TemplateState(
+                "sensor.nestquest_alice_quests_remaining_today",
+                "2",
+                {"child_id": 1},
+            ),
             TemplateState(
                 "sensor.nestquest_bob_quests_due_today",
                 "2",
-                {"child_name": "Bob"},
+                {"child_name": "Bob", "child_id": 2, "present": False},
             ),
-            TemplateState("sensor.nestquest_bob_quests_remaining_today", "1"),
+            TemplateState(
+                "sensor.nestquest_bob_quests_remaining_today",
+                "1",
+                {"child_id": 2},
+            ),
             TemplateState("sensor.nestquest_household_quests_due_today", "5"),
             TemplateState("sensor.nestquest_carol_unrelated", "7"),
         ],
@@ -320,23 +335,27 @@ def test_morning_summary_lists_present_child_and_omits_absent() -> None:
 def test_morning_summary_present_child_zero_remaining_is_all_clear() -> None:
     """A present child always appears — zero remaining reads as all clear."""
     states = make_states(
-        binary_sensors=[
-            TemplateState("binary_sensor.nestquest_carol_present_today", "on"),
-            TemplateState("binary_sensor.nestquest_alice_present_today", "on"),
-        ],
         sensors=[
             TemplateState(
                 "sensor.nestquest_carol_quests_due_today",
                 "2",
-                {"child_name": "Carol"},
+                {"child_name": "Carol", "child_id": 1, "present": True},
             ),
-            TemplateState("sensor.nestquest_carol_quests_remaining_today", "0"),
+            TemplateState(
+                "sensor.nestquest_carol_quests_remaining_today",
+                "0",
+                {"child_id": 1},
+            ),
             TemplateState(
                 "sensor.nestquest_alice_quests_due_today",
                 "3",
-                {"child_name": "Alice"},
+                {"child_name": "Alice", "child_id": 2, "present": True},
             ),
-            TemplateState("sensor.nestquest_alice_quests_remaining_today", "2"),
+            TemplateState(
+                "sensor.nestquest_alice_quests_remaining_today",
+                "2",
+                {"child_id": 2},
+            ),
         ],
     )
     rendered = render(morning_action(morning_summary())["message"], states=states)
@@ -345,30 +364,71 @@ def test_morning_summary_present_child_zero_remaining_is_all_clear() -> None:
 
 
 def test_morning_summary_present_child_without_sensors_is_flagged() -> None:
-    """A present child with no Feature 10 sensors still gets a line."""
+    """A present child whose remaining-count sensor is missing (the
+    platform failed to add it) still gets a line, flagged unavailable."""
     states = make_states(
-        binary_sensors=[
-            TemplateState("binary_sensor.nestquest_frances_present_today", "on")
+        sensors=[
+            TemplateState(
+                "sensor.nestquest_frances_quests_due_today",
+                "2",
+                {"child_name": "Frances", "child_id": 1, "present": True},
+            ),
         ],
-        sensors=[],
     )
     rendered = render(morning_action(morning_summary())["message"], states=states)
     assert rendered == "Frances's quest count is unavailable today."
 
 
+def test_morning_summary_collision_suffixed_duplicate_names() -> None:
+    """Two children sharing a display name get HA registry suffixes on
+    their entity ids (..._2); both must appear, each with their own
+    count (Codex review regression)."""
+    states = make_states(
+        sensors=[
+            TemplateState(
+                "sensor.nestquest_ada_quests_due_today",
+                "2",
+                {"child_name": "Ada", "child_id": 1, "present": True},
+            ),
+            TemplateState(
+                "sensor.nestquest_ada_quests_remaining_today",
+                "1",
+                {"child_id": 1},
+            ),
+            TemplateState(
+                "sensor.nestquest_ada_quests_due_today_2",
+                "2",
+                {"child_name": "Ada", "child_id": 2, "present": True},
+            ),
+            TemplateState(
+                "sensor.nestquest_ada_quests_remaining_today_2",
+                "2",
+                {"child_id": 2},
+            ),
+        ],
+    )
+    rendered = render(morning_action(morning_summary())["message"], states=states)
+    lines = rendered.split("\n")
+    assert lines == [
+        "Ada owes 1 quest(s) today.",
+        "Ada owes 2 quest(s) today.",
+    ]
+
+
 def test_morning_summary_no_present_children() -> None:
     """With nobody present the body says so rather than listing zeros."""
     states = make_states(
-        binary_sensors=[
-            TemplateState("binary_sensor.nestquest_alice_present_today", "off")
-        ],
         sensors=[
             TemplateState(
                 "sensor.nestquest_alice_quests_due_today",
                 "3",
-                {"child_name": "Alice"},
+                {"child_name": "Alice", "child_id": 1, "present": False},
             ),
-            TemplateState("sensor.nestquest_alice_quests_remaining_today", "3"),
+            TemplateState(
+                "sensor.nestquest_alice_quests_remaining_today",
+                "3",
+                {"child_id": 1},
+            ),
         ],
     )
     rendered = render(morning_action(morning_summary())["message"], states=states)
