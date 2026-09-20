@@ -132,6 +132,31 @@ function titleCaseSlug(slug: string): string {
     .join(" ");
 }
 
+function zoneOffsetMs(instant: number, timeZone: string): number {
+  const parts = zonedFormatter(timeZone, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(instant));
+  const read = (type: Intl.DateTimeFormatPartTypes): number => {
+    const part = parts.find((entry) => entry.type === type);
+    return part ? Number(part.value) : Number.NaN;
+  };
+  const asUtc = Date.UTC(
+    read("year"),
+    read("month") - 1,
+    read("day"),
+    read("hour"),
+    read("minute"),
+    read("second")
+  );
+  return Number.isFinite(asUtc) ? asUtc - instant : 0;
+}
+
 function parseIsoDate(value: unknown, timeZone?: string): Date | null {
   if (typeof value !== "string") {
     return null;
@@ -148,17 +173,8 @@ function parseIsoDate(value: unknown, timeZone?: string): Date | null {
     const local = new Date(year, month - 1, day);
     return Number.isNaN(local.getTime()) ? null : local;
   }
-  const date = new Date(
-    zonedFormatter(timeZone, {
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "12",
-      minute: "2-digit",
-      hour12: false,
-      timeZone: "UTC",
-    }).format(new Date(Date.UTC(year, month - 1, day)))
-  );
+  const utcMs = Date.UTC(year, month - 1, day);
+  const date = new Date(utcMs - zoneOffsetMs(utcMs, timeZone));
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
