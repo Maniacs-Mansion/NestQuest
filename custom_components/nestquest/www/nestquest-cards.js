@@ -1026,7 +1026,7 @@ class ee extends v {
     this._config = t;
   }
   getCardSize() {
-    return 6;
+    return 22;
   }
   connectedCallback() {
     super.connectedCallback(), this._now = /* @__PURE__ */ new Date(), this._clockTimer = window.setInterval(() => {

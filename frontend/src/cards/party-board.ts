@@ -608,7 +608,7 @@ export class NestQuestPartyBoardCard extends LitElement {
   }
 
   getCardSize(): number {
-    return 6;
+    return 22;
   }
 
   connectedCallback(): void {
