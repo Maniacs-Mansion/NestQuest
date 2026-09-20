@@ -1418,7 +1418,11 @@ export class NestQuestQuestLogCard extends LitElement {
             unsub();
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          if (token === this._subGeneration) {
+            this._unsubscribeLive();
+          }
+        });
     };
     for (const eventType of NESTQUEST_EVENT_TYPES) {
       track(
