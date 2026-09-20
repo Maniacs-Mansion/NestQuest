@@ -467,7 +467,7 @@ const logStyles = css`
     align-items: center;
     gap: 22px;
     min-height: var(--nq-p-quest-min-height);
-    padding: 22px;
+    padding: var(--nq-p-quest-pad);
     border: 1px solid var(--nq-p-card-border);
     border-radius: var(--nq-p-radius-card);
     background: var(--nq-p-card-open);
@@ -495,8 +495,8 @@ const logStyles = css`
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 64px;
-    height: 64px;
+    width: var(--nq-p-tile-size);
+    height: var(--nq-p-tile-size);
     border-radius: 10px;
     background: var(--nq-p-icon-tile);
     color: #ffffff;
@@ -1174,7 +1174,13 @@ export class NestQuestQuestLogCard extends LitElement {
         116,
         Math.max(72, Math.floor((available - (count - 1) * gap) / count))
       );
-      stackStyle = `--nq-p-quest-gap: ${gap}px; --nq-p-quest-min-height: ${minHeight}px`;
+      let stackVars = `--nq-p-quest-gap: ${gap}px; --nq-p-quest-min-height: ${minHeight}px`;
+      if (count >= 5) {
+        const pad = Math.max(0, Math.min(22, Math.floor((minHeight - 74) / 2)));
+        const tile = Math.max(44, Math.min(64, minHeight - 2 * pad - 2));
+        stackVars += `; --nq-p-quest-pad: ${pad}px; --nq-p-tile-size: ${tile}px`;
+      }
+      stackStyle = stackVars;
     }
     return html`
       <section

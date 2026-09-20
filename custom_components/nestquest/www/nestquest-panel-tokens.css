@@ -77,6 +77,8 @@
   /* ── Metrics: touch ───────────────────────────────────── */
   --nq-p-quest-min-height:   116px;  /* whole card is the tap target */
   --nq-p-quest-gap:          24px;   /* separation between tap targets */
+  --nq-p-quest-pad:          22px;   /* padding inside a quest card */
+  --nq-p-tile-size:          64px;   /* quest icon tile */
   --nq-p-button-height:      72px;   /* "Complete" button on a quest card */
   --nq-p-button-min-width:   150px;
   --nq-p-confirm-button:     108px;  /* confirm dialog buttons */
