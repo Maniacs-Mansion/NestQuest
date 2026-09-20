@@ -398,7 +398,6 @@ const logStyles = css`
     display: flex;
     flex-direction: column;
     min-height: 0;
-    overflow: hidden;
   }
 
   .column-head {
@@ -455,6 +454,9 @@ const logStyles = css`
   .stack {
     display: flex;
     flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: visible;
     gap: var(--nq-p-quest-gap);
     margin-top: 22px;
   }
@@ -1160,8 +1162,26 @@ export class NestQuestQuestLogCard extends LitElement {
     const sealed = instances.filter(
       (instance) => instance.state === "completed"
     );
+    const count = instances.length;
+    let stackStyle: string | typeof nothing = nothing;
+    if (count > 0) {
+      const available = 644;
+      const gap = Math.min(
+        24,
+        Math.max(8, Math.floor((available - count * 72) / Math.max(count - 1, 1)))
+      );
+      const minHeight = Math.min(
+        116,
+        Math.max(72, Math.floor((available - (count - 1) * gap) / count))
+      );
+      stackStyle = `--nq-p-quest-gap: ${gap}px; --nq-p-quest-min-height: ${minHeight}px`;
+    }
     return html`
-      <section class="column" aria-label="${windowDef.name} quests">
+      <section
+        class="column"
+        aria-label="${windowDef.name} quests"
+        style=${stackStyle}
+      >
         <div class="column-head">
           ${windowDef.icon}
           <div class="column-names">
