@@ -1167,7 +1167,7 @@ export class NestQuestQuestLogCard extends LitElement {
     if (count > 0) {
       const rollupReserve =
         windowDef.key === "afternoon" && this._otherChildren().length > 0
-          ? 120
+          ? 160
           : 0;
       const available = 644 - rollupReserve;
       const gap = Math.min(
