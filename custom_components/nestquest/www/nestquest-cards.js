@@ -24,7 +24,7 @@ const b = (i) => new Nt(typeof i == "string" ? i : i + "", void 0, tt), Tt = (i,
     throw Error("Value passed to 'css' function must be a 'css' function result: " + o + ". Use 'unsafeCSS' to pass non-literal values, but take care to ensure page security.");
   })(s) + i[r + 1], i[0]);
   return new Nt(e, i, tt);
-}, It = (i, t) => {
+}, Dt = (i, t) => {
   if (Y) i.adoptedStyleSheets = t.map((e) => e instanceof CSSStyleSheet ? e : e.styleSheet);
   else for (const e of t) {
     const n = document.createElement("style"), s = L.litNonce;
@@ -146,7 +146,7 @@ let T = class extends HTMLElement {
   }
   createRenderRoot() {
     const t = this.shadowRoot ?? this.attachShadow(this.constructor.shadowRootOptions);
-    return It(t, this.constructor.elementStyles), t;
+    return Dt(t, this.constructor.elementStyles), t;
   }
   connectedCallback() {
     this.renderRoot ??= this.createRenderRoot(), this.enableUpdating(!0), this._$EO?.forEach((t) => t.hostConnected?.());
@@ -247,7 +247,7 @@ let T = class extends HTMLElement {
   }
 };
 T.elementStyles = [], T.shadowRootOptions = { mode: "open" }, T[U("elementProperties")] = /* @__PURE__ */ new Map(), T[U("finalized")] = /* @__PURE__ */ new Map(), Wt?.({ ReactiveElement: T }), (F.reactiveElementVersions ??= []).push("2.1.2");
-const et = globalThis, dt = (i) => i, R = et.trustedTypes, pt = R ? R.createPolicy("lit-html", { createHTML: (i) => i }) : void 0, zt = "$lit$", x = `lit$${Math.random().toFixed(9).slice(2)}$`, Pt = "?" + x, Zt = `<${Pt}>`, S = document, D = () => S.createComment(""), I = (i) => i === null || typeof i != "object" && typeof i != "function", nt = Array.isArray, Vt = (i) => nt(i) || typeof i?.[Symbol.iterator] == "function", W = `[ 	
+const et = globalThis, dt = (i) => i, R = et.trustedTypes, pt = R ? R.createPolicy("lit-html", { createHTML: (i) => i }) : void 0, zt = "$lit$", x = `lit$${Math.random().toFixed(9).slice(2)}$`, Pt = "?" + x, Zt = `<${Pt}>`, S = document, I = () => S.createComment(""), D = (i) => i === null || typeof i != "object" && typeof i != "function", nt = Array.isArray, Vt = (i) => nt(i) || typeof i?.[Symbol.iterator] == "function", W = `[ 	
 \f\r]`, P = /<(?:(!--|\/[^a-zA-Z])|(\/?[a-zA-Z][^>\s]*)|(\/?$))/g, ct = /-->/g, ht = />/g, q = RegExp(`>|${W}(?:([^\\s"'>=/]+)(${W}*=${W}*(?:[^ 	
 \f\r"'\`<>=]|("|')|))|$)`, "g"), ut = /'/g, ft = /"/g, Ot = /^(?:script|style|textarea|title)$/i, Kt = (i) => (t, ...e) => ({ _$litType$: i, strings: t, values: e }), g = Kt(1), E = /* @__PURE__ */ Symbol.for("lit-noChange"), m = /* @__PURE__ */ Symbol.for("lit-nothing"), mt = /* @__PURE__ */ new WeakMap(), A = S.createTreeWalker(S, 129);
 function Ut(i, t) {
@@ -286,8 +286,8 @@ class H {
           const d = s.textContent.split(x), h = d.length - 1;
           if (h > 0) {
             s.textContent = R ? R.emptyScript : "";
-            for (let c = 0; c < h; c++) s.append(d[c], D()), A.nextNode(), a.push({ type: 2, index: ++r });
-            s.append(d[h], D());
+            for (let c = 0; c < h; c++) s.append(d[c], I()), A.nextNode(), a.push({ type: 2, index: ++r });
+            s.append(d[h], I());
           }
         }
       } else if (s.nodeType === 8) if (s.data === Pt) a.push({ type: 2, index: r });
@@ -306,7 +306,7 @@ class H {
 function M(i, t, e = i, n) {
   if (t === E) return t;
   let s = n !== void 0 ? e._$Co?.[n] : e._$Cl;
-  const r = I(t) ? void 0 : t._$litDirective$;
+  const r = D(t) ? void 0 : t._$litDirective$;
   return s?.constructor !== r && (s?._$AO?.(!1), r === void 0 ? s = void 0 : (s = new r(i), s._$AT(i, e, n)), n !== void 0 ? (e._$Co ??= [])[n] = s : e._$Cl = s), s !== void 0 && (t = M(i, s._$AS(i, t.values), s, n)), t;
 }
 class Gt {
@@ -356,7 +356,7 @@ class z {
     return this._$AB;
   }
   _$AI(t, e = this) {
-    t = M(this, t, e), I(t) ? t === m || t == null || t === "" ? (this._$AH !== m && this._$AR(), this._$AH = m) : t !== this._$AH && t !== E && this._(t) : t._$litType$ !== void 0 ? this.$(t) : t.nodeType !== void 0 ? this.T(t) : Vt(t) ? this.k(t) : this._(t);
+    t = M(this, t, e), D(t) ? t === m || t == null || t === "" ? (this._$AH !== m && this._$AR(), this._$AH = m) : t !== this._$AH && t !== E && this._(t) : t._$litType$ !== void 0 ? this.$(t) : t.nodeType !== void 0 ? this.T(t) : Vt(t) ? this.k(t) : this._(t);
   }
   O(t) {
     return this._$AA.parentNode.insertBefore(t, this._$AB);
@@ -365,7 +365,7 @@ class z {
     this._$AH !== t && (this._$AR(), this._$AH = this.O(t));
   }
   _(t) {
-    this._$AH !== m && I(this._$AH) ? this._$AA.nextSibling.data = t : this.T(S.createTextNode(t)), this._$AH = t;
+    this._$AH !== m && D(this._$AH) ? this._$AA.nextSibling.data = t : this.T(S.createTextNode(t)), this._$AH = t;
   }
   $(t) {
     const { values: e, _$litType$: n } = t, s = typeof n == "number" ? this._$AC(t) : (n.el === void 0 && (n.el = H.createElement(Ut(n.h, n.h[0]), this.options)), n);
@@ -383,7 +383,7 @@ class z {
     nt(this._$AH) || (this._$AH = [], this._$AR());
     const e = this._$AH;
     let n, s = 0;
-    for (const r of t) s === e.length ? e.push(n = new z(this.O(D()), this.O(D()), this, this.options)) : n = e[s], n._$AI(r), s++;
+    for (const r of t) s === e.length ? e.push(n = new z(this.O(I()), this.O(I()), this, this.options)) : n = e[s], n._$AI(r), s++;
     s < e.length && (this._$AR(n && n._$AB.nextSibling, s), e.length = s);
   }
   _$AR(t = this._$AA.nextSibling, e) {
@@ -409,11 +409,11 @@ class Q {
   _$AI(t, e = this, n, s) {
     const r = this.strings;
     let o = !1;
-    if (r === void 0) t = M(this, t, e, 0), o = !I(t) || t !== this._$AH && t !== E, o && (this._$AH = t);
+    if (r === void 0) t = M(this, t, e, 0), o = !D(t) || t !== this._$AH && t !== E, o && (this._$AH = t);
     else {
       const l = t;
       let a, p;
-      for (t = r[0], a = 0; a < r.length - 1; a++) p = M(this, l[n + a], e, a), p === E && (p = this._$AH[a]), o ||= !I(p) || p !== this._$AH[a], p === m ? t = m : t !== m && (t += (p ?? "") + r[a + 1]), this._$AH[a] = p;
+      for (t = r[0], a = 0; a < r.length - 1; a++) p = M(this, l[n + a], e, a), p === E && (p = this._$AH[a]), o ||= !D(p) || p !== this._$AH[a], p === m ? t = m : t !== m && (t += (p ?? "") + r[a + 1]), this._$AH[a] = p;
     }
     o && !s && this.j(t);
   }
@@ -468,7 +468,7 @@ const se = (i, t, e) => {
   let s = n._$litPart$;
   if (s === void 0) {
     const r = e?.renderBefore ?? null;
-    n._$litPart$ = s = new z(t.insertBefore(D(), r), r, void 0, e ?? {});
+    n._$litPart$ = s = new z(t.insertBefore(I(), r), r, void 0, e ?? {});
   }
   return s._$AI(i), s;
 };
@@ -499,7 +499,7 @@ C._$litElement$ = !0, C.finalized = !0, it.litElementHydrateSupport?.({ LitEleme
 const re = it.litElementPolyfillSupport;
 re?.({ LitElement: C });
 (it.litElementVersions ??= []).push("4.2.2");
-const Dt = ':host{--nq-p-parchment-top: #f0e4c7;--nq-p-parchment-bottom: #ddcca3;--nq-p-parchment: radial-gradient(ellipse at 25% 10%, rgba(255,255,255,.5), transparent 55%), radial-gradient(ellipse at 85% 90%, rgba(120,86,44,.28), transparent 60%), repeating-linear-gradient(93deg, rgba(150,115,70,.05) 0 2px, transparent 2px 6px), repeating-linear-gradient(2deg, rgba(150,115,70,.04) 0 3px, transparent 3px 7px), linear-gradient(var(--nq-p-parchment-top), var(--nq-p-parchment-bottom));--nq-p-vignette: inset 0 0 200px rgba(80,52,20,.35);--nq-p-card-open: linear-gradient(#fdf7e6, #f2e7c9);--nq-p-card-done: linear-gradient(#f0e8d3, #e6dcc2);--nq-p-card-panel: linear-gradient(#fcf6e6, #f1e6ca);--nq-p-card-border: rgba(120,88,48,.38);--nq-p-panel-border: rgba(92,62,26,.4);--nq-p-card-shadow: 0 3px 0 rgba(120,88,48,.2), inset 0 1px 0 rgba(255,255,255,.7);--nq-p-panel-shadow: 0 6px 0 rgba(92,62,26,.18), inset 0 2px 0 rgba(255,255,255,.7);--nq-p-frame-outer: 2px solid rgba(92,62,26,.45);--nq-p-frame-inner: 1px solid rgba(92,62,26,.28);--nq-p-rule: 2px solid rgba(92,62,26,.35);--nq-p-ink: #2b1f14;--nq-p-ink-secondary: #5c452a;--nq-p-ink-muted: #6f6455;--nq-p-ink-away: #4d4433;--nq-p-ink-late: #8f1526;--nq-brand-blue: #3B3AB8;--nq-brand-purple: #A035CC;--nq-brand-gradient: linear-gradient(135deg, var(--nq-brand-blue), var(--nq-brand-purple));--nq-p-icon-tile: var(--nq-brand-gradient);--nq-p-icon-tile-done: rgba(92,62,26,.16);--nq-p-crest: var(--nq-brand-gradient);--nq-p-crest-away: linear-gradient(135deg, #6b6b7a, #7a7286);--nq-p-seal: radial-gradient(circle at 35% 30%, #a8283a, #6d1322);--nq-p-seal-shadow: 0 4px 10px rgba(60,10,20,.4), inset 0 0 0 4px rgba(255,255,255,.14);--nq-p-seal-size: 78px;--nq-p-dock-bg: rgba(43,31,20,.9);--nq-p-dock-ink: #f7efdb;--nq-p-dock-ink-secondary: #d8c9a6;--nq-p-dock-divider: rgba(233,220,189,.3);--nq-p-dock-height: 84px;--nq-p-font-display: "Cinzel Decorative", Cinzel, serif;--nq-p-font-heading: Cinzel, serif;--nq-p-font-body: Nunito, system-ui, sans-serif;--nq-p-size-hero: 86px;--nq-p-size-wordmark: 66px;--nq-p-size-title: 56px;--nq-p-size-name: 48px;--nq-p-size-section: 32px;--nq-p-size-quest: 30px;--nq-p-size-body: 22px;--nq-p-size-label: 21px;--nq-p-track-label: .14em;--nq-p-track-kicker: .3em;--nq-p-quest-min-height: 116px;--nq-p-quest-gap: 24px;--nq-p-quest-pad: 22px;--nq-p-tile-size: 64px;--nq-p-button-height: 72px;--nq-p-button-min-width: 150px;--nq-p-confirm-button: 108px;--nq-p-radius-card: 12px;--nq-p-radius-panel: 20px;--nq-p-radius-pill: 9999px;--nq-p-page-inset: 62px;--nq-p-frame-inset: 26px;--nq-ease-out: cubic-bezier(0, 0, .2, 1);--nq-dur-micro: .12s;--nq-dur-base: .2s;--nq-dur-modal: .35s}';
+const It = ':host{--nq-p-parchment-top: #f0e4c7;--nq-p-parchment-bottom: #ddcca3;--nq-p-parchment: radial-gradient(ellipse at 25% 10%, rgba(255,255,255,.5), transparent 55%), radial-gradient(ellipse at 85% 90%, rgba(120,86,44,.28), transparent 60%), repeating-linear-gradient(93deg, rgba(150,115,70,.05) 0 2px, transparent 2px 6px), repeating-linear-gradient(2deg, rgba(150,115,70,.04) 0 3px, transparent 3px 7px), linear-gradient(var(--nq-p-parchment-top), var(--nq-p-parchment-bottom));--nq-p-vignette: inset 0 0 200px rgba(80,52,20,.35);--nq-p-card-open: linear-gradient(#fdf7e6, #f2e7c9);--nq-p-card-done: linear-gradient(#f0e8d3, #e6dcc2);--nq-p-card-panel: linear-gradient(#fcf6e6, #f1e6ca);--nq-p-card-border: rgba(120,88,48,.38);--nq-p-panel-border: rgba(92,62,26,.4);--nq-p-card-shadow: 0 3px 0 rgba(120,88,48,.2), inset 0 1px 0 rgba(255,255,255,.7);--nq-p-panel-shadow: 0 6px 0 rgba(92,62,26,.18), inset 0 2px 0 rgba(255,255,255,.7);--nq-p-frame-outer: 2px solid rgba(92,62,26,.45);--nq-p-frame-inner: 1px solid rgba(92,62,26,.28);--nq-p-rule: 2px solid rgba(92,62,26,.35);--nq-p-ink: #2b1f14;--nq-p-ink-secondary: #5c452a;--nq-p-ink-muted: #6f6455;--nq-p-ink-away: #4d4433;--nq-p-ink-late: #8f1526;--nq-brand-blue: #3B3AB8;--nq-brand-purple: #A035CC;--nq-brand-gradient: linear-gradient(135deg, var(--nq-brand-blue), var(--nq-brand-purple));--nq-p-icon-tile: var(--nq-brand-gradient);--nq-p-icon-tile-done: rgba(92,62,26,.16);--nq-p-crest: var(--nq-brand-gradient);--nq-p-crest-away: linear-gradient(135deg, #6b6b7a, #7a7286);--nq-p-seal: radial-gradient(circle at 35% 30%, #a8283a, #6d1322);--nq-p-seal-shadow: 0 4px 10px rgba(60,10,20,.4), inset 0 0 0 4px rgba(255,255,255,.14);--nq-p-seal-size: 78px;--nq-p-dock-bg: rgba(43,31,20,.9);--nq-p-dock-ink: #f7efdb;--nq-p-dock-ink-secondary: #d8c9a6;--nq-p-dock-divider: rgba(233,220,189,.3);--nq-p-dock-height: 84px;--nq-p-font-display: "Cinzel Decorative", Cinzel, serif;--nq-p-font-heading: Cinzel, serif;--nq-p-font-body: Nunito, system-ui, sans-serif;--nq-p-size-hero: 86px;--nq-p-size-wordmark: 66px;--nq-p-size-title: 56px;--nq-p-size-name: 48px;--nq-p-size-section: 32px;--nq-p-size-quest: 30px;--nq-p-size-body: 22px;--nq-p-size-label: 21px;--nq-p-track-label: .14em;--nq-p-track-kicker: .3em;--nq-p-quest-min-height: 116px;--nq-p-quest-gap: 24px;--nq-p-quest-pad: 22px;--nq-p-tile-size: 64px;--nq-p-button-height: 72px;--nq-p-button-min-width: 150px;--nq-p-confirm-button: 108px;--nq-p-radius-card: 12px;--nq-p-radius-panel: 20px;--nq-p-radius-pill: 9999px;--nq-p-page-inset: 62px;--nq-p-frame-inset: 26px;--nq-ease-out: cubic-bezier(0, 0, .2, 1);--nq-dur-micro: .12s;--nq-dur-base: .2s;--nq-dur-modal: .35s}';
 function st(i) {
   window.customCards = window.customCards ?? [], window.customCards.push(i);
 }
@@ -1015,7 +1015,7 @@ class ve extends C {
     _config: { state: !0 },
     _now: { state: !0 }
   };
-  static styles = [b(Dt), ge];
+  static styles = [b(It), ge];
   hass;
   _config;
   _now = /* @__PURE__ */ new Date();
@@ -1438,7 +1438,7 @@ function Ue(i) {
     completed_at: k(t.completed_at) || null
   } : null;
 }
-const Ct = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", De = "polygon(50% 0, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%)", St = [-9, 6, -4], Ie = Tt`
+const Ct = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ie = "polygon(50% 0, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%)", St = [-9, 6, -4], De = Tt`
   * {
     box-sizing: border-box;
   }
@@ -1571,7 +1571,7 @@ const Ct = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", De = "polygon(50% 
     justify-content: center;
     width: 44px;
     height: 44px;
-    clip-path: ${b(De)};
+    clip-path: ${b(Ie)};
     background: var(--nq-brand-gradient);
   }
 
@@ -2097,7 +2097,7 @@ class Be extends C {
     _now: { state: !0 },
     _confirm: { state: !0 }
   };
-  static styles = [b(Dt), Ie];
+  static styles = [b(It), De];
   hass;
   _config;
   _now = /* @__PURE__ */ new Date();
@@ -2287,19 +2287,19 @@ class Be extends C {
     ), r = e.length;
     let o = m;
     if (r > 0) {
-      const a = Math.min(
+      const a = 644 - (t.key === "afternoon" && this._otherChildren().length > 0 ? 90 : 0), p = Math.min(
         24,
-        Math.max(8, Math.floor((644 - r * 72) / Math.max(r - 1, 1)))
-      ), p = Math.min(
+        Math.max(8, Math.floor((a - r * 74) / Math.max(r - 1, 1)))
+      ), u = Math.min(
         116,
-        Math.max(72, Math.floor((644 - (r - 1) * a) / r))
-      );
-      let u = `--nq-p-quest-gap: ${a}px; --nq-p-quest-min-height: ${p}px`;
+        Math.max(74, Math.floor((a - (r - 1) * p) / r))
+      ), d = Math.max(56, Math.min(72, u - 2));
+      let h = `--nq-p-quest-gap: ${p}px; --nq-p-quest-min-height: ${u}px; --nq-p-button-height: ${d}px`;
       if (r >= 5) {
-        const d = Math.max(0, Math.min(22, Math.floor((p - 74) / 2))), h = Math.max(44, Math.min(64, p - 2 * d - 2));
-        u += `; --nq-p-quest-pad: ${d}px; --nq-p-tile-size: ${h}px`;
+        const c = Math.max(0, Math.min(22, Math.floor((u - d - 2) / 2))), f = Math.max(44, Math.min(64, u - 2 * c - 2));
+        h += `; --nq-p-quest-pad: ${c}px; --nq-p-tile-size: ${f}px`;
       }
-      o = u;
+      o = h;
     }
     return g`
       <section

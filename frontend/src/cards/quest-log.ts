@@ -1165,18 +1165,23 @@ export class NestQuestQuestLogCard extends LitElement {
     const count = instances.length;
     let stackStyle: string | typeof nothing = nothing;
     if (count > 0) {
-      const available = 644;
+      const rollupReserve =
+        windowDef.key === "afternoon" && this._otherChildren().length > 0
+          ? 90
+          : 0;
+      const available = 644 - rollupReserve;
       const gap = Math.min(
         24,
-        Math.max(8, Math.floor((available - count * 72) / Math.max(count - 1, 1)))
+        Math.max(8, Math.floor((available - count * 74) / Math.max(count - 1, 1)))
       );
       const minHeight = Math.min(
         116,
-        Math.max(72, Math.floor((available - (count - 1) * gap) / count))
+        Math.max(74, Math.floor((available - (count - 1) * gap) / count))
       );
-      let stackVars = `--nq-p-quest-gap: ${gap}px; --nq-p-quest-min-height: ${minHeight}px`;
+      const buttonHeight = Math.max(56, Math.min(72, minHeight - 2));
+      let stackVars = `--nq-p-quest-gap: ${gap}px; --nq-p-quest-min-height: ${minHeight}px; --nq-p-button-height: ${buttonHeight}px`;
       if (count >= 5) {
-        const pad = Math.max(0, Math.min(22, Math.floor((minHeight - 74) / 2)));
+        const pad = Math.max(0, Math.min(22, Math.floor((minHeight - buttonHeight - 2) / 2)));
         const tile = Math.max(44, Math.min(64, minHeight - 2 * pad - 2));
         stackVars += `; --nq-p-quest-pad: ${pad}px; --nq-p-tile-size: ${tile}px`;
       }
