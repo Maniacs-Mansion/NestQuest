@@ -8,6 +8,20 @@ type StateObject = {
   attributes?: Record<string, unknown> | null;
 };
 
+type HassConnection = {
+  subscribeEvents: (
+    callback: (event: unknown) => void,
+    eventType: string
+  ) => Promise<() => void>;
+};
+
+const NESTQUEST_EVENT_TYPES = [
+  "nestquest_quest_completed",
+  "nestquest_quest_uncompleted",
+  "nestquest_quest_missed",
+  "nestquest_child_day_complete",
+];
+
 type ChildPlate = {
   slug: string;
   name: string;
@@ -715,6 +729,10 @@ export class NestQuestPartyBoardCard extends LitElement {
   _config?: CardConfig;
   _now = new Date();
   private _clockTimer?: number;
+  private _unsubs: Array<() => void> = [];
+  private _subscribed = false;
+  private _subGeneration = 0;
+  private _retryTimer?: number;
 
   setConfig(config: CardConfig): void {
     if (!config || typeof config !== "object") {
@@ -723,19 +741,101 @@ export class NestQuestPartyBoardCard extends LitElement {
     this._config = config;
   }
 
+  private _hassConnection(): HassConnection | null {
+    const connection = (this.hass as { connection?: unknown } | undefined)
+      ?.connection;
+    if (
+      !connection ||
+      typeof connection !== "object" ||
+      typeof (connection as HassConnection).subscribeEvents !== "function"
+    ) {
+      return null;
+    }
+    return connection as HassConnection;
+  }
+
+  private _subscribeLive(): void {
+    if (!this.isConnected) {
+      return;
+    }
+    if (this._subscribed) {
+      return;
+    }
+    const connection = this._hassConnection();
+    if (!connection) {
+      return;
+    }
+    this._subscribed = true;
+    const token = ++this._subGeneration;
+    const track = (unsubPromise: Promise<() => void>): void => {
+      unsubPromise
+        .then((unsub) => {
+          if (this._subscribed && token === this._subGeneration) {
+            this._unsubs.push(unsub);
+          } else {
+            unsub();
+          }
+        })
+        .catch(() => {
+          if (token === this._subGeneration) {
+            this._unsubscribeLive();
+            this._armSubscribeRetry();
+          }
+        });
+    };
+    for (const eventType of NESTQUEST_EVENT_TYPES) {
+      track(
+        connection.subscribeEvents(() => this.requestUpdate(), eventType)
+      );
+    }
+  }
+
+  private _armSubscribeRetry(): void {
+    if (this._retryTimer !== undefined) {
+      return;
+    }
+    this._retryTimer = window.setTimeout(() => {
+      this._retryTimer = undefined;
+      this._subscribeLive();
+    }, 1000);
+  }
+
+  private _clearSubscribeRetry(): void {
+    if (this._retryTimer !== undefined) {
+      window.clearTimeout(this._retryTimer);
+      this._retryTimer = undefined;
+    }
+  }
+
+  private _unsubscribeLive(): void {
+    this._clearSubscribeRetry();
+    this._subGeneration++;
+    for (const unsub of this._unsubs) {
+      unsub();
+    }
+    this._unsubs = [];
+    this._subscribed = false;
+  }
+
   getCardSize(): number {
     return 22;
   }
 
   connectedCallback(): void {
     super.connectedCallback();
+    this._subscribeLive();
     this._now = new Date();
     this._clockTimer = window.setInterval(() => {
       this._now = new Date();
     }, 1000);
   }
 
+  protected updated(): void {
+    this._subscribeLive();
+  }
+
   disconnectedCallback(): void {
+    this._unsubscribeLive();
     if (this._clockTimer !== undefined) {
       window.clearInterval(this._clockTimer);
       this._clockTimer = undefined;
