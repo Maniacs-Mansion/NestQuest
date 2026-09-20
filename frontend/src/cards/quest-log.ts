@@ -19,6 +19,7 @@ type PanelInstance = {
   state: string;
   overdue: boolean;
   completed_at: string | null;
+  on_time: boolean | null;
 };
 
 type WindowDef = {
@@ -107,6 +108,14 @@ function formatInstant(value: string, timeZone: string | undefined): string {
     minute: "2-digit",
     hour12: true,
   }).format(parsed);
+}
+
+function formatTime(date: Date, timeZone: string | undefined): string {
+  return zonedFormatter(timeZone, {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date);
 }
 
 function formatWallClock(value: string | null): string | null {
@@ -227,7 +236,63 @@ function toPanelInstance(value: unknown): PanelInstance | null {
     state,
     overdue: row.overdue === true,
     completed_at: asString(row.completed_at) || null,
+    on_time: row.on_time === true ? true : row.on_time === false ? false : null,
   };
+}
+
+type DockWeather = {
+  condition: string;
+  temperature: number | null;
+  high: number | null;
+  low: number | null;
+};
+
+const CONDITION_LABELS: Record<string, string> = {
+  "clear-night": "Clear",
+  cloudy: "Cloudy",
+  exceptional: "Clear",
+  fog: "Foggy",
+  hail: "Hail",
+  lightning: "Storms",
+  "lightning-rainy": "Storms",
+  partlycloudy: "Partly cloudy",
+  pouring: "Heavy rain",
+  rainy: "Rain",
+  snowy: "Snow",
+  "snowy-rainy": "Sleet",
+  sunny: "Sunny",
+  windy: "Windy",
+  "windy-variant": "Windy",
+};
+
+const CONDITION_PHRASES: Record<string, string> = {
+  "clear-night": "Clear night skies",
+  cloudy: "Grey skies today",
+  exceptional: "A striking day",
+  fog: "Mist on the road",
+  hail: "Ice from the sky",
+  lightning: "Storms may roll in",
+  "lightning-rainy": "Storms may roll in",
+  partlycloudy: "Sun between clouds",
+  pouring: "Heavy rain outside",
+  rainy: "Rain on the walls",
+  snowy: "Snow on the peaks",
+  "snowy-rainy": "Sleet may fall",
+  sunny: "Clear skies today",
+  windy: "A blustery day",
+  "windy-variant": "A blustery day",
+};
+
+function conditionLabel(condition: string): string {
+  const known = CONDITION_LABELS[condition];
+  if (known) {
+    return known;
+  }
+  return condition.charAt(0).toUpperCase() + condition.slice(1);
+}
+
+function conditionPhrase(condition: string, label: string): string {
+  return CONDITION_PHRASES[condition] ?? label;
 }
 
 const SHIELD_CLIP = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)";
@@ -919,6 +984,170 @@ const logStyles = css`
       transform: translate(-50%, 0);
     }
   }
+
+  .complete-screen {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 96px 62px 130px;
+    text-align: center;
+  }
+
+  .complete-seal {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 168px;
+    height: 168px;
+    border-radius: var(--nq-p-radius-pill);
+    background: var(--nq-p-seal);
+    box-shadow: 0 10px 24px rgba(60, 10, 20, 0.42);
+    color: rgba(255, 235, 235, 0.95);
+    transform: rotate(-6deg);
+  }
+
+  .complete-seal svg {
+    width: 86px;
+    height: 86px;
+  }
+
+  .complete-title {
+    margin: 28px 0 0;
+    font-family: var(--nq-p-font-display);
+    font-size: 86px;
+    font-weight: 900;
+    line-height: 1.1;
+    background: var(--nq-brand-gradient-h);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .complete-sub {
+    margin: 16px 0 0;
+    max-width: 1000px;
+    font-family: var(--nq-p-font-body);
+    font-size: 34px;
+    font-weight: 600;
+    line-height: 1.35;
+    color: var(--nq-p-ink-secondary);
+    text-wrap: pretty;
+  }
+
+  .complete-countdown {
+    margin: 12px 0 0;
+    font-family: var(--nq-p-font-body);
+    font-size: 25px;
+    font-weight: 600;
+    line-height: 1.2;
+    color: var(--nq-p-ink-secondary);
+  }
+
+  .complete-stats {
+    position: absolute;
+    top: 540px;
+    left: 200px;
+    right: 200px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 26px;
+  }
+
+  .complete-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 28px 16px;
+    border: 2px solid var(--nq-p-panel-border);
+    border-radius: 16px;
+    background: var(--nq-p-card-panel);
+    box-shadow: var(--nq-p-panel-shadow);
+  }
+
+  .complete-stat .numeral {
+    font-family: var(--nq-p-font-heading);
+    font-size: 58px;
+    font-weight: 900;
+    line-height: 1;
+    color: var(--nq-p-ink);
+  }
+
+  .complete-stat .label {
+    font-family: var(--nq-p-font-heading);
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    line-height: 1.2;
+    color: var(--nq-p-ink-secondary);
+  }
+
+  .dock {
+    position: absolute;
+    left: 46px;
+    right: 46px;
+    bottom: 46px;
+    height: var(--nq-p-dock-height);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    padding: 0 40px;
+    border-radius: 14px;
+    background: var(--nq-p-dock-bg);
+    pointer-events: none;
+    user-select: none;
+    color: var(--nq-p-dock-ink);
+  }
+
+  .dock svg {
+    flex: none;
+    width: 40px;
+    height: 40px;
+    color: var(--nq-p-dock-ink);
+  }
+
+  .dock .divider {
+    flex: none;
+    width: 1px;
+    height: 40px;
+    background: var(--nq-p-dock-divider);
+  }
+
+  .dock .temp {
+    font-family: var(--nq-p-font-body);
+    font-size: 38px;
+    font-weight: 800;
+    line-height: 1;
+  }
+
+  .dock .condition {
+    font-family: var(--nq-p-font-body);
+    font-size: 26px;
+    font-weight: 600;
+    line-height: 1.2;
+    color: var(--nq-p-dock-ink-secondary);
+  }
+
+  .dock .date {
+    font-family: var(--nq-p-font-body);
+    font-size: 26px;
+    font-weight: 600;
+    line-height: 1.2;
+    color: var(--nq-p-dock-ink-secondary);
+  }
+
+  .dock .clock {
+    font-family: var(--nq-p-font-body);
+    font-size: 38px;
+    font-weight: 800;
+    line-height: 1;
+  }
 `;
 
 const ICON_CHECK = html`<svg
@@ -1064,6 +1293,19 @@ const ICON_CLOUD_OFF = html`<svg
   <path d="m2 2 20 20"></path>
 </svg>`;
 
+const ICON_CLOUD_MOON = html`<svg
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  aria-hidden="true"
+>
+  <path d="M13 16a3 3 0 1 1 0 6H7a5 5 0 1 1 4.9-6Z"></path>
+  <path d="M10.1 9A6 6 0 0 1 16 4a4.5 4.5 0 0 0 8.9 4.2v.1a6 6 0 0 1-5.2 5.7"></path>
+</svg>`;
+
 const LOG_NOTICE_NO_ADVENTURER: LogNotice = {
   icon: ICON_COMPASS,
   headline: "No adventurer chosen",
@@ -1096,6 +1338,7 @@ export class NestQuestQuestLogCard extends LitElement {
     _confirm: { state: true },
     _optimistic: { state: true },
     _toast: { state: true },
+    _countdown: { state: true },
   };
 
   static styles = [unsafeCSS(panelTokens), logStyles];
@@ -1108,10 +1351,12 @@ export class NestQuestQuestLogCard extends LitElement {
    *  answered; the seal shows immediately and reverts on failure. */
   _optimistic = new Map<number, string>();
   _toast: string | null = null;
+  _countdown: number | null = null;
   private _clockTimer?: number;
   private _idleTimer?: number;
   private _confirmTimer?: number;
   private _toastTimer?: number;
+  private _completeTimer?: number;
 
   setConfig(config: CardConfig): void {
     if (!config || typeof config !== "object") {
@@ -1134,6 +1379,18 @@ export class NestQuestQuestLogCard extends LitElement {
     window.addEventListener("touchstart", this._onActivity, true);
     window.addEventListener("keydown", this._onActivity, true);
     this._armIdle();
+    if (this._logView().kind === "complete-day") {
+      this._armCompleteTimer();
+    }
+  }
+
+  protected updated(): void {
+    if (this._logView().kind === "complete-day") {
+      this._armCompleteTimer();
+    } else {
+      this._clearCompleteTimer();
+      this._countdown = null;
+    }
   }
 
   disconnectedCallback(): void {
@@ -1141,6 +1398,7 @@ export class NestQuestQuestLogCard extends LitElement {
     this._clearIdle();
     this._clearConfirmTimer();
     this._clearToastTimer();
+    this._clearCompleteTimer();
     window.removeEventListener("pointerdown", this._onActivity, true);
     window.removeEventListener("touchstart", this._onActivity, true);
     window.removeEventListener("keydown", this._onActivity, true);
@@ -1206,20 +1464,39 @@ export class NestQuestQuestLogCard extends LitElement {
             </div>
           </div>
         `;
-      case "complete-day":
+      case "complete-day": {
+        const stats = this._completeStats();
+        const remaining = this._countdown ?? this._completeSeconds();
         return html`
-          ${this._renderHeader(view)}
-          <div class="notice-wrap">
-            <div class="notice" role="status">
-              <span class="notice-seal">${ICON_CHECK}</span>
-              <span class="notice-headline">Quest complete</span>
-              <p class="notice-body">
-                ${`Every quest is claimed, ${view.name}. The seal is set for today.`}
-              </p>
-              <p class="notice-body">Returning to The Party shortly.</p>
+          <div class="complete-screen" role="status">
+            <span class="complete-seal" aria-hidden="true">${ICON_CHECK}</span>
+            <h1 class="complete-title">Quest complete</h1>
+            <p class="complete-sub">${this._completeSub(view.name)}</p>
+            <p class="complete-countdown">
+              Returning to The Party in ${remaining} seconds
+            </p>
+            <div class="complete-stats">
+              <div class="complete-stat">
+                <span class="numeral">${stats.claimed}</span>
+                <span class="label">Quests claimed</span>
+              </div>
+              <div class="complete-stat">
+                <span class="numeral">${stats.onTime}</span>
+                <span class="label">On time</span>
+              </div>
+              <div class="complete-stat">
+                <span class="numeral">${stats.late}</span>
+                <span class="label">Late</span>
+              </div>
+              <div class="complete-stat">
+                <span class="numeral">${stats.party}</span>
+                <span class="label">The Party</span>
+              </div>
             </div>
           </div>
+          ${this._renderDock()}
         `;
+      }
       default:
         return html`
           ${this._renderHeader(view)}
@@ -1247,6 +1524,10 @@ export class NestQuestQuestLogCard extends LitElement {
     const name = this._childName(slug) ?? titleCaseSlug(slug);
     if (!this._childPresent(slug)) {
       return { kind: "away", name, returns: this._awayReturns(slug) };
+    }
+    const allDone = this._state(`binary_sensor.nestquest_${slug}_all_done`);
+    if (allDone && String(allDone.state ?? "").trim().toLowerCase() === "on") {
+      return { kind: "complete-day", name };
     }
     const dueSensor = this._state(`sensor.nestquest_${slug}_quests_due_today`);
     const due = clampCount(asNumber(dueSensor?.state, 0));
@@ -1342,6 +1623,11 @@ export class NestQuestQuestLogCard extends LitElement {
     return seconds > 0 ? seconds : 15;
   }
 
+  private _completeSeconds(): number {
+    const seconds = asNumber(this._config?.complete_screen_seconds, 12);
+    return seconds > 0 ? seconds : 12;
+  }
+
   private _childName(slug: string): string | null {
     if (!slug) {
       return null;
@@ -1433,6 +1719,41 @@ export class NestQuestQuestLogCard extends LitElement {
     const slug = this._childSlug();
     const { due, completed } = this._childCounts(slug);
     return { completed, due };
+  }
+
+  private _completeStats(): {
+    claimed: number;
+    onTime: number;
+    late: number;
+    party: string;
+  } {
+    const claimed = this._childCounts(this._childSlug()).completed;
+    const onTime = this._instances().filter(
+      (instance) => instance.on_time === true
+    ).length;
+    const late = clampCount(claimed - onTime);
+    const party = this._partyCounts();
+    return {
+      claimed,
+      onTime,
+      late,
+      party: `${party.completed}/${party.due}`,
+    };
+  }
+
+  private _completeSub(name: string): string {
+    const date = formatDay(this._now, this._timeZone());
+    const { claimed, onTime, late } = this._completeStats();
+    if (claimed === 0) {
+      return `${name} sealed the day on ${date}.`;
+    }
+    if (late === 0) {
+      return `${name} claimed every quest on ${date} — all on time.`;
+    }
+    if (onTime === 0) {
+      return `${name} claimed every quest on ${date} — all late.`;
+    }
+    return `${name} claimed every quest on ${date} — ${onTime} on time, ${late} late.`;
   }
 
   private _otherChildren(): OtherChild[] {
@@ -1895,6 +2216,112 @@ export class NestQuestQuestLogCard extends LitElement {
       window.clearTimeout(this._idleTimer);
       this._idleTimer = undefined;
     }
+  }
+
+  private _armCompleteTimer(): void {
+    if (this._completeTimer !== undefined) {
+      return;
+    }
+    if (this._countdown === null) {
+      this._countdown = this._completeSeconds();
+    }
+    if (this._countdown <= 0) {
+      this._returnToBoard();
+      return;
+    }
+    this._completeTimer = window.setInterval(() => {
+      const remaining = (this._countdown ?? 1) - 1;
+      if (remaining <= 0) {
+        this._countdown = 0;
+        this._clearCompleteTimer();
+        this._returnToBoard();
+        return;
+      }
+      this._countdown = remaining;
+    }, 1000);
+  }
+
+  private _clearCompleteTimer(): void {
+    if (this._completeTimer !== undefined) {
+      window.clearInterval(this._completeTimer);
+      this._completeTimer = undefined;
+    }
+  }
+
+  private _optionalNumber(value: unknown): number | null {
+    if (value === null || value === undefined || value === "") {
+      return null;
+    }
+    const parsed = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private _dockWeather(): DockWeather | null {
+    const entityId = asString(this._config?.weather_entity);
+    if (!entityId) {
+      return null;
+    }
+    const stateObj = this._state(entityId);
+    if (!stateObj) {
+      return null;
+    }
+    const condition = String(stateObj.state ?? "").trim();
+    if (!condition || condition === "unavailable" || condition === "unknown") {
+      return null;
+    }
+    const attrs = stateObj.attributes ?? {};
+    let high: number | null = null;
+    let low: number | null = null;
+    const forecast = attrs.forecast;
+    if (Array.isArray(forecast) && forecast.length > 0) {
+      const entry = forecast[0];
+      if (entry && typeof entry === "object") {
+        const typed = entry as Record<string, unknown>;
+        high = this._optionalNumber(typed.temperature);
+        low = this._optionalNumber(typed.templow);
+      }
+    }
+    return {
+      condition,
+      temperature: this._optionalNumber(attrs.temperature),
+      high,
+      low,
+    };
+  }
+
+  private _renderDock() {
+    const weather = this._dockWeather();
+    if (!weather) {
+      return html`
+        <div class="dock">
+          <span class="date">${formatDay(this._now, this._timeZone())}</span>
+          <span class="divider"></span>
+          <span class="clock">${formatTime(this._now, this._timeZone())}</span>
+        </div>
+      `;
+    }
+    const label = conditionLabel(weather.condition);
+    const phrase = conditionPhrase(weather.condition, label);
+    const temperature =
+      weather.temperature === null
+        ? nothing
+        : html`<span class="temp">${Math.round(weather.temperature)}°</span>`;
+    const hiLo =
+      weather.high === null || weather.low === null
+        ? null
+        : `${Math.round(weather.high)}° / ${Math.round(weather.low)}°`;
+    return html`
+      <div class="dock">
+        ${ICON_CLOUD_MOON}
+        ${temperature}
+        <span class="divider"></span>
+        <span class="condition">
+          ${hiLo === null ? label : `${label} · ${hiLo}`}
+        </span>
+        <span class="divider"></span>
+        <span class="condition">${phrase}</span>
+      </div>
+    `;
   }
 
   private _returnToBoard(): void {
