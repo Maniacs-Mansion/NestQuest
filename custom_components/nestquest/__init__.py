@@ -28,6 +28,7 @@ from .const import (
     LOGGER,
     PLATFORMS,
 )
+from .frontend import async_register_frontend
 from .coordinator import NestQuestCoordinator
 from .db import NestQuestDatabase
 from .materialize import materialize as _materialize_run
@@ -410,11 +411,13 @@ def _deregister_services(hass: HomeAssistant) -> None:
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the NestQuest integration. YAML configuration is not used, returns True."""
+    await async_register_frontend(hass)
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up NestQuest from a config entry."""
+    await async_register_frontend(hass)
     hass.data.setdefault(DOMAIN, {})
     existing = hass.data[DOMAIN].get(entry.entry_id)
     if existing is not None:

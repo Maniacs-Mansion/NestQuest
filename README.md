@@ -172,6 +172,20 @@ To set up the development environment and install dependencies:
 uv sync
 ```
 
+### Frontend cards
+
+The Lovelace cards live in `frontend/` (TypeScript + Lit) and build to a
+single bundle at `custom_components/nestquest/www/nestquest-cards.js`. The
+integration registers that bundle as a Lovelace resource automatically on
+setup — do not add it by hand. Card YAML is documented in
+`design/ENTITIES-AND-SERVICES.md` §4.
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
 ### Running Tests
 
 Run the test suite with `pytest`:
