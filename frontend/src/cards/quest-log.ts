@@ -1401,6 +1401,9 @@ export class NestQuestQuestLogCard extends LitElement {
   }
 
   private _subscribeLive(): void {
+    if (!this.isConnected) {
+      return;
+    }
     if (this._subscribed) {
       return;
     }

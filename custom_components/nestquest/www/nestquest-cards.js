@@ -1137,7 +1137,7 @@ class Ee extends A {
     return !t || typeof t != "object" || typeof t.subscribeEvents != "function" ? null : t;
   }
   _subscribeLive() {
-    if (this._subscribed)
+    if (!this.isConnected || this._subscribed)
       return;
     const t = this._hassConnection();
     if (!t)
@@ -2724,7 +2724,7 @@ class pn extends A {
     return !t || typeof t != "object" || typeof t.subscribeEvents != "function" ? null : t;
   }
   _subscribeLive() {
-    if (this._subscribed)
+    if (!this.isConnected || this._subscribed)
       return;
     const t = this._hassConnection();
     if (!t)
