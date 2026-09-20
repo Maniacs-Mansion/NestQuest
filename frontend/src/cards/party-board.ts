@@ -22,18 +22,6 @@ const NESTQUEST_EVENT_TYPES = [
   "nestquest_child_day_complete",
 ];
 
-function stateChangedEntity(event: unknown): string {
-  if (!event || typeof event !== "object") {
-    return "";
-  }
-  const data = (event as Record<string, unknown>).data;
-  if (!data || typeof data !== "object") {
-    return "";
-  }
-  const entityId = (data as Record<string, unknown>).entity_id;
-  return typeof entityId === "string" ? entityId : "";
-}
-
 type ChildPlate = {
   slug: string;
   name: string;
@@ -791,17 +779,6 @@ export class NestQuestPartyBoardCard extends LitElement {
         connection.subscribeEvents(() => this.requestUpdate(), eventType)
       );
     }
-    track(
-      connection.subscribeEvents((event: unknown) => {
-        const entityId = stateChangedEntity(event);
-        if (
-          entityId.startsWith("sensor.nestquest_") ||
-          entityId.startsWith("binary_sensor.nestquest_")
-        ) {
-          this.requestUpdate();
-        }
-      }, "state_changed")
-    );
   }
 
   private _unsubscribeLive(): void {
