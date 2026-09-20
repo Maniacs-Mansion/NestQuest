@@ -26,16 +26,52 @@ type DockWeather = {
   low: number | null;
 };
 
-const WEEKDAY_FORMAT = new Intl.DateTimeFormat("en-US", { weekday: "long" });
-const MONTH_DAY_FORMAT = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-});
-const TIME_FORMAT = new Intl.DateTimeFormat("en-US", {
-  hour: "numeric",
-  minute: "2-digit",
-  hour12: true,
-});
+const FORMATTER_CACHE = new Map<string, Intl.DateTimeFormat>();
+
+function zonedFormatter(
+  timeZone: string | undefined,
+  options: Intl.DateTimeFormatOptions
+): Intl.DateTimeFormat {
+  const key = `${timeZone ?? "local"}|${JSON.stringify(options)}`;
+  const cached = FORMATTER_CACHE.get(key);
+  if (cached) {
+    return cached;
+  }
+  let formatter: Intl.DateTimeFormat;
+  try {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      ...options,
+      ...(timeZone ? { timeZone } : {}),
+    });
+  } catch {
+    formatter = new Intl.DateTimeFormat("en-US", options);
+  }
+  FORMATTER_CACHE.set(key, formatter);
+  return formatter;
+}
+
+function hassTimeZone(hass: HassLike | undefined): string | undefined {
+  const config = hass?.config;
+  if (!config || typeof config !== "object") {
+    return undefined;
+  }
+  const timeZone = (config as Record<string, unknown>).time_zone;
+  return typeof timeZone === "string" && timeZone.trim()
+    ? timeZone.trim()
+    : undefined;
+}
+
+function formatDay(date: Date, timeZone: string | undefined): string {
+  return `${zonedFormatter(timeZone, { weekday: "long" }).format(date)}, ${zonedFormatter(timeZone, { month: "short", day: "numeric" }).format(date)}`;
+}
+
+function formatTime(date: Date, timeZone: string | undefined): string {
+  return zonedFormatter(timeZone, {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date);
+}
 
 const CONDITION_LABELS: Record<string, string> = {
   "clear-night": "Clear",
@@ -120,10 +156,6 @@ function parseIsoDate(value: unknown): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function formatDay(date: Date): string {
-  return `${WEEKDAY_FORMAT.format(date)}, ${MONTH_DAY_FORMAT.format(date)}`;
-}
-
 function conditionLabel(condition: string): string {
   const known = CONDITION_LABELS[condition];
   if (known) {
@@ -160,8 +192,8 @@ const boardStyles = css`
     display: flex;
     flex-direction: column;
     align-items: center;
-    height: 100vh;
-    padding: 48px 110px 150px;
+    height: 1080px;
+    padding: 0;
     overflow: hidden;
     background: var(--nq-p-parchment);
     box-shadow: var(--nq-p-vignette);
@@ -186,6 +218,10 @@ const boardStyles = css`
   }
 
   .wordmark-row {
+    position: absolute;
+    top: 64px;
+    left: 0;
+    right: 0;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -233,7 +269,10 @@ const boardStyles = css`
   }
 
   .kicker {
-    margin: 14px 0 0;
+    position: absolute;
+    top: 154px;
+    left: 0;
+    right: 0;
     font-family: var(--nq-p-font-heading);
     font-size: 22px;
     font-weight: 600;
@@ -245,8 +284,10 @@ const boardStyles = css`
   }
 
   .plates {
-    width: 100%;
-    margin-top: 42px;
+    position: absolute;
+    top: 262px;
+    left: 110px;
+    right: 110px;
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 56px;
@@ -258,9 +299,9 @@ const boardStyles = css`
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 20px;
-    height: 560px;
-    padding: 36px 28px 32px;
+    gap: 26px;
+    height: 600px;
+    padding: 44px 28px 40px;
     border: 2px solid var(--nq-p-panel-border);
     border-radius: var(--nq-p-radius-panel);
     background: var(--nq-p-card-panel);
@@ -294,8 +335,8 @@ const boardStyles = css`
   .crest {
     position: relative;
     flex: none;
-    width: 168px;
-    height: 192px;
+    width: 188px;
+    height: 214px;
     padding: 4px;
     clip-path: ${unsafeCSS(SHIELD_CLIP)};
     background: rgba(255, 255, 255, 0.22);
@@ -393,7 +434,10 @@ const boardStyles = css`
   }
 
   .hint {
-    margin: 26px 0 0;
+    position: absolute;
+    top: 930px;
+    left: 0;
+    right: 0;
     font-family: var(--nq-p-font-body);
     font-size: 24px;
     font-weight: 600;
@@ -569,7 +613,7 @@ export class NestQuestPartyBoardCard extends LitElement {
           </span>
           <span class="rule"></span>
         </div>
-        <p class="kicker">The Party · ${formatDay(this._now)}</p>
+        <p class="kicker">The Party · ${formatDay(this._now, this._timeZone())}</p>
         <div class="plates">
           ${this._plates().map((plate) => this._renderPlate(plate))}
         </div>
@@ -578,6 +622,10 @@ export class NestQuestPartyBoardCard extends LitElement {
         ${this._renderDock()}
       </div>
     `;
+  }
+
+  private _timeZone(): string | undefined {
+    return hassTimeZone(this.hass);
   }
 
   private _state(entityId: string): StateObject | null {
@@ -655,7 +703,9 @@ export class NestQuestPartyBoardCard extends LitElement {
     }
 
     const returnsDate = parseIsoDate(presence?.attributes?.next_present);
-    const returns = returnsDate ? `Returns ${formatDay(returnsDate)}` : null;
+    const returns = returnsDate
+      ? `Returns ${formatDay(returnsDate, this._timeZone())}`
+      : null;
 
     return {
       slug,
@@ -770,9 +820,9 @@ export class NestQuestPartyBoardCard extends LitElement {
     if (!weather) {
       return html`
         <div class="dock">
-          <span class="date">${formatDay(this._now)}</span>
+          <span class="date">${formatDay(this._now, this._timeZone())}</span>
           <span class="divider"></span>
-          <span class="clock">${TIME_FORMAT.format(this._now)}</span>
+          <span class="clock">${formatTime(this._now, this._timeZone())}</span>
         </div>
       `;
     }
