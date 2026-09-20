@@ -2287,7 +2287,7 @@ class Be extends C {
     ), r = e.length;
     let o = m;
     if (r > 0) {
-      const a = 644 - (t.key === "afternoon" && this._otherChildren().length > 0 ? 90 : 0), p = Math.min(
+      const a = 644 - (t.key === "afternoon" && this._otherChildren().length > 0 ? 120 : 0), p = Math.min(
         24,
         Math.max(8, Math.floor((a - r * 74) / Math.max(r - 1, 1)))
       ), u = Math.min(
