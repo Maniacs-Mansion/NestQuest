@@ -186,6 +186,14 @@ npm install
 npm run build
 ```
 
+### Kids panel layout
+
+The Lovelace panel cards are designed for the wall display's confirmed
+resolution, 1920×1080 landscape, with no page scroll. TouchHub's bottom
+dock overlays the NestQuest weather dock strip until it auto-hides, so
+no tappable NestQuest control sits in that strip (the dock carries
+`pointer-events: none`). Keep it that way when editing the cards.
+
 ### Running Tests
 
 Run the test suite with `pytest`:
