@@ -4,6 +4,10 @@ import panelTokens from "../../../custom_components/nestquest/www/nestquest-pane
 
 import { registerCustomCard, type CardConfig, type HassLike } from "../types";
 
+type QuestLogCardConfig = CardConfig & {
+  weather_entity?: string;
+};
+
 type StateObject = {
   state: unknown;
   attributes?: Record<string, unknown> | null;
@@ -1344,7 +1348,7 @@ export class NestQuestQuestLogCard extends LitElement {
   static styles = [unsafeCSS(panelTokens), logStyles];
 
   hass?: HassLike;
-  _config?: CardConfig;
+  _config?: QuestLogCardConfig;
   _now = new Date();
   _confirm: number | null = null;
   /** instanceId → the completion instant stamped before the service has
@@ -1358,7 +1362,7 @@ export class NestQuestQuestLogCard extends LitElement {
   private _toastTimer?: number;
   private _completeTimer?: number;
 
-  setConfig(config: CardConfig): void {
+  setConfig(config: QuestLogCardConfig): void {
     if (!config || typeof config !== "object") {
       throw new Error("Invalid configuration");
     }
