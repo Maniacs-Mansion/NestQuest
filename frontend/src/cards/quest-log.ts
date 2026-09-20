@@ -1378,6 +1378,7 @@ export class NestQuestQuestLogCard extends LitElement {
   private _unsubs: Array<() => void> = [];
   private _subscribed = false;
   private _subGeneration = 0;
+  private _retryTimer?: number;
 
   setConfig(config: QuestLogCardConfig): void {
     if (!config || typeof config !== "object") {
@@ -1421,7 +1422,7 @@ export class NestQuestQuestLogCard extends LitElement {
         .catch(() => {
           if (token === this._subGeneration) {
             this._unsubscribeLive();
-            this.requestUpdate();
+            this._armSubscribeRetry();
           }
         });
     };
@@ -1432,7 +1433,25 @@ export class NestQuestQuestLogCard extends LitElement {
     }
   }
 
+  private _armSubscribeRetry(): void {
+    if (this._retryTimer !== undefined) {
+      return;
+    }
+    this._retryTimer = window.setTimeout(() => {
+      this._retryTimer = undefined;
+      this._subscribeLive();
+    }, 1000);
+  }
+
+  private _clearSubscribeRetry(): void {
+    if (this._retryTimer !== undefined) {
+      window.clearTimeout(this._retryTimer);
+      this._retryTimer = undefined;
+    }
+  }
+
   private _unsubscribeLive(): void {
+    this._clearSubscribeRetry();
     this._subGeneration++;
     for (const unsub of this._unsubs) {
       unsub();
