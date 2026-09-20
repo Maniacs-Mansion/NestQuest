@@ -1386,10 +1386,14 @@ export class NestQuestQuestLogCard extends LitElement {
 
   protected updated(): void {
     if (this._logView().kind === "complete-day") {
+      this._clearIdle();
       this._armCompleteTimer();
     } else {
       this._clearCompleteTimer();
       this._countdown = null;
+      if (this._idleTimer === undefined) {
+        this._armIdle();
+      }
     }
   }
 
@@ -2341,7 +2345,9 @@ export class NestQuestQuestLogCard extends LitElement {
   }
 
   private _onActivity = (): void => {
-    this._armIdle();
+    if (this._logView().kind !== "complete-day") {
+      this._armIdle();
+    }
     if (this._confirm !== null) {
       this._armConfirmTimer();
     }

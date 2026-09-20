@@ -2670,7 +2670,7 @@ class dn extends A {
     }, 6e4), window.addEventListener("pointerdown", this._onActivity, !0), window.addEventListener("touchstart", this._onActivity, !0), window.addEventListener("keydown", this._onActivity, !0), this._armIdle(), this._logView().kind === "complete-day" && this._armCompleteTimer();
   }
   updated() {
-    this._logView().kind === "complete-day" ? this._armCompleteTimer() : (this._clearCompleteTimer(), this._countdown = null);
+    this._logView().kind === "complete-day" ? (this._clearIdle(), this._armCompleteTimer()) : (this._clearCompleteTimer(), this._countdown = null, this._idleTimer === void 0 && this._armIdle());
   }
   disconnectedCallback() {
     this._stopClock(), this._clearIdle(), this._clearConfirmTimer(), this._clearToastTimer(), this._clearCompleteTimer(), window.removeEventListener("pointerdown", this._onActivity, !0), window.removeEventListener("touchstart", this._onActivity, !0), window.removeEventListener("keydown", this._onActivity, !0), super.disconnectedCallback();
@@ -3343,7 +3343,7 @@ class dn extends A {
     this._clockTimer !== void 0 && (window.clearInterval(this._clockTimer), this._clockTimer = void 0);
   }
   _onActivity = () => {
-    this._armIdle(), this._confirm !== null && this._armConfirmTimer();
+    this._logView().kind !== "complete-day" && this._armIdle(), this._confirm !== null && this._armConfirmTimer();
   };
 }
 customElements.define("nestquest-quest-log-card", dn);
