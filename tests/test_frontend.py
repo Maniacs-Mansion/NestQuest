@@ -93,6 +93,14 @@ def test_readme_documents_npm_build() -> None:
     assert "nestquest-cards.js" in readme
 
 
+def test_readme_documents_panel_resolution_and_touchhub_dock() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "1920×1080" in readme
+    assert "TouchHub" in readme
+    assert "dock" in readme
+    assert "pointer-events: none" in readme
+
+
 WOFF2_FILES = (
     "nunito-latin-400-normal.woff2",
     "nunito-latin-600-normal.woff2",
