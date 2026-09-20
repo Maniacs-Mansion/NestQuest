@@ -1176,7 +1176,7 @@ export class NestQuestQuestLogCard extends LitElement {
       );
       const minHeight = Math.min(
         116,
-        Math.max(74, Math.floor((available - (count - 1) * gap) / count))
+        Math.max(58, Math.floor((available - (count - 1) * gap) / count))
       );
       const buttonHeight = Math.max(56, Math.min(72, minHeight - 2));
       let stackVars = `--nq-p-quest-gap: ${gap}px; --nq-p-quest-min-height: ${minHeight}px; --nq-p-button-height: ${buttonHeight}px`;

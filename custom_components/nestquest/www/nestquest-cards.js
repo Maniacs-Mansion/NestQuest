@@ -2292,7 +2292,7 @@ class Be extends C {
         Math.max(8, Math.floor((a - r * 74) / Math.max(r - 1, 1)))
       ), u = Math.min(
         116,
-        Math.max(74, Math.floor((a - (r - 1) * p) / r))
+        Math.max(58, Math.floor((a - (r - 1) * p) / r))
       ), d = Math.max(56, Math.min(72, u - 2));
       let h = `--nq-p-quest-gap: ${p}px; --nq-p-quest-min-height: ${u}px; --nq-p-button-height: ${d}px`;
       if (r >= 5) {
