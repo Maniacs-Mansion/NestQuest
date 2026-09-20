@@ -86,6 +86,11 @@ class ChildDaySnapshot:
     completed_today: int
     remaining_today: int
     completion_pct: int
+    #: For a child away today: the ISO date of their next present day
+    #: (the panel's away plate renders ``Returns <weekday>, <Mon D>``
+    #: from it).  ``None`` when the child is present today or no
+    #: present day exists within the presence engine's scan cap.
+    next_present: str | None = None
 
 
 @dataclass(frozen=True)
@@ -231,18 +236,28 @@ class NestQuestCoordinator(DataUpdateCoordinator):
             due = len(views)
             completed = sum(1 for view in views if view.state == "done")
             remaining = due - completed
+            child_present = engine.is_present(child.id, today)
+            next_present: str | None = None
+            if not child_present:
+                try:
+                    next_present = engine.next_present_dates(
+                        child.id, today, 1
+                    )[0].isoformat()
+                except ValueError:
+                    next_present = None
             snapshots.append(
                 ChildDaySnapshot(
                     child_id=child.id,
                     child_name=child.display_name,
                     instances=tuple(views),
-                    present=engine.is_present(child.id, today),
+                    present=child_present,
                     due_today=due,
                     completed_today=completed,
                     remaining_today=remaining,
                     completion_pct=(
                         round(completed * 100 / due) if due else 100
                     ),
+                    next_present=next_present,
                 )
             )
 

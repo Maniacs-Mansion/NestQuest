@@ -78,7 +78,41 @@ async def test_coordinator_snapshot_counts_and_states(hass, make_entry) -> None:
     assert instance.title == "Brush teeth"
     assert instance.window == "morning"
     assert ada.present is True, "no schedule means present every day"
+    assert ada.next_present is None, "present child has no returns date"
     assert snapshot.cycle_day == 0, "no schedule anywhere"
+
+
+async def test_coordinator_next_present_for_away_child(
+    hass, make_entry
+) -> None:
+    """A child absent today carries the ISO date of their next present
+    day; an always-absent pattern carries None instead."""
+    entry = wire_entry_to_registry(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    coordinator = entry.runtime_data.coordinator
+    database = entry.runtime_data.database
+    await create_child(database, "Ada")
+    ada = (await list_children(database))[0]
+    today = datetime.date.today()
+    pattern = ",".join(
+        str(day) for day in range(7) if day != today.weekday()
+    )
+    await PresenceSchedulesDao(database).upsert_by_child(
+        ada.id, 1, today.isoformat(), pattern
+    )
+    await create_child(database, "Bo")
+    bo = (await list_children(database))[1]
+    await PresenceSchedulesDao(database).upsert_by_child(
+        bo.id, 1, today.isoformat(), ""
+    )
+    snapshot = await coordinator._async_update_data()
+    by_name = {child.child_name: child for child in snapshot.children}
+    assert by_name["Ada"].present is False
+    assert by_name["Ada"].next_present == (
+        today + datetime.timedelta(days=1)
+    ).isoformat()
+    assert by_name["Bo"].present is False
+    assert by_name["Bo"].next_present is None
 
 
 async def test_coordinator_reflects_completion_and_uncompletion(

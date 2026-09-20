@@ -135,6 +135,17 @@ class NestQuestPresentTodaySensor(_NestQuestChildBinarySensor):
             return None
         return child.present
 
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Base attributes plus, for a child away today, the ISO date
+        of their next present day (the panel's away plate renders
+        ``Returns <weekday>, <Mon D>`` from it)."""
+        base = super().extra_state_attributes
+        if base is None:
+            return None
+        child = self._child
+        return {**base, "next_present": child.next_present if child else None}
+
 
 def _child_binary_sensors(
     coordinator: NestQuestCoordinator, child: ChildDaySnapshot
