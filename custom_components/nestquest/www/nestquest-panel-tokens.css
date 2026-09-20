@@ -1,0 +1,94 @@
+/* ============================================================
+   NestQuest — Kids' panel card tokens
+   Surface: DAKboard DAKOS wall panel, 1920x1080 landscape,
+   viewed from ~3 ft, no login, read/complete only.
+   Scope these on the card host: nestquest-quest-log-card,
+   nestquest-party-board-card.
+   Derived from the approved mockups (panel screens 1a, 1b, 1c, 1j).
+   ============================================================ */
+
+:host {
+  /* ── Parchment ground ─────────────────────────────────── */
+  --nq-p-parchment-top:      #f0e4c7;
+  --nq-p-parchment-bottom:   #ddcca3;
+  --nq-p-parchment: radial-gradient(ellipse at 25% 10%, rgba(255,255,255,.5), transparent 55%),
+                    radial-gradient(ellipse at 85% 90%, rgba(120,86,44,.28), transparent 60%),
+                    repeating-linear-gradient(93deg, rgba(150,115,70,.05) 0 2px, transparent 2px 6px),
+                    repeating-linear-gradient(2deg, rgba(150,115,70,.04) 0 3px, transparent 3px 7px),
+                    linear-gradient(var(--nq-p-parchment-top), var(--nq-p-parchment-bottom));
+  --nq-p-vignette:           inset 0 0 200px rgba(80,52,20,.35);
+
+  /* Card surfaces sitting on parchment */
+  --nq-p-card-open:          linear-gradient(#fdf7e6, #f2e7c9);   /* incomplete quest */
+  --nq-p-card-done:          linear-gradient(#f0e8d3, #e6dcc2);   /* sealed quest */
+  --nq-p-card-panel:         linear-gradient(#fcf6e6, #f1e6ca);   /* adventurer plate, stat block */
+  --nq-p-card-border:        rgba(120,88,48,.38);
+  --nq-p-panel-border:       rgba(92,62,26,.40);
+  --nq-p-card-shadow:        0 3px 0 rgba(120,88,48,.20), inset 0 1px 0 rgba(255,255,255,.70);
+  --nq-p-panel-shadow:       0 6px 0 rgba(92,62,26,.18), inset 0 2px 0 rgba(255,255,255,.70);
+  --nq-p-frame-outer:        2px solid rgba(92,62,26,.45);
+  --nq-p-frame-inner:        1px solid rgba(92,62,26,.28);
+  --nq-p-rule:               2px solid rgba(92,62,26,.35);
+
+  /* ── Ink (all values >= 4.5:1 on parchment) ───────────── */
+  --nq-p-ink:                #2b1f14;   /* titles, quest names */
+  --nq-p-ink-secondary:      #5c452a;   /* meta, window labels, counts */
+  --nq-p-ink-muted:          #6f6455;   /* sealed quest titles only */
+  --nq-p-ink-away:           #4d4433;   /* away adventurer name */
+  --nq-p-ink-late:           #8f1526;   /* overdue line */
+
+  /* ── Brand (CubeCraft, toned down: accents only) ──────── */
+  --nq-brand-blue:           #3B3AB8;
+  --nq-brand-purple:         #A035CC;
+  --nq-brand-gradient:       linear-gradient(135deg, var(--nq-brand-blue), var(--nq-brand-purple));
+  --nq-p-icon-tile:          var(--nq-brand-gradient);            /* open quest icon tile */
+  --nq-p-icon-tile-done:     rgba(92,62,26,.16);
+  --nq-p-crest:              var(--nq-brand-gradient);
+  --nq-p-crest-away:         linear-gradient(135deg, #6b6b7a, #7a7286);
+
+  /* ── Wax seal (completed marker) ──────────────────────── */
+  --nq-p-seal:               radial-gradient(circle at 35% 30%, #a8283a, #6d1322);
+  --nq-p-seal-shadow:        0 4px 10px rgba(60,10,20,.40), inset 0 0 0 4px rgba(255,255,255,.14);
+  --nq-p-seal-size:          78px;   /* 168px on the quest-complete screen */
+
+  /* ── Dock (bottom strip, non-interactive) ─────────────── */
+  --nq-p-dock-bg:            rgba(43,31,20,.90);
+  --nq-p-dock-ink:           #f7efdb;
+  --nq-p-dock-ink-secondary: #d8c9a6;
+  --nq-p-dock-divider:       rgba(233,220,189,.30);
+  --nq-p-dock-height:        84px;
+
+  /* ── Type ─────────────────────────────────────────────── */
+  --nq-p-font-display:       'Cinzel Decorative', Cinzel, serif;  /* NestQuest, names, Quest complete */
+  --nq-p-font-heading:       Cinzel, serif;                       /* section heads, quest titles, numerals */
+  --nq-p-font-body:          Nunito, system-ui, sans-serif;       /* meta lines, dock */
+
+  --nq-p-size-hero:          86px;   /* 900 weight, "Quest complete" */
+  --nq-p-size-wordmark:      66px;   /* 900 weight */
+  --nq-p-size-title:         56px;   /* 700, "Declan's Quest Log" */
+  --nq-p-size-name:          48px;   /* 700, adventurer name */
+  --nq-p-size-section:       32px;   /* 700, Morning / Afternoon / Evening */
+  --nq-p-size-quest:         30px;   /* 700, quest title */
+  --nq-p-size-body:          22px;   /* 600 Nunito, meta — PANEL MINIMUM */
+  --nq-p-size-label:         21px;   /* 600 Cinzel, uppercase, tracked */
+  --nq-p-track-label:        .14em;
+  --nq-p-track-kicker:       .30em;
+
+  /* ── Metrics: touch ───────────────────────────────────── */
+  --nq-p-quest-min-height:   116px;  /* whole card is the tap target */
+  --nq-p-quest-gap:          24px;   /* separation between tap targets */
+  --nq-p-button-height:      72px;   /* "Complete" button on a quest card */
+  --nq-p-button-min-width:   150px;
+  --nq-p-confirm-button:     108px;  /* confirm dialog buttons */
+  --nq-p-radius-card:        12px;
+  --nq-p-radius-panel:       20px;
+  --nq-p-radius-pill:        9999px;
+  --nq-p-page-inset:         62px;
+  --nq-p-frame-inset:        26px;
+
+  /* ── Motion (CubeCraft easing) ────────────────────────── */
+  --nq-ease-out:             cubic-bezier(0, 0, .2, 1);
+  --nq-dur-micro:            120ms;
+  --nq-dur-base:             200ms;
+  --nq-dur-modal:            350ms;
+}

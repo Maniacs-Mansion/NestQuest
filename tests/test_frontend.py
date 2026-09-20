@@ -91,3 +91,67 @@ def test_readme_documents_npm_build() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     assert "npm run build" in readme
     assert "nestquest-cards.js" in readme
+
+
+WOFF2_FILES = (
+    "nunito-latin-400-normal.woff2",
+    "nunito-latin-600-normal.woff2",
+    "nunito-latin-700-normal.woff2",
+    "nunito-latin-800-normal.woff2",
+    "cinzel-latin-600-normal.woff2",
+    "cinzel-latin-700-normal.woff2",
+    "cinzel-latin-900-normal.woff2",
+    "cinzel-decorative-latin-700-normal.woff2",
+    "cinzel-decorative-latin-900-normal.woff2",
+)
+CDN_MARKERS = (
+    "fonts.googleapis.com",
+    "fonts.gstatic.com",
+    "cdn.jsdelivr.net",
+    "unpkg.com",
+    "cdnjs.cloudflare.com",
+)
+
+
+def test_www_contains_required_woff2_fonts() -> None:
+    fonts_dir = WWW_DIR / "fonts"
+    for name in WOFF2_FILES:
+        path = fonts_dir / name
+        assert path.is_file(), name
+        assert path.read_bytes()[:4] == b"wOF2"
+
+
+def test_font_css_declares_swap_and_local_urls() -> None:
+    css = (WWW_DIR / "nestquest-fonts.css").read_text(encoding="utf-8")
+    assert css.count("font-display: swap") == 9
+    assert css.count("@font-face") == 9
+    assert 'font-family: "Nunito"' in css
+    assert 'font-family: "Cinzel"' in css
+    assert 'font-family: "Cinzel Decorative"' in css
+    for name in WOFF2_FILES:
+        assert f"./fonts/{name}" in css
+    assert "http://" not in css
+    assert "https://" not in css
+
+
+def test_token_css_copied_verbatim_from_design() -> None:
+    design = REPO_ROOT / "design" / "tokens"
+    for name in ("nestquest-panel-tokens.css", "nestquest-admin-tokens.css"):
+        expected = (design / name).read_bytes()
+        actual = (WWW_DIR / name).read_bytes()
+        assert actual == expected
+
+
+def test_frontend_and_www_have_no_cdn_font_references() -> None:
+    roots = (FRONTEND_DIR, WWW_DIR)
+    for root in roots:
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            if "node_modules" in path.parts:
+                continue
+            if path.suffix.lower() in {".woff2", ".png", ".jpg"}:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for marker in CDN_MARKERS:
+                assert marker not in text, f"{path}: {marker}"

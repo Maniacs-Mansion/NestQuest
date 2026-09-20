@@ -1,4 +1,5 @@
-import { LitElement, html } from "lit";
+import { LitElement, html, unsafeCSS } from "lit";
+import adminTokens from "../../../custom_components/nestquest/www/nestquest-admin-tokens.css?inline";
 
 import { registerCustomCard, type CardConfig, type HassLike } from "../types";
 
@@ -7,6 +8,8 @@ export class NestQuestAdminCard extends LitElement {
     hass: { attribute: false },
     _config: { state: true },
   };
+
+  static styles = [unsafeCSS(adminTokens)];
 
   hass?: HassLike;
   _config?: CardConfig;
