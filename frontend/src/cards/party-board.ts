@@ -140,7 +140,32 @@ function titleCaseSlug(slug: string): string {
     .join(" ");
 }
 
-function parseIsoDate(value: unknown): Date | null {
+function zoneOffsetMs(instant: number, timeZone: string): number {
+  const parts = zonedFormatter(timeZone, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(instant));
+  const read = (type: Intl.DateTimeFormatPartTypes): number => {
+    const part = parts.find((entry) => entry.type === type);
+    return part ? Number(part.value) : Number.NaN;
+  };
+  const asUtc = Date.UTC(
+    read("year"),
+    read("month") - 1,
+    read("day"),
+    read("hour"),
+    read("minute"),
+    read("second")
+  );
+  return Number.isFinite(asUtc) ? asUtc - instant : 0;
+}
+
+function parseIsoDate(value: unknown, timeZone?: string): Date | null {
   if (typeof value !== "string") {
     return null;
   }
@@ -152,7 +177,15 @@ function parseIsoDate(value: unknown): Date | null {
   if (!year || !month || !day) {
     return null;
   }
-  const date = new Date(year, month - 1, day);
+  if (!timeZone) {
+    const local = new Date(year, month - 1, day);
+    return Number.isNaN(local.getTime()) ? null : local;
+  }
+  let utcMs = Date.UTC(year, month - 1, day);
+  for (let pass = 0; pass < 2; pass += 1) {
+    utcMs -= zoneOffsetMs(utcMs, timeZone);
+  }
+  const date = new Date(utcMs);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
@@ -702,7 +735,10 @@ export class NestQuestPartyBoardCard extends LitElement {
       name = titleCaseSlug(slug);
     }
 
-    const returnsDate = parseIsoDate(presence?.attributes?.next_present);
+    const returnsDate = parseIsoDate(
+      presence?.attributes?.next_present,
+      this._timeZone()
+    );
     const returns = returnsDate
       ? `Returns ${formatDay(returnsDate, this._timeZone())}`
       : null;
