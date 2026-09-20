@@ -11,6 +11,7 @@ type StateObject = {
 
 type PanelInstance = {
   id: number;
+  child_id: number | null;
   title: string;
   icon: string | null;
   window: string;
@@ -215,8 +216,10 @@ function toPanelInstance(value: unknown): PanelInstance | null {
   if (!id) {
     return null;
   }
+  const childId = asNumber(row.child_id, 0);
   return {
     id,
+    child_id: childId > 0 ? childId : null,
     title: asString(row.title) || "Quest",
     icon: asString(row.icon) || null,
     window: asString(row.window).toLowerCase(),
@@ -881,6 +884,41 @@ const logStyles = css`
     width: 38px;
     height: 38px;
   }
+
+  .toast {
+    position: absolute;
+    left: 50%;
+    bottom: 158px;
+    z-index: 20;
+    transform: translateX(-50%);
+    max-width: calc(100% - 124px);
+    padding: 20px 32px;
+    border: 2px solid var(--nq-p-panel-border);
+    border-radius: 14px;
+    background: var(--nq-p-card-panel);
+    box-shadow: var(--nq-p-panel-shadow);
+    font-family: var(--nq-p-font-body);
+    font-size: 23px;
+    font-weight: 600;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--nq-p-ink-secondary);
+    animation: toast-in var(--nq-dur-base) var(--nq-ease-out);
+    pointer-events: none;
+  }
+
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+      transform: translate(-50%, 12px);
+    }
+    to {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+  }
 `;
 
 const ICON_CHECK = html`<svg
@@ -1056,6 +1094,8 @@ export class NestQuestQuestLogCard extends LitElement {
     _config: { state: true },
     _now: { state: true },
     _confirm: { state: true },
+    _optimistic: { state: true },
+    _toast: { state: true },
   };
 
   static styles = [unsafeCSS(panelTokens), logStyles];
@@ -1064,9 +1104,14 @@ export class NestQuestQuestLogCard extends LitElement {
   _config?: CardConfig;
   _now = new Date();
   _confirm: number | null = null;
+  /** instanceId → the completion instant stamped before the service has
+   *  answered; the seal shows immediately and reverts on failure. */
+  _optimistic = new Map<number, string>();
+  _toast: string | null = null;
   private _clockTimer?: number;
   private _idleTimer?: number;
   private _confirmTimer?: number;
+  private _toastTimer?: number;
 
   setConfig(config: CardConfig): void {
     if (!config || typeof config !== "object") {
@@ -1095,6 +1140,7 @@ export class NestQuestQuestLogCard extends LitElement {
     this._stopClock();
     this._clearIdle();
     this._clearConfirmTimer();
+    this._clearToastTimer();
     window.removeEventListener("pointerdown", this._onActivity, true);
     window.removeEventListener("touchstart", this._onActivity, true);
     window.removeEventListener("keydown", this._onActivity, true);
@@ -1109,7 +1155,17 @@ export class NestQuestQuestLogCard extends LitElement {
         <div class="frame frame-inner"></div>
         ${this._renderMain(view)}
         ${this._renderConfirm()}
+        ${this._renderToast()}
       </div>
+    `;
+  }
+
+  private _renderToast(): TemplateResult | typeof nothing {
+    if (this._toast === null) {
+      return nothing;
+    }
+    return html`
+      <div class="toast" role="status">${this._toast}</div>
     `;
   }
 
@@ -1318,9 +1374,32 @@ export class NestQuestQuestLogCard extends LitElement {
     if (!Array.isArray(payload)) {
       return [];
     }
-    return payload
+    const instances = payload
       .map(toPanelInstance)
       .filter((instance): instance is PanelInstance => instance !== null);
+    if (this._optimistic.size === 0) {
+      return instances;
+    }
+    let settled = false;
+    for (const instance of instances) {
+      const stampedAt = this._optimistic.get(instance.id);
+      if (stampedAt === undefined) {
+        continue;
+      }
+      if (instance.state === "completed") {
+        // the backend has caught up; the real record replaces the overlay
+        this._optimistic.delete(instance.id);
+        settled = true;
+        continue;
+      }
+      instance.state = "completed";
+      instance.overdue = false;
+      instance.completed_at = stampedAt;
+    }
+    if (settled) {
+      this._optimistic = new Map(this._optimistic);
+    }
+    return instances;
   }
 
   private _remaining(): number {
@@ -1698,7 +1777,94 @@ export class NestQuestQuestLogCard extends LitElement {
   }
 
   private _confirmComplete(): void {
+    const instance =
+      this._confirm === null
+        ? undefined
+        : this._instances().find(
+            (candidate) => candidate.id === this._confirm
+          );
     this._closeConfirm();
+    if (!instance || instance.state !== "open") {
+      return;
+    }
+    this._completeQuest(instance);
+  }
+
+  /** Seal first, ask the service second: the seal is stamped and the column
+   *  re-sorted immediately (PANEL-SPEC §4); a service failure reverts the
+   *  card and raises the parchment toast. */
+  private async _completeQuest(instance: PanelInstance): Promise<void> {
+    if (this._optimistic.has(instance.id)) {
+      return;
+    }
+    const stampedAt = new Date().toISOString();
+    this._optimistic = new Map(this._optimistic).set(instance.id, stampedAt);
+    try {
+      await this._callCompleteQuest(instance);
+    } catch {
+      const reverted = new Map(this._optimistic);
+      reverted.delete(instance.id);
+      this._optimistic = reverted;
+      this._showToast(
+        "NestQuest could not set the seal just now. Please try again."
+      );
+    }
+  }
+
+  private async _callCompleteQuest(instance: PanelInstance): Promise<void> {
+    const hass = this.hass as
+      | {
+          callService?: (
+            this: unknown,
+            domain: string,
+            service: string,
+            data?: Record<string, unknown>
+          ) => Promise<unknown>;
+        }
+      | undefined;
+    if (typeof hass?.callService !== "function") {
+      throw new Error("Home Assistant is not connected");
+    }
+    const actorChildId = this._actorChildId(instance);
+    if (actorChildId === null) {
+      throw new Error("The tapped adventurer is unknown");
+    }
+    await hass.callService.call(hass, "nestquest", "complete_quest", {
+      instance_id: instance.id,
+      actor: "panel",
+      actor_child_id: actorChildId,
+    });
+  }
+
+  /** The tapped profile (decision 9): the instance's own child_id, falling
+   *  back to the due sensor's child-level attribute. */
+  private _actorChildId(instance: PanelInstance): number | null {
+    if (instance.child_id !== null) {
+      return instance.child_id;
+    }
+    const slug = this._childSlug();
+    const fromSensor = asNumber(
+      this._state(`sensor.nestquest_${slug}_quests_due_today`)?.attributes
+        ?.child_id,
+      0
+    );
+    return fromSensor > 0 ? fromSensor : null;
+  }
+
+  private _showToast(message: string): void {
+    this._toast = message;
+    this._clearToastTimer();
+    this._toastTimer = window.setTimeout(() => {
+      this._toastTimer = undefined;
+      this._toast = null;
+    }, 6000);
+  }
+
+  private _clearToastTimer(): void {
+    if (this._toastTimer !== undefined) {
+      window.clearTimeout(this._toastTimer);
+      this._toastTimer = undefined;
+    }
   }
 
   private _armConfirmTimer(): void {
