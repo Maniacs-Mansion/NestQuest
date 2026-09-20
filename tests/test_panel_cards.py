@@ -17,7 +17,6 @@ QUEST_LOG = FRONTEND_CARDS_DIR / "quest-log.ts"
 BUNDLE_PATH = REPO_ROOT / "custom_components" / "nestquest" / "www" / "nestquest-cards.js"
 
 PANEL_SOURCES = (PARTY_BOARD, QUEST_LOG)
-PANEL_BUNDLES = (BUNDLE_PATH,)
 
 # Parent-only NestQuest services. The party board and quest log are the
 # kid-facing panel: they may complete a quest for the tapped child, and nothing
@@ -147,12 +146,13 @@ def test_quest_complete_trigger() -> None:
 
 
 def test_panel_cards_reference_no_admin_only_services() -> None:
-    for path in PANEL_SOURCES + PANEL_BUNDLES:
+    # Only the kid panel sources are scanned: the bundle also contains the
+    # sibling admin card, so its parent-only service names are expected there.
+    for path in PANEL_SOURCES:
         text = _read(path)
         for service in ADMIN_ONLY_SERVICES:
             assert service not in text, f"{path}: {service}"
-    # The sibling admin card is still built into the bundle; the guard is about
-    # the panel surfaces not calling parent-only services.
+    # The bundle is still built and carries both panel card custom elements.
     assert BUNDLE_PATH.is_file()
     bundle = _read(BUNDLE_PATH)
     assert "nestquest-party-board-card" in bundle
