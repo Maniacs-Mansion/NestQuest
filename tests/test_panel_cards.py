@@ -32,6 +32,7 @@ ADMIN_ONLY_SERVICES = (
     "delete_presence_override",
     "export_history_csv",
     "manage_child",
+    "regenerate",
 )
 
 WINDOW_KEYS = ("morning", "afternoon", "evening")
