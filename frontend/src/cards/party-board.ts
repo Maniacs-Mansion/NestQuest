@@ -775,6 +775,7 @@ export class NestQuestPartyBoardCard extends LitElement {
         .catch(() => {
           if (token === this._subGeneration) {
             this._unsubscribeLive();
+            this.requestUpdate();
           }
         });
     };
