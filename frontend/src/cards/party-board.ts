@@ -181,11 +181,8 @@ function parseIsoDate(value: unknown, timeZone?: string): Date | null {
     const local = new Date(year, month - 1, day);
     return Number.isNaN(local.getTime()) ? null : local;
   }
-  let utcMs = Date.UTC(year, month - 1, day);
-  for (let pass = 0; pass < 2; pass += 1) {
-    utcMs -= zoneOffsetMs(utcMs, timeZone);
-  }
-  const date = new Date(utcMs);
+  const utcMs = Date.UTC(year, month - 1, day);
+  const date = new Date(utcMs - zoneOffsetMs(utcMs, timeZone));
   return Number.isNaN(date.getTime()) ? null : date;
 }
 

@@ -622,10 +622,7 @@ function Vt(s, t) {
     const o = new Date(n, i - 1, r);
     return Number.isNaN(o.getTime()) ? null : o;
   }
-  let a = Date.UTC(n, i - 1, r);
-  for (let o = 0; o < 2; o += 1)
-    a -= Wt(a, t);
-  const l = new Date(a);
+  const a = Date.UTC(n, i - 1, r), l = new Date(a - Wt(a, t));
   return Number.isNaN(l.getTime()) ? null : l;
 }
 function Zt(s) {
