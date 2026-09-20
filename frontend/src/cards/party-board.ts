@@ -1,4 +1,4 @@
-import { LitElement, css, html, nothing, unsafeCSS } from "lit";
+import { LitElement, css, html, nothing, unsafeCSS, type TemplateResult } from "lit";
 import panelTokens from "../../../custom_components/nestquest/www/nestquest-panel-tokens.css?inline";
 
 import { registerCustomCard, type CardConfig, type HassLike } from "../types";
@@ -17,6 +17,14 @@ type ChildPlate = {
   due: number;
   pct: number;
   returns: string | null;
+  /** Set when the child's sensors cannot resolve; the plate shows "Unknown". */
+  unresolved: "missing" | "stale" | null;
+};
+
+type BoardNotice = {
+  icon: TemplateResult;
+  headline: string;
+  body: string;
 };
 
 type DockWeather = {
@@ -476,6 +484,62 @@ const boardStyles = css`
     color: var(--nq-p-ink-secondary);
   }
 
+  .plate.unknown {
+    border: 2px dashed var(--nq-p-panel-border);
+    background: linear-gradient(#f2ecdd, #e6dcc6);
+    box-shadow: none;
+  }
+
+  .notice-wrap {
+    position: absolute;
+    top: 262px;
+    left: 110px;
+    right: 110px;
+    bottom: 190px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .notice {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    width: 100%;
+    max-width: 980px;
+    padding: 56px 64px;
+    border: 2px solid var(--nq-p-panel-border);
+    border-radius: var(--nq-p-radius-panel);
+    background: var(--nq-p-card-panel);
+    box-shadow: var(--nq-p-panel-shadow);
+    text-align: center;
+  }
+
+  .notice svg {
+    width: 46px;
+    height: 46px;
+    color: var(--nq-p-ink-secondary);
+  }
+
+  .notice-headline {
+    font-family: var(--nq-p-font-heading);
+    font-size: 40px;
+    font-weight: 700;
+    line-height: 1.15;
+    color: var(--nq-p-ink);
+  }
+
+  .notice-body {
+    margin: 0;
+    font-family: var(--nq-p-font-body);
+    font-size: 24px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--nq-p-ink-secondary);
+  }
+
   .spacer {
     flex: 1 1 0;
   }
@@ -569,6 +633,58 @@ const ICON_TENT = html`<svg
   <path d="M9 21l3-8 3 8"></path>
 </svg>`;
 
+const ICON_COMPASS = html`<svg
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  aria-hidden="true"
+>
+  <circle cx="12" cy="12" r="10"></circle>
+  <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"></polygon>
+</svg>`;
+
+const ICON_ALERT = html`<svg
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  aria-hidden="true"
+>
+  <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path>
+  <path d="M12 9v4"></path>
+  <path d="M12 17h.01"></path>
+</svg>`;
+
+const ICON_CLOUD_OFF = html`<svg
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  aria-hidden="true"
+>
+  <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path>
+  <path d="m2 2 20 20"></path>
+</svg>`;
+
+const BOARD_NOTICE_NOT_SET_UP: BoardNotice = {
+  icon: ICON_ALERT,
+  headline: "NestQuest is not set up yet",
+  body: "A parent needs to finish setting up NestQuest before the party can gather.",
+};
+
+const BOARD_NOTICE_UNREACHABLE: BoardNotice = {
+  icon: ICON_CLOUD_OFF,
+  headline: "The records cannot be reached",
+  body: "The party's records are quiet right now. NestQuest will return shortly.",
+};
+
 const ICON_CLOUD_SUN = html`<svg
   viewBox="0 0 24 24"
   fill="none"
@@ -628,6 +744,7 @@ export class NestQuestPartyBoardCard extends LitElement {
   }
 
   render() {
+    const notice = this._boardNotice();
     return html`
       <div class="board">
         <div class="frame frame-outer"></div>
@@ -644,10 +761,14 @@ export class NestQuestPartyBoardCard extends LitElement {
           <span class="rule"></span>
         </div>
         <p class="kicker">The Party · ${formatDay(this._now, this._timeZone())}</p>
-        <div class="plates">
-          ${this._plates().map((plate) => this._renderPlate(plate))}
-        </div>
-        <p class="hint">Tap your crest to open your Quest Log</p>
+        ${notice
+          ? this._renderNotice(notice)
+          : html`
+              <div class="plates">
+                ${this._plates().map((plate) => this._renderPlate(plate))}
+              </div>
+              <p class="hint">Tap your crest to open your Quest Log</p>
+            `}
         <div class="spacer"></div>
         ${this._renderDock()}
       </div>
@@ -687,6 +808,7 @@ export class NestQuestPartyBoardCard extends LitElement {
   }
 
   private _plate(slug: string): ChildPlate {
+    const unresolved = this._dueSensorResolution(slug);
     const dueSensor = this._state(`sensor.nestquest_${slug}_quests_due_today`);
     const doneSensor = this._state(
       `sensor.nestquest_${slug}_quests_completed_today`
@@ -744,15 +866,75 @@ export class NestQuestPartyBoardCard extends LitElement {
       slug,
       name,
       initial: (name.charAt(0) || "?").toUpperCase(),
-      present,
+      present: unresolved === null ? present : false,
       completed,
       due,
       pct,
       returns,
+      unresolved,
     };
   }
 
+  /** "missing" when the due sensor does not exist (integration not
+   *  configured), "stale" when it answers unavailable/unknown (backend
+   *  unreachable or the child is absent from the snapshot), null when
+   *  it resolves. */
+  private _dueSensorResolution(slug: string): "missing" | "stale" | null {
+    const sensor = this._state(`sensor.nestquest_${slug}_quests_due_today`);
+    if (!sensor) {
+      return "missing";
+    }
+    const state = String(sensor.state ?? "").trim().toLowerCase();
+    if (!state || state === "unavailable" || state === "unknown") {
+      return "stale";
+    }
+    return null;
+  }
+
+  private _boardNotice(): BoardNotice | null {
+    const plates = this._plates();
+    if (plates.length === 0) {
+      return BOARD_NOTICE_NOT_SET_UP;
+    }
+    if (plates.every((plate) => plate.unresolved !== null)) {
+      return plates.some((plate) => plate.unresolved === "stale")
+        ? BOARD_NOTICE_UNREACHABLE
+        : BOARD_NOTICE_NOT_SET_UP;
+    }
+    return null;
+  }
+
+  private _renderNotice(notice: BoardNotice) {
+    return html`
+      <div class="notice-wrap">
+        <div class="notice" role="status">
+          ${notice.icon}
+          <span class="notice-headline">${notice.headline}</span>
+          <p class="notice-body">${notice.body}</p>
+        </div>
+      </div>
+    `;
+  }
+
   private _renderPlate(plate: ChildPlate) {
+    if (plate.unresolved) {
+      return html`
+        <div class="plate unknown">
+          <span class="crest away">
+            <span class="crest-face">
+              <span class="initial">${plate.initial}</span>
+            </span>
+          </span>
+          <span class="name">${plate.name}</span>
+          <span class="pill away">
+            ${ICON_COMPASS}
+            <span>Unknown</span>
+          </span>
+          <span class="progress-line">&mdash;</span>
+          <span class="bar"></span>
+        </div>
+      `;
+    }
     if (plate.present) {
       return html`
         <button
