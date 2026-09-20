@@ -36,6 +36,23 @@ type OtherChild = {
   returnsWeekday: string | null;
 };
 
+/** The one state the log resolves before rendering anything; see
+ *  design/PANEL-EMPTY-STATES.md for the decisions behind each kind. */
+type LogView =
+  | { kind: "no-adventurer" }
+  | { kind: "not-set-up" }
+  | { kind: "unreachable" }
+  | { kind: "away"; name: string; returns: string | null }
+  | { kind: "empty-day"; name: string }
+  | { kind: "complete-day"; name: string }
+  | { kind: "normal" };
+
+type LogNotice = {
+  icon: TemplateResult;
+  headline: string;
+  body: string;
+};
+
 const FORMATTER_CACHE = new Map<string, Intl.DateTimeFormat>();
 
 function zonedFormatter(
@@ -297,6 +314,10 @@ const logStyles = css`
     font-weight: 700;
     line-height: 1;
     color: #ffffff;
+  }
+
+  .crest.away .crest-face {
+    background: var(--nq-p-crest-away);
   }
 
   .titles {
@@ -646,6 +667,81 @@ const logStyles = css`
     color: var(--nq-p-ink-secondary);
   }
 
+  .notice-wrap {
+    position: absolute;
+    top: 236px;
+    left: var(--nq-p-page-inset);
+    right: var(--nq-p-page-inset);
+    bottom: 130px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .notice {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    width: 100%;
+    max-width: 980px;
+    padding: 56px 64px;
+    border: 2px solid var(--nq-p-panel-border);
+    border-radius: 20px;
+    background: var(--nq-p-card-panel);
+    box-shadow: var(--nq-p-panel-shadow);
+    text-align: center;
+  }
+
+  .notice svg {
+    width: 46px;
+    height: 46px;
+    color: var(--nq-p-ink-secondary);
+  }
+
+  .notice.away {
+    background: linear-gradient(#f2ecdd, #e6dcc6);
+    border-style: dashed;
+    box-shadow: none;
+  }
+
+  .notice-headline {
+    font-family: var(--nq-p-font-heading);
+    font-size: 40px;
+    font-weight: 700;
+    line-height: 1.15;
+    color: var(--nq-p-ink);
+  }
+
+  .notice-body {
+    margin: 0;
+    font-family: var(--nq-p-font-body);
+    font-size: 24px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--nq-p-ink-secondary);
+  }
+
+  .notice-seal {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 78px;
+    height: 78px;
+    border-radius: var(--nq-p-radius-pill);
+    background: var(--nq-p-seal);
+    box-shadow: var(--nq-p-seal-shadow);
+    color: rgba(255, 235, 235, 0.95);
+    transform: rotate(-6deg);
+  }
+
+  .notice-seal svg {
+    width: 38px;
+    height: 38px;
+    color: rgba(255, 235, 235, 0.95);
+  }
+
   .scrim {
     position: absolute;
     inset: 0;
@@ -877,6 +973,77 @@ const ICON_MOON = html`<svg
   <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path>
 </svg>`;
 
+const ICON_TENT = html`<svg
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  aria-hidden="true"
+>
+  <path d="M3.5 21 12 3.5 20.5 21"></path>
+  <path d="M9 21l3-8 3 8"></path>
+</svg>`;
+
+const ICON_COMPASS = html`<svg
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  aria-hidden="true"
+>
+  <circle cx="12" cy="12" r="10"></circle>
+  <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"></polygon>
+</svg>`;
+
+const ICON_ALERT = html`<svg
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  aria-hidden="true"
+>
+  <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path>
+  <path d="M12 9v4"></path>
+  <path d="M12 17h.01"></path>
+</svg>`;
+
+const ICON_CLOUD_OFF = html`<svg
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  aria-hidden="true"
+>
+  <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path>
+  <path d="m2 2 20 20"></path>
+</svg>`;
+
+const LOG_NOTICE_NO_ADVENTURER: LogNotice = {
+  icon: ICON_COMPASS,
+  headline: "No adventurer chosen",
+  body: "Open The Party and tap your crest to open your quest log.",
+};
+
+const LOG_NOTICE_NOT_SET_UP: LogNotice = {
+  icon: ICON_ALERT,
+  headline: "NestQuest is not set up yet",
+  body: "A parent needs to finish setting up NestQuest.",
+};
+
+const LOG_NOTICE_UNREACHABLE: LogNotice = {
+  icon: ICON_CLOUD_OFF,
+  headline: "The records cannot be reached",
+  body: "The party's records are quiet right now. NestQuest will return shortly.",
+};
+
 const WINDOW_DEFS: WindowDef[] = [
   { key: "morning", name: "Morning", range: "Until 11:59 AM", icon: ICON_SUNRISE },
   { key: "afternoon", name: "Afternoon", range: "12:00–5:00 PM", icon: ICON_SUN },
@@ -935,15 +1102,158 @@ export class NestQuestQuestLogCard extends LitElement {
   }
 
   render() {
+    const view = this._logView();
     return html`
       <div class="board">
         <div class="frame frame-outer"></div>
         <div class="frame frame-inner"></div>
-        ${this._renderHeader()}
-        <div class="columns">
-          ${WINDOW_DEFS.map((windowDef) => this._renderColumn(windowDef))}
-        </div>
+        ${this._renderMain(view)}
         ${this._renderConfirm()}
+      </div>
+    `;
+  }
+
+  private _renderMain(view: LogView): TemplateResult {
+    switch (view.kind) {
+      case "no-adventurer":
+        return this._renderNotice(LOG_NOTICE_NO_ADVENTURER);
+      case "not-set-up":
+        return this._renderNotice(LOG_NOTICE_NOT_SET_UP);
+      case "unreachable":
+        return this._renderNotice(LOG_NOTICE_UNREACHABLE);
+      case "away": {
+        const body = ["The quest log unlocks when they return."];
+        if (view.returns) {
+          body.push(`Returns ${view.returns}`);
+        }
+        return html`
+          ${this._renderHeader(view)}
+          <div class="notice-wrap">
+            <div class="notice away" role="status">
+              ${ICON_TENT}
+              <span class="notice-headline">${view.name} is on travels</span>
+              ${body.map((line) => html`<p class="notice-body">${line}</p>`)}
+            </div>
+          </div>
+        `;
+      }
+      case "empty-day":
+        return html`
+          ${this._renderHeader(view)}
+          <div class="notice-wrap">
+            <div class="notice" role="status">
+              ${ICON_SUN}
+              <span class="notice-headline">No quests today</span>
+              <p class="notice-body">
+                ${`Nothing was posted for today, ${view.name}. Enjoy the day's rest!`}
+              </p>
+            </div>
+          </div>
+        `;
+      case "complete-day":
+        return html`
+          ${this._renderHeader(view)}
+          <div class="notice-wrap">
+            <div class="notice" role="status">
+              <span class="notice-seal">${ICON_CHECK}</span>
+              <span class="notice-headline">Quest complete</span>
+              <p class="notice-body">
+                ${`Every quest is claimed, ${view.name}. The seal is set for today.`}
+              </p>
+              <p class="notice-body">Returning to The Party shortly.</p>
+            </div>
+          </div>
+        `;
+      default:
+        return html`
+          ${this._renderHeader(view)}
+          <div class="columns">
+            ${WINDOW_DEFS.map((windowDef) => this._renderColumn(windowDef))}
+          </div>
+        `;
+    }
+  }
+
+  /** Resolve the log's single render state; the priority order is
+   *  design/PANEL-EMPTY-STATES.md §2. */
+  private _logView(): LogView {
+    const slug = this._childSlug();
+    if (!slug) {
+      return { kind: "no-adventurer" };
+    }
+    const resolution = this._dueSensorResolution(slug);
+    if (resolution === "missing") {
+      return { kind: "not-set-up" };
+    }
+    if (resolution === "stale") {
+      return { kind: "unreachable" };
+    }
+    const name = this._childName(slug) ?? titleCaseSlug(slug);
+    if (!this._childPresent(slug)) {
+      return { kind: "away", name, returns: this._awayReturns(slug) };
+    }
+    const dueSensor = this._state(`sensor.nestquest_${slug}_quests_due_today`);
+    const due = clampCount(asNumber(dueSensor?.state, 0));
+    if (due === 0) {
+      return { kind: "empty-day", name };
+    }
+    if (this._remaining() === 0) {
+      return { kind: "complete-day", name };
+    }
+    return { kind: "normal" };
+  }
+
+  /** "missing" when the due sensor does not exist (integration not
+   *  configured), "stale" when it answers unavailable/unknown (backend
+   *  unreachable or the child is absent from the snapshot), null when
+   *  it resolves. */
+  private _dueSensorResolution(slug: string): "missing" | "stale" | null {
+    const sensor = this._state(`sensor.nestquest_${slug}_quests_due_today`);
+    if (!sensor) {
+      return "missing";
+    }
+    const state = String(sensor.state ?? "").trim().toLowerCase();
+    if (!state || state === "unavailable" || state === "unknown") {
+      return "stale";
+    }
+    return null;
+  }
+
+  private _childPresent(slug: string): boolean {
+    const dueSensor = this._state(`sensor.nestquest_${slug}_quests_due_today`);
+    const presentAttr = dueSensor?.attributes?.present;
+    if (typeof presentAttr === "boolean") {
+      return presentAttr;
+    }
+    const presence = this._state(
+      `binary_sensor.nestquest_${slug}_present_today`
+    );
+    if (presence) {
+      return String(presence.state ?? "").trim().toLowerCase() === "on";
+    }
+    return true;
+  }
+
+  private _awayReturns(slug: string): string | null {
+    const timeZone = this._timeZone();
+    const presence = this._state(
+      `binary_sensor.nestquest_${slug}_present_today`
+    );
+    const nextPresent = parseIsoDate(
+      presence?.attributes?.next_present,
+      timeZone
+    );
+    return nextPresent ? formatDay(nextPresent, timeZone) : null;
+  }
+
+  private _renderNotice(notice: LogNotice): TemplateResult {
+    return html`
+      <div class="notice-wrap">
+        <div class="notice" role="status">
+          ${notice.icon}
+          <span class="notice-headline">${notice.headline}</span>
+          <p class="notice-body">${notice.body}</p>
+        </div>
       </div>
     `;
   }
@@ -1110,18 +1420,20 @@ export class NestQuestQuestLogCard extends LitElement {
     return result.sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  private _renderHeader() {
+  private _renderHeader(view: LogView) {
     const slug = this._childSlug();
-    const name = this._childName(slug);
-    const displayName = name ?? (slug ? titleCaseSlug(slug) : null);
+    const away = view.kind === "away";
+    const name = away
+      ? view.name
+      : (this._childName(slug) ?? (slug ? titleCaseSlug(slug) : null));
     const { due, completed } = this._childCounts(slug);
     const remaining = this._remaining();
     const party = this._partyCounts();
-    const title = displayName ? `${displayName}'s Quest Log` : "Quest Log";
-    const initial = (displayName?.charAt(0) || "?").toUpperCase();
+    const title = name ? `${name}'s Quest Log` : "Quest Log";
+    const initial = (name?.charAt(0) || "?").toUpperCase();
     return html`
       <header class="header">
-        <span class="crest" aria-hidden="true">
+        <span class="crest${away ? " away" : nothing}" aria-hidden="true">
           <span class="crest-face">
             <span class="initial">${initial}</span>
           </span>
@@ -1129,23 +1441,27 @@ export class NestQuestQuestLogCard extends LitElement {
         <div class="titles">
           <h1 class="title">${title}</h1>
           <p class="sub">
-            ${formatDay(this._now, this._timeZone())} · ${completed} of ${due}
-            claimed
+            ${formatDay(this._now, this._timeZone())} ·
+            ${away ? "On travels" : `${completed} of ${due} claimed`}
           </p>
         </div>
-        <div class="remaining">
-          <span class="d20" aria-hidden="true">
-            <span class="d20-numeral">${remaining}</span>
-          </span>
-          <div class="remaining-text">
-            <span class="remaining-count">
-              ${remaining} quest${remaining === 1 ? "" : "s"} left
-            </span>
-            <span class="party-line">
-              Party progress · ${party.completed} of ${party.due} today
-            </span>
-          </div>
-        </div>
+        ${away
+          ? nothing
+          : html`
+              <div class="remaining">
+                <span class="d20" aria-hidden="true">
+                  <span class="d20-numeral">${remaining}</span>
+                </span>
+                <div class="remaining-text">
+                  <span class="remaining-count">
+                    ${remaining} quest${remaining === 1 ? "" : "s"} left
+                  </span>
+                  <span class="party-line">
+                    Party progress · ${party.completed} of ${party.due} today
+                  </span>
+                </div>
+              </div>
+            `}
       </header>
     `;
   }
