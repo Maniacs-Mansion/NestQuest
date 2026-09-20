@@ -1389,6 +1389,7 @@ export class NestQuestQuestLogCard extends LitElement {
   private _completeTimer?: number;
   private _unsubs: Array<() => void> = [];
   private _subscribed = false;
+  private _subGeneration = 0;
 
   setConfig(config: QuestLogCardConfig): void {
     if (!config || typeof config !== "object") {
@@ -1419,10 +1420,11 @@ export class NestQuestQuestLogCard extends LitElement {
       return;
     }
     this._subscribed = true;
+    const token = ++this._subGeneration;
     const track = (unsubPromise: Promise<() => void>): void => {
       unsubPromise
         .then((unsub) => {
-          if (this._subscribed) {
+          if (this._subscribed && token === this._subGeneration) {
             this._unsubs.push(unsub);
           } else {
             unsub();
@@ -1449,6 +1451,7 @@ export class NestQuestQuestLogCard extends LitElement {
   }
 
   private _unsubscribeLive(): void {
+    this._subGeneration++;
     for (const unsub of this._unsubs) {
       unsub();
     }

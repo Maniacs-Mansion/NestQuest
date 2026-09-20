@@ -1135,6 +1135,7 @@ class Te extends A {
   _clockTimer;
   _unsubs = [];
   _subscribed = !1;
+  _subGeneration = 0;
   setConfig(t) {
     if (!t || typeof t != "object")
       throw new Error("Invalid configuration");
@@ -1151,24 +1152,25 @@ class Te extends A {
     if (!t)
       return;
     this._subscribed = !0;
-    const e = (n) => {
-      n.then((i) => {
-        this._subscribed ? this._unsubs.push(i) : i();
+    const e = ++this._subGeneration, n = (i) => {
+      i.then((r) => {
+        this._subscribed && e === this._subGeneration ? this._unsubs.push(r) : r();
       }).catch(() => {
       });
     };
-    for (const n of pe)
-      e(
-        t.subscribeEvents(() => this.requestUpdate(), n)
+    for (const i of pe)
+      n(
+        t.subscribeEvents(() => this.requestUpdate(), i)
       );
-    e(
-      t.subscribeEvents((n) => {
-        const i = he(n);
-        (i.startsWith("sensor.nestquest_") || i.startsWith("binary_sensor.nestquest_")) && this.requestUpdate();
+    n(
+      t.subscribeEvents((i) => {
+        const r = he(i);
+        (r.startsWith("sensor.nestquest_") || r.startsWith("binary_sensor.nestquest_")) && this.requestUpdate();
       }, "state_changed")
     );
   }
   _unsubscribeLive() {
+    this._subGeneration++;
     for (const t of this._unsubs)
       t();
     this._unsubs = [], this._subscribed = !1;
@@ -2726,6 +2728,7 @@ class un extends A {
   _completeTimer;
   _unsubs = [];
   _subscribed = !1;
+  _subGeneration = 0;
   setConfig(t) {
     if (!t || typeof t != "object")
       throw new Error("Invalid configuration");
@@ -2742,24 +2745,25 @@ class un extends A {
     if (!t)
       return;
     this._subscribed = !0;
-    const e = (n) => {
-      n.then((i) => {
-        this._subscribed ? this._unsubs.push(i) : i();
+    const e = ++this._subGeneration, n = (i) => {
+      i.then((r) => {
+        this._subscribed && e === this._subGeneration ? this._unsubs.push(r) : r();
       }).catch(() => {
       });
     };
-    for (const n of Le)
-      e(
-        t.subscribeEvents(() => this.requestUpdate(), n)
+    for (const i of Le)
+      n(
+        t.subscribeEvents(() => this.requestUpdate(), i)
       );
-    e(
-      t.subscribeEvents((n) => {
-        const i = De(n);
-        (i.startsWith("sensor.nestquest_") || i.startsWith("binary_sensor.nestquest_")) && this.requestUpdate();
+    n(
+      t.subscribeEvents((i) => {
+        const r = De(i);
+        (r.startsWith("sensor.nestquest_") || r.startsWith("binary_sensor.nestquest_")) && this.requestUpdate();
       }, "state_changed")
     );
   }
   _unsubscribeLive() {
+    this._subGeneration++;
     for (const t of this._unsubs)
       t();
     this._unsubs = [], this._subscribed = !1;
