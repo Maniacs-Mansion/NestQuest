@@ -155,6 +155,64 @@ Sensors the automations read: `sensor.nestquest_<child>_quests_due_today`
 `..._quests_completed_today`, and
 `binary_sensor.nestquest_<child>_present_today`.
 
+## TouchHub setup
+
+Run these steps in order to display the NestQuest panel on a TouchHub
+wall device. The panel is an HA Lovelace dashboard, so the kiosk browser
+is simply a Home Assistant client.
+
+1. **Allow the panel to be framed.** The NestQuest Lovelace panel card
+   embeds a Home Assistant iframe, which Home Assistant blocks by default.
+   Add the following to `configuration.yaml` and save it:
+
+   ```yaml
+   http:
+     use_x_frame_options: false
+   ```
+
+2. **Restart Home Assistant.** Use *Settings → System → Restart* and pick
+   **Restart Home Assistant** (a full restart, not a YAML reload) — the
+   `http:` setting is only applied at startup.
+
+3. **Create a dedicated kiosk user.** In *Settings → People → Users*, add
+   a new user for the wall device. Make it **non-admin**, and do **not**
+   add it to the NestQuest admin allowlist. This is the account the panel
+   runs as, and it should have no authority beyond viewing the dashboard.
+
+4. **Build a dashboard with only the NestQuest panel card.** Create a new
+   Lovelace dashboard that contains nothing but the NestQuest panel card.
+   Keep the surface minimal — no other cards, no admin controls.
+
+5. **Point TouchHub at it.** In the TouchHub launcher, add the **Home
+   Assistant Lovelace** app to the dock and paste the dashboard URL from
+   step 4. TouchHub loads that URL in its kiosk browser.
+
+6. **Log the kiosk session in.** Sign in on the device as the dedicated
+   kiosk user from step 3, and leave that session logged in.
+
+### The clickjacking trade-off
+
+`use_x_frame_options: false` removes the `X-Frame-Options` response
+header, which is what stops Home Assistant from being embedded in a frame
+on another site. Disabling it is what lets the panel card iframe Home
+Assistant — but it also lets **any** page frame Home Assistant, so a
+malicious site could render the HA UI invisibly and trick a logged-in
+user into clicking controls they did not mean to click. That is
+clickjacking.
+
+This is an accepted, scoped risk for a wall display, and it is contained
+by how the kiosk account and dashboard are set up. Two mitigations:
+
+- The kiosk user is non-admin and is **not in the NestQuest admin
+  allowlist**, so even a hijacked click cannot reach admin-only
+  operations or other parts of Home Assistant.
+- The dashboard **contains only the NestQuest panel card**, so there are
+  no unrelated controls on screen for a clickjacking overlay to weaponise.
+
+A third, optional hardening is to keep the kiosk browser on a trusted
+device and network, and to leave the kiosk session logged in only on that
+device.
+
 ## Developer Setup and Testing
 
 This project uses [`uv`](https://github.com/astral-sh/uv) for fast Python package and dependency management.

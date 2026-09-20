@@ -163,3 +163,13 @@ def test_frontend_and_www_have_no_cdn_font_references() -> None:
             text = path.read_text(encoding="utf-8", errors="ignore")
             for marker in CDN_MARKERS:
                 assert marker not in text, f"{path}: {marker}"
+
+
+def test_readme_documents_the_touchhub_setup_runbook() -> None:
+    readme = " ".join(
+        (REPO_ROOT / "README.md").read_text(encoding="utf-8").split()
+    )
+    for required in ("use_x_frame_options", "TouchHub", "kiosk", "clickjacking"):
+        assert required in readme, required
+    assert "not in the NestQuest admin allowlist" in readme
+    assert "contains only the NestQuest panel card" in readme
