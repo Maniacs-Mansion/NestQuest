@@ -603,8 +603,8 @@ const lt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Kt = "polygon(50% 
     display: flex;
     flex-direction: column;
     align-items: center;
-    min-height: 100vh;
-    padding: 64px 110px 150px;
+    height: 100vh;
+    padding: 48px 110px 150px;
     overflow: hidden;
     background: var(--nq-p-parchment);
     box-shadow: var(--nq-p-vignette);
@@ -676,7 +676,7 @@ const lt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Kt = "polygon(50% 
   }
 
   .kicker {
-    margin: 24px 0 0;
+    margin: 14px 0 0;
     font-family: var(--nq-p-font-heading);
     font-size: 22px;
     font-weight: 600;
@@ -689,7 +689,7 @@ const lt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Kt = "polygon(50% 
 
   .plates {
     width: 100%;
-    margin-top: 72px;
+    margin-top: 42px;
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 56px;
@@ -701,9 +701,9 @@ const lt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Kt = "polygon(50% 
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 26px;
-    height: 600px;
-    padding: 44px 28px 40px;
+    gap: 20px;
+    height: 560px;
+    padding: 36px 28px 32px;
     border: 2px solid var(--nq-p-panel-border);
     border-radius: var(--nq-p-radius-panel);
     background: var(--nq-p-card-panel);
@@ -737,8 +737,8 @@ const lt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Kt = "polygon(50% 
   .crest {
     position: relative;
     flex: none;
-    width: 188px;
-    height: 214px;
+    width: 168px;
+    height: 192px;
     padding: 4px;
     clip-path: ${$(lt)};
     background: rgba(255, 255, 255, 0.22);
@@ -750,7 +750,7 @@ const lt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Kt = "polygon(50% 
     display: flex;
     align-items: center;
     justify-content: center;
-    padding-bottom: 78px;
+    padding-bottom: 70px;
     clip-path: ${$(lt)};
     background: var(--nq-p-crest);
   }
@@ -784,7 +784,7 @@ const lt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Kt = "polygon(50% 
     display: inline-flex;
     align-items: center;
     gap: 10px;
-    padding: 10px 24px;
+    padding: 8px 20px;
     border-radius: var(--nq-p-radius-pill);
     background: rgba(22, 120, 60, 0.35);
     font-family: var(--nq-p-font-heading);
@@ -813,7 +813,7 @@ const lt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Kt = "polygon(50% 
 
   .progress-line {
     font-family: var(--nq-p-font-heading);
-    font-size: 26px;
+    font-size: 24px;
     font-weight: 700;
     line-height: 1.2;
     color: var(--nq-p-ink-secondary);
@@ -836,9 +836,9 @@ const lt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Kt = "polygon(50% 
   }
 
   .hint {
-    margin: 40px 0 0;
+    margin: 26px 0 0;
     font-family: var(--nq-p-font-body);
-    font-size: 27px;
+    font-size: 24px;
     font-weight: 600;
     line-height: 1.4;
     text-align: center;

@@ -50,6 +50,7 @@ from .dao_rules import QuestDefinitionsDao
 from .dao_presence import PresenceOverridesDao, PresenceSchedulesDao
 from .db import NestQuestDatabase
 from .presence import (
+    MAX_PREVIEW_SCAN_DAYS,
     PresenceEngine,
     PresenceOverride,
     PresenceSchedule,
@@ -167,10 +168,14 @@ class NestQuestCoordinator(DataUpdateCoordinator):
                 schedules[child.id] = PresenceSchedule.decode(
                     child.id, schedule.anchor_date, schedule.pattern
                 )
-            todays = await PresenceOverridesDao(
+            window_end = today + datetime.timedelta(
+                days=MAX_PREVIEW_SCAN_DAYS
+            )
+            window_end_iso = window_end.isoformat()
+            ranged = await PresenceOverridesDao(
                 self.database
-            ).list_by_child_and_range(child.id, today_iso, today_iso)
-            if todays:
+            ).list_by_child_and_range(child.id, today_iso, window_end_iso)
+            if ranged:
                 # The engine validates MODEL objects, not DAO records;
                 # each record converts losslessly (the schema guarantees
                 # end >= start and a real is_present).
@@ -182,7 +187,7 @@ class NestQuestCoordinator(DataUpdateCoordinator):
                         record.is_present,
                         record.note,
                     )
-                    for record in todays
+                    for record in ranged
                 ]
         engine = PresenceEngine(schedules, overrides)
 

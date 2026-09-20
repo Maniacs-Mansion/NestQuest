@@ -218,6 +218,37 @@ async def test_coordinator_presence_resolves_schedule_and_override(
     assert snapshot.children[0].present is True
 
 
+async def test_coordinator_next_present_honours_future_override(
+    hass, make_entry
+) -> None:
+    entry = wire_entry_to_registry(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    coordinator = entry.runtime_data.coordinator
+    database = entry.runtime_data.database
+    await create_child(database, "Ada")
+    ada = (await list_children(database))[0]
+    today = datetime.date.today()
+    tomorrow = today + datetime.timedelta(days=1)
+    # Scheduled present tomorrow (single-day cycle, weekday set set below
+    # covers every day), but overridden absent tomorrow.
+    await PresenceSchedulesDao(database).upsert_by_child(
+        ada.id, 1, today.isoformat(), "0,1,2,3,4,5,6"
+    )
+    from custom_components.nestquest.dao_presence import (
+        PresenceOverridesDao,
+    )
+
+    await PresenceOverridesDao(database).create(
+        ada.id, tomorrow.isoformat(), tomorrow.isoformat(), False
+    )
+    snapshot = await coordinator._async_update_data()
+    child = snapshot.children[0]
+    assert child.present is True
+    assert child.next_present != tomorrow.isoformat(), (
+        "a future absent override must remove tomorrow from the preview"
+    )
+
+
 async def test_coordinator_derives_missed_for_past_due_open(
     hass, make_entry
 ) -> None:
