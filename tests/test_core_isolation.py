@@ -4,9 +4,10 @@ Every module under ``custom_components/nestquest/core/`` must be free of
 Home Assistant and must not climb out of the core package: no
 ``homeassistant`` import, no relative import with level > 1, no absolute
 import of ``custom_components.nestquest.<something other than core>``,
-and no bare ``import core`` / ``from core``.  This guards the
-storage-layer extraction (task d0b691d8) from regressing into a
-HA-coupled or integration-coupled bundle.
+and no bare ``import core`` / ``from core``.  This guards the whole
+core package — the storage-layer extraction (task d0b691d8) and the
+engines/business-layer extraction (task 510c1f78) — from regressing
+into a HA-coupled or integration-coupled bundle.
 """
 from __future__ import annotations
 

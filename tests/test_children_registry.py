@@ -141,7 +141,7 @@ def test_create_child_duplicate_name_allowed_and_warned(
     async def _body(database):
         first = await create_child(database, "Ada")
         with caplog.at_level(
-            logging.WARNING, logger="custom_components.nestquest.children"
+            logging.WARNING, logger="custom_components.nestquest.core.children"
         ):
             second = await create_child(database, "  ADA ")
         # Whitespace/case-normalised duplicate: allowed, both rows exist.
@@ -365,7 +365,7 @@ def test_create_child_concurrent_same_name_still_warns(tmp_path) -> None:
         try:
             await apply_migrations(database)
             logger = logging.getLogger(
-                "custom_components.nestquest.children"
+                "custom_components.nestquest.core.children"
             )
             seen: list[logging.LogRecord] = []
 

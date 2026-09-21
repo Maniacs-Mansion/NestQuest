@@ -13,6 +13,15 @@
   logger name (e.g. in `logger.yaml` or `configuration.yaml`) must
   update the entry to keep that level, as the old name no longer
   receives migration log output.
+- **Additional logger namespace moves:** the children registry and the
+  admin allowlist business layers now log under
+  `custom_components.nestquest.core.children` and
+  `custom_components.nestquest.core.admin_allowlist` respectively
+  (moved with the engines/business-layer extraction, task 510c1f78).
+  The parent `custom_components.nestquest` logger still catches both,
+  so users who tune the parent rather than the leaf names are
+  unaffected; only users who pinned a leaf logger name by its old
+  spelling need to update.
 
 ## Version 0.5.0 — 2026-09-18
 

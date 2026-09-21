@@ -364,11 +364,19 @@ def test_cycle_week_index_stable_across_three_year_boundaries() -> None:
 
 
 def test_module_uses_no_iso_week_functions() -> None:
-    """D-004 guardrail: cycle math never reads ISO week numbers."""
+    """D-004 guardrail: cycle math never reads ISO week numbers.
+
+    Scanned against ``custom_components.nestquest.core.presence`` (the
+    real presence model since task 510c1f78); the integration's
+    ``presence.py`` is now a re-export shim, so scanning the shim is
+    vacuous.  Mirrors ``test_recurrence_model.py``'s scan of
+    ``core.recurrence``.
+    """
     from pathlib import Path
 
     source = Path(
-        __import__("custom_components.nestquest.presence", fromlist=["__file__"]).__file__
+        __import__("custom_components.nestquest.core.presence",
+                   fromlist=["__file__"]).__file__
     ).read_text()
     assert "isocalendar" not in source
     assert "isoweek" not in source

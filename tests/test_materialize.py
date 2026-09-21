@@ -1475,7 +1475,7 @@ async def _collect_records(database, child_ids, start, end) -> set:
 
 
 def test_materialize_end_to_end_six_rule_types(tmp_path, monkeypatch) -> None:
-    import custom_components.nestquest.materialize as materialize_module
+    import custom_components.nestquest.core.materialize as materialize_module
 
     # Give each materialize run a DISTINCT batch stamp: production upserts
     # rewrite generated_at on every re-run, so a shared pinned stamp would
@@ -1487,6 +1487,9 @@ def test_materialize_end_to_end_six_rule_types(tmp_path, monkeypatch) -> None:
         stamps["n"] += 1
         return f"2026-06-01T00:00:{stamps['n']:02d}+00:00"
 
+    # The materialize() walk reads ``_now_stamp`` from its OWN module
+    # globals (now the HA-free core package), so the patch must target
+    # the core module, not the re-export shim the integration imports.
     monkeypatch.setattr(materialize_module, "_now_stamp", _distinct_stamp)
 
     async def _body(database):
