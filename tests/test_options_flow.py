@@ -113,7 +113,7 @@ def _open_allowlist_db(tmp_path, name):
 
     hass = MagicMock()
     hass.async_add_executor_job = AsyncMock(side_effect=(lambda fn, *a: fn(*a)))
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     _run(database.open(tmp_path / name))
     _run(apply_migrations(database))
     return database

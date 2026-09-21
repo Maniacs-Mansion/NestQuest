@@ -31,7 +31,7 @@ def _make_hass_mock():
 def _with_db(tmp_path, name):
     def _run_test(body):
         async def _main():
-            database = NestQuestDatabase(_make_hass_mock())
+            database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
             await database.open(tmp_path / name)
             try:
                 await apply_migrations(database)

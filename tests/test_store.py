@@ -23,7 +23,11 @@ def _make_hass(config_dir: Path, execute: bool = True):
     return hass
 
 
-def test_returns_absolute_path_from_config_path() -> None:
+def test_returns_absolute_path_from_config_path(monkeypatch) -> None:
+    # Path resolution only: the parent-dir mkdir is a side effect of
+    # core.store and is exercised elsewhere; suppress it here so the
+    # absolute-path assertion can run against /config (non-writable).
+    monkeypatch.setattr("core.store._ensure_dir", lambda path: None)
     hass = _make_hass(Path("/config"), execute=False)
     db_path = _run(store.async_get_db_path(hass))
     hass.config.path.assert_called_once_with(SQLITE_DB_FILENAME)
@@ -75,18 +79,36 @@ def test_existing_directory_does_not_fail(tmp_path) -> None:
     assert not db_path.exists()
 
 
-def test_mkdir_runs_via_executor(tmp_path) -> None:
+def test_mkdir_runs_off_event_loop(tmp_path, monkeypatch) -> None:
+    """The parent-directory mkdir runs off the event loop via asyncio.to_thread.
+
+    core.store is Home-Assistant-free, so it schedules the blocking
+    ``mkdir`` through :func:`asyncio.to_thread` rather than
+    ``hass.async_add_executor_job``; the integration shim delegates to it
+    unchanged.  The intent is preserved: the mkdir still runs off the
+    event loop, with ``_ensure_dir`` on the parent directory, and the
+    directory exists afterwards.
+    """
     nested = tmp_path / "deep" / "nested"
     hass = _make_hass(nested)
+    to_thread_calls: list = []
+    real_to_thread = asyncio.to_thread
+
+    def _trace_to_thread(fn, *args, **kwargs):
+        to_thread_calls.append((fn, args, kwargs))
+        return real_to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _trace_to_thread)
     db_path = _run(store.async_get_db_path(hass))
     assert nested.is_dir()
-    hass.async_add_executor_job.assert_called_once()
-    args, kwargs = hass.async_add_executor_job.call_args
-    fn, fn_args = args[0], args[1:]
+    assert len(to_thread_calls) == 1, (
+        f"expected one asyncio.to_thread call, got {len(to_thread_calls)}"
+    )
+    fn, fn_args, fn_kwargs = to_thread_calls[0]
     assert callable(fn)
     assert fn is store._ensure_dir
     assert fn_args == (nested,)
-    assert kwargs == {}
+    assert fn_kwargs == {}
     assert db_path.parent == nested
     assert db_path.parent.is_dir()
     assert not db_path.exists()
@@ -180,7 +202,8 @@ def test_no_file_creation_calls_in_store() -> None:
     assert "open(" not in source
 
 
-def test_container_style_path_resolves() -> None:
+def test_container_style_path_resolves(monkeypatch) -> None:
+    monkeypatch.setattr("core.store._ensure_dir", lambda path: None)
     hass = _make_hass(Path("/config"), execute=False)
     assert _run(store.async_get_db_path(hass)) == Path("/config") / SQLITE_DB_FILENAME
 

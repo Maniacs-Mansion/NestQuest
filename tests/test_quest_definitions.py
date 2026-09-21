@@ -50,7 +50,7 @@ NOW = "2026-09-14T12:00:00+00:00"
 
 
 async def _prepare(path) -> tuple:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     await database.open(path)
     await apply_migrations(database)
     children = ChildrenDao(database)
@@ -1396,7 +1396,7 @@ def test_set_quest_definition_active_concurrent_opposite_transitions_return_own(
         gate_open = asyncio.Event()
         a_started = asyncio.Event()
         hass = _gated_hass(armed, gate_open, a_started)
-        database = NestQuestDatabase(hass)
+        database = NestQuestDatabase(hass.async_add_executor_job)
         await database.open(tmp_path / "active-race.db")
         try:
             await apply_migrations(database)

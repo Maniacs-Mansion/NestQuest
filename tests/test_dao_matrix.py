@@ -118,7 +118,7 @@ class World:
 
 
 async def _world(path) -> World:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     await database.open(path)
     await apply_migrations(database)
     world = World(database)

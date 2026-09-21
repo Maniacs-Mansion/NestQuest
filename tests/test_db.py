@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from conftest import make_hass
+from conftest import executor_for, make_hass
 
-from custom_components.nestquest import db as db_module
+import core.db as db_module
 from custom_components.nestquest.db import NestQuestDatabase
 
 
@@ -29,7 +29,7 @@ def _make_hass_mock():
 
 def _open_db(path) -> tuple[NestQuestDatabase, MagicMock]:
     hass = _make_hass_mock()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     _run(database.open(path))
     return database, hass
 
@@ -55,7 +55,7 @@ def test_open_enables_foreign_key_enforcement(tmp_path) -> None:
 
 def test_open_delegates_connection_to_executor(tmp_path) -> None:
     hass = _make_hass_mock()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     _run(database.open(tmp_path / "exec.db"))
     first_call = hass.async_add_executor_job.call_args_list[0]
     assert callable(first_call.args[0])
@@ -65,7 +65,7 @@ def test_open_delegates_connection_to_executor(tmp_path) -> None:
 def test_open_twice_returns_same_wrapper_without_second_connect(tmp_path) -> None:
     path = tmp_path / "once.db"
     hass = _make_hass_mock()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     first = _run(database.open(path))
     second = _run(database.open(path))
     assert first is database
@@ -111,7 +111,7 @@ def test_every_method_routes_sqlite3_through_executor(tmp_path) -> None:
 async def test_every_wrapper_call_awaits_executor_job(tmp_path) -> None:
     """The executor surface is awaited per wrapper call on a live loop."""
     hass = _make_hass_mock()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     await database.open(tmp_path / "loop.db")
 
     await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -129,7 +129,7 @@ async def test_every_wrapper_call_awaits_executor_job(tmp_path) -> None:
 async def test_public_methods_return_only_plain_data(tmp_path) -> None:
     """execute/execute_many return plain dataclasses, never sqlite3 objects."""
     hass = _make_hass_mock()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     await database.open(tmp_path / "plain.db")
     result = await database.execute(
         "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"
@@ -156,7 +156,7 @@ async def test_public_methods_return_only_plain_data(tmp_path) -> None:
 async def test_no_sqlite3_call_on_event_loop_with_real_executor(tmp_path) -> None:
     """With the conftest hass (real run_in_executor), queries still succeed."""
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     await database.open(tmp_path / "real.db")
     await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
     assert await database.fetch_one("SELECT 1") == (1,)
@@ -210,7 +210,7 @@ async def test_real_executor_never_touches_loop_thread(tmp_path, monkeypatch) ->
     monkeypatch.setattr(db_module.sqlite3, "connect", _traced_connect)
 
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     await database.open(tmp_path / "threads.db")
     await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
     await database.execute("INSERT INTO t (id) VALUES (?)", (1,))
@@ -250,7 +250,9 @@ def test_db_sqlite3_calls_only_inside_executor_delegated_functions() -> None:
     """Every sqlite3.* call in db.py sits inside an executor-delegating function.
 
     A function is executor-delegating when it (or, for nested closures, any of
-    its enclosing functions) passes work to ``hass.async_add_executor_job``.
+    its enclosing functions) passes work to the wrapper's ``self._executor``
+    callable (the Home-Assistant-free contract that mirrors
+    ``hass.async_add_executor_job``).
     """
     source = Path(db_module.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(db_module.__file__))
@@ -262,7 +264,7 @@ def test_db_sqlite3_calls_only_inside_executor_delegated_functions() -> None:
         and any(
             isinstance(sub, ast.Call)
             and isinstance(sub.func, ast.Attribute)
-            and sub.func.attr == "async_add_executor_job"
+            and sub.func.attr == "_executor"
             for sub in ast.walk(node)
         )
     }
@@ -375,7 +377,7 @@ async def test_commit_failure_rolls_back_and_next_transaction_works(
     must run cleanly.
     """
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     await database.open(tmp_path / "deferred.db")
     await database.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
     await database.execute(
@@ -416,7 +418,7 @@ async def test_cancel_during_open_closes_abandoned_connection(tmp_path) -> None:
     propagates, and a follow-up open() must succeed cleanly.
     """
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(executor_for(hass))
 
     open_started = asyncio.Event()
     release_open = asyncio.Event()
@@ -481,7 +483,7 @@ async def test_cancel_during_begin_settles_then_rolls_back(tmp_path) -> None:
     clear its state, and stay usable for the next transaction.
     """
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(executor_for(hass))
     await database.open(tmp_path / "cancel-begin.db")
     await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
     await database.execute("INSERT INTO t (name) VALUES (?)", ("before",))
@@ -543,7 +545,7 @@ async def test_cancel_during_commit_settles_then_propagates_cancellation(
     transaction, and the wrapper must stay usable.
     """
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(executor_for(hass))
     await database.open(tmp_path / "cancel-commit.db")
     await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
 
@@ -603,7 +605,7 @@ async def test_cancel_during_in_transaction_execute_settles_then_rolls_back(
     not persist.
     """
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(executor_for(hass))
     await database.open(tmp_path / "cancel-execute.db")
     await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
     await database.execute("INSERT INTO t (name) VALUES (?)", ("before",))
@@ -666,7 +668,7 @@ async def test_commit_and_rollback_failures_are_both_preserved(tmp_path) -> None
     commit failure behind the rollback failure.
     """
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(executor_for(hass))
     await database.open(tmp_path / "both-fail.db")
     await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
 
@@ -698,14 +700,14 @@ async def test_commit_and_rollback_failures_are_both_preserved(tmp_path) -> None
 async def test_transaction_persists_across_connections(tmp_path) -> None:
     """A committed transaction is visible to a brand-new connection."""
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     await database.open(tmp_path / "persist.db")
     await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
     async with database.transaction():
         await database.execute("INSERT INTO t (name) VALUES (?)", ("kept",))
     await database.close()
 
-    other = NestQuestDatabase(hass)
+    other = NestQuestDatabase(hass.async_add_executor_job)
     await other.open(tmp_path / "persist.db")
     assert await other.fetch_all("SELECT name FROM t") == [("kept",)]
     await other.close()
@@ -726,7 +728,7 @@ async def test_concurrent_writers_do_not_interleave_commits(tmp_path) -> None:
     while a transaction is open queue behind it on the wrapper lock.
     """
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     await database.open(tmp_path / "serial.db")
     await database.execute("CREATE TABLE t (kind TEXT, seq INTEGER)")
     tx_rounds, writers, writer_rounds = 6, 5, 8
@@ -766,7 +768,7 @@ async def test_concurrent_writers_do_not_interleave_commits(tmp_path) -> None:
 async def test_transaction_span_excludes_concurrent_transaction(tmp_path) -> None:
     """A second transaction caller is rejected with a clear error."""
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     await database.open(tmp_path / "reject.db")
     await database.execute("CREATE TABLE t (id INTEGER)")
 
@@ -791,7 +793,7 @@ async def test_transaction_span_excludes_concurrent_transaction(tmp_path) -> Non
 async def test_transaction_blocks_other_statements_until_commit(tmp_path) -> None:
     """A statement issued during an open transaction queues behind it."""
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     await database.open(tmp_path / "block.db")
     await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
 
@@ -830,7 +832,7 @@ async def test_concurrent_transaction_is_rejected_with_clear_error(
 ) -> None:
     """A second concurrent transaction() gets a clear RuntimeError."""
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     await database.open(tmp_path / "concurrent-tx.db")
     await database.execute("CREATE TABLE t (id INTEGER)")
 
@@ -853,7 +855,7 @@ async def test_concurrent_transaction_is_rejected_with_clear_error(
 async def test_close_waits_for_in_flight_transaction(tmp_path) -> None:
     """close() serializes: an open transaction finishes before shutdown."""
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     await database.open(tmp_path / "closerace.db")
     await database.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
 
@@ -875,7 +877,7 @@ async def test_close_waits_for_in_flight_transaction(tmp_path) -> None:
     await asyncio.gather(txn_task, close_task)
     assert database.connected is False
 
-    witness = NestQuestDatabase(hass)
+    witness = NestQuestDatabase(hass.async_add_executor_job)
     await witness.open(tmp_path / "closerace.db")
     assert await witness.fetch_all("SELECT name FROM t") == [("kept",)]
     await witness.close()
@@ -886,7 +888,7 @@ async def test_close_during_transaction_from_same_task_is_rejected(
 ) -> None:
     """close() inside its own transaction body raises instead of deadlocking."""
     hass, _registry = make_hass()
-    database = NestQuestDatabase(hass)
+    database = NestQuestDatabase(hass.async_add_executor_job)
     await database.open(tmp_path / "selfclose.db")
     await database.execute("CREATE TABLE t (id INTEGER)")
     with pytest.raises(RuntimeError, match="transaction"):

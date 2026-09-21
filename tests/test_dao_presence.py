@@ -33,7 +33,7 @@ NOW = "2026-09-14T12:00:00+00:00"
 
 
 async def _prepare(path) -> tuple:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     await database.open(path)
     await apply_migrations(database)
     schedules = PresenceSchedulesDao(database)
@@ -196,7 +196,7 @@ def test_upsert_concurrent_same_child_serializes(tmp_path) -> None:
             return fn(*args)
 
         hass.async_add_executor_job = _gated_executor
-        database = NestQuestDatabase(hass)
+        database = NestQuestDatabase(hass.async_add_executor_job)
         await database.open(tmp_path / "upsert-race.db")
         try:
             await apply_migrations(database)
@@ -766,7 +766,7 @@ def test_override_create_racing_conflicts_serialize(tmp_path) -> None:
             return fn(*args)
 
         hass.async_add_executor_job = _gated_executor
-        database = NestQuestDatabase(hass)
+        database = NestQuestDatabase(hass.async_add_executor_job)
         await database.open(tmp_path / "override-race.db")
         try:
             await apply_migrations(database)

@@ -71,7 +71,7 @@ D20 = _future_day(20)
 
 
 async def _prepare(path) -> tuple:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     await database.open(path)
     await apply_migrations(database)
     children = ChildrenDao(database)
@@ -352,7 +352,7 @@ def test_upsert_no_past_check_uses_execution_date_not_call_date(
 
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(
-            "custom_components.nestquest.dao_instances.datetime",
+            "core.dao_instances.datetime",
             _ShiftingModule(),
         )
         try:
@@ -362,7 +362,7 @@ def test_upsert_no_past_check_uses_execution_date_not_call_date(
             # the lock, the IN-LOCK re-check sees tomorrow and must
             # reject the insert — the stale call-date pre-check alone
             # would have let it through.
-            import custom_components.nestquest.dao_instances as mod
+            import core.dao_instances as mod
 
             async def _lock_holder():
                 # Hold the CONNECTION lock across a transaction until
@@ -402,7 +402,7 @@ def test_upsert_no_past_check_uses_execution_date_not_call_date(
         return None
 
     async def _main():
-        database = NestQuestDatabase(_make_hass_mock())
+        database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
         await database.open(tmp_path / "upsert-rollover.db")
         try:
             await apply_migrations(database)
@@ -1141,7 +1141,7 @@ def test_completion_events_dao_instance_has_no_mutation_capability(
 def test_append_concurrent_events_serialize(tmp_path) -> None:
     """Concurrent appends for the same instance all land, in order."""
     async def _main():
-        database = NestQuestDatabase(_make_hass_mock())
+        database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
         await database.open(tmp_path / "append-race.db")
         try:
             await apply_migrations(database)

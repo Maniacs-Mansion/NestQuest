@@ -30,7 +30,7 @@ def _make_hass_mock():
 
 
 def _open_db(path) -> NestQuestDatabase:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     _run(database.open(path))
     _run(apply_migrations(database))
     return database
@@ -319,7 +319,7 @@ def test_reorder_concurrent_calls_serialize(tmp_path) -> None:
     RuntimeError.
     """
     async def _main() -> None:
-        database = NestQuestDatabase(_make_hass_mock())
+        database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
         await database.open(tmp_path / "reorder-concurrent.db")
         try:
             await apply_migrations(database)
@@ -377,7 +377,7 @@ def test_admin_add_concurrent_calls_are_idempotent(tmp_path) -> None:
     'see no row' and one of them raise IntegrityError.
     """
     async def _main() -> None:
-        database = NestQuestDatabase(_make_hass_mock())
+        database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
         await database.open(tmp_path / "admin-race.db")
         try:
             await apply_migrations(database)

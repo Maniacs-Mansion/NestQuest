@@ -42,7 +42,7 @@ NOW = "2026-09-14T12:00:00+00:00"
 
 
 async def _prepare(path) -> tuple:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     await database.open(path)
     await apply_migrations(database)
     rules = ScheduleRulesDao(database)
@@ -325,7 +325,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
     create's validation pauses mid-flight before the delete starts.
     """
     async def _main(order: str):
-        database = NestQuestDatabase(_make_hass_mock())
+        database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
         await database.open(tmp_path / f"rule-delete-race-{order}.db")
         try:
             await apply_migrations(database)

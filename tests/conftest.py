@@ -829,6 +829,24 @@ def make_hass() -> tuple:
     return hass, registry
 
 
+def executor_for(hass):
+    """Return a dynamic executor callable backed by ``hass.async_add_executor_job``.
+
+    The wrapper resolves ``hass.async_add_executor_job`` on every call, so a
+    test that swaps it after constructing the database (to gate or fail
+    specific jobs) is observed without rebuilding the wrapper — mirroring
+    the pre-extraction db.py, which read the attribute dynamically off
+    ``hass``.  Use this for cancellation/gating tests that reassign
+    ``hass.async_add_executor_job``; plain call sites can pass
+    ``hass.async_add_executor_job`` directly.
+    """
+
+    async def _executor(fn, *args, **kwargs):
+        return await hass.async_add_executor_job(fn, *args, **kwargs)
+
+    return _executor
+
+
 @pytest.fixture
 async def hass():
     """Provide a standard-shaped hass fixture bound to the running test loop.

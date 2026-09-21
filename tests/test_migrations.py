@@ -37,7 +37,7 @@ def _make_hass_mock():
 
 
 def _open_db(path) -> NestQuestDatabase:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     _run(database.open(path))
     return database
 
@@ -707,7 +707,7 @@ def test_noop_run_logs_no_migration(caplog, tmp_path) -> None:
     try:
         _migrate(database)
         caplog.clear()
-        with caplog.at_level(logging.INFO, logger="custom_components.nestquest.migrations"):
+        with caplog.at_level(logging.INFO, logger="core.migrations"):
             _migrate(database)
         migrated = [
             r for r in caplog.records if "migrated" in r.getMessage().lower()
@@ -722,7 +722,7 @@ def test_noop_run_is_logged_at_debug_level(caplog, tmp_path) -> None:
     try:
         _migrate(database)
         caplog.clear()
-        with caplog.at_level(logging.DEBUG, logger="custom_components.nestquest.migrations"):
+        with caplog.at_level(logging.DEBUG, logger="core.migrations"):
             _migrate(database)
         assert any(
             f"already at version {len(MIGRATIONS)}" in r.getMessage()
@@ -983,7 +983,7 @@ def test_concurrent_runners_serialize_and_apply_once(tmp_path) -> None:
     results: dict[str, int] = {}
 
     async def _main(tmp_name: str) -> None:
-        database = NestQuestDatabase(_make_hass_mock())
+        database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
         await database.open(tmp_name)
         try:
             # Start A, yield so it acquires the lock and enters its

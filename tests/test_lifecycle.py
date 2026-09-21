@@ -472,7 +472,7 @@ async def test_setup_backfills_instances_over_horizon(hass, make_entry) -> None:
     # Seed the database BEFORE setup: a restart reopens an existing file that
     # already holds definitions.  The startup backfill must pick them up.
     db_path = await async_get_db_path(hass)
-    pre = NestQuestDatabase(hass)
+    pre = NestQuestDatabase(hass.async_add_executor_job)
     await pre.open(db_path)
     await apply_migrations(pre)
     child_id = await _seed_daily_child_and_definition(pre, _local_today(hass))
@@ -499,7 +499,7 @@ async def test_setup_backfills_configured_horizon_days(hass, make_entry) -> None
     from custom_components.nestquest.store import async_get_db_path
 
     db_path = await async_get_db_path(hass)
-    pre = NestQuestDatabase(hass)
+    pre = NestQuestDatabase(hass.async_add_executor_job)
     await pre.open(db_path)
     await apply_migrations(pre)
     child_id = await _seed_daily_child_and_definition(pre, _local_today(hass))
