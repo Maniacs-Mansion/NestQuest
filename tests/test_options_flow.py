@@ -18,6 +18,20 @@ from custom_components.nestquest.const import (
     CONF_DAY_ROLLOVER_TIME,
     CONF_HORIZON_DAYS,
     CONF_PANEL_IDLE_TIMEOUT,
+    CONF_UPDATE_INTERVAL,
+    CONF_AFTERNOON_REMINDER_ENABLED,
+    CONF_AFTERNOON_REMINDER_TIME,
+    CONF_CELEBRATION_ENABLED,
+    CONF_END_OF_DAY_REPORT_ENABLED,
+    CONF_END_OF_DAY_REPORT_TIME,
+    CONF_MORNING_SUMMARY_ENABLED,
+    CONF_MORNING_SUMMARY_TIME,
+    CONF_NOTIFY_TARGET,
+    DEFAULT_AFTERNOON_REMINDER_TIME,
+    DEFAULT_AUTOMATION_ENABLED,
+    DEFAULT_END_OF_DAY_REPORT_TIME,
+    DEFAULT_MORNING_SUMMARY_TIME,
+    DEFAULT_UPDATE_INTERVAL,
     DEFAULT_DAY_ROLLOVER_TIME,
     DEFAULT_HORIZON_DAYS,
     DEFAULT_PANEL_IDLE_TIMEOUT,
@@ -32,6 +46,22 @@ VALID_INPUT = {
     CONF_HORIZON_DAYS: 7,
     CONF_DAY_ROLLOVER_TIME: "03:30",
     CONF_PANEL_IDLE_TIMEOUT: 60,
+}
+
+#: What a schema-validated submit produces from a bare VALID_INPUT on a
+#: fresh entry: the Feature 10 refresh interval and the Feature 11
+#: notification section fill from their defaults.
+FULL_INPUT = {
+    **VALID_INPUT,
+    CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
+    CONF_NOTIFY_TARGET: "",
+    CONF_MORNING_SUMMARY_TIME: DEFAULT_MORNING_SUMMARY_TIME,
+    CONF_AFTERNOON_REMINDER_TIME: DEFAULT_AFTERNOON_REMINDER_TIME,
+    CONF_END_OF_DAY_REPORT_TIME: DEFAULT_END_OF_DAY_REPORT_TIME,
+    CONF_MORNING_SUMMARY_ENABLED: DEFAULT_AUTOMATION_ENABLED,
+    CONF_AFTERNOON_REMINDER_ENABLED: DEFAULT_AUTOMATION_ENABLED,
+    CONF_END_OF_DAY_REPORT_ENABLED: DEFAULT_AUTOMATION_ENABLED,
+    CONF_CELEBRATION_ENABLED: DEFAULT_AUTOMATION_ENABLED,
 }
 
 
@@ -129,7 +159,7 @@ def test_options_flow_submits_through_2024_6_surface() -> None:
     result = _run(handler.async_step_init(dict(VALID_INPUT)))
     assert result["type"] == "create_entry"
     assert result["title"] == "NestQuest"
-    assert result["data"] == VALID_INPUT
+    assert result["data"] == FULL_INPUT
 
 
 def test_options_flow_shows_form_initially() -> None:
@@ -208,6 +238,11 @@ def test_options_flow_schema_applies_stored_defaults() -> None:
             CONF_HORIZON_DAYS: 21,
             CONF_DAY_ROLLOVER_TIME: "05:45",
             CONF_PANEL_IDLE_TIMEOUT: 120,
+            CONF_UPDATE_INTERVAL: 90,
+            CONF_NOTIFY_TARGET: "notify.mobile_app_test",
+            CONF_MORNING_SUMMARY_TIME: "07:00",
+            CONF_AFTERNOON_REMINDER_TIME: "14:00",
+            CONF_END_OF_DAY_REPORT_TIME: "21:30",
         }
     )
     result = _run(_make_flow(entry).async_step_init(None))
@@ -215,6 +250,15 @@ def test_options_flow_schema_applies_stored_defaults() -> None:
         CONF_HORIZON_DAYS: 21,
         CONF_DAY_ROLLOVER_TIME: "05:45",
         CONF_PANEL_IDLE_TIMEOUT: 120,
+        CONF_UPDATE_INTERVAL: 90,
+        CONF_NOTIFY_TARGET: "notify.mobile_app_test",
+        CONF_MORNING_SUMMARY_TIME: "07:00",
+        CONF_AFTERNOON_REMINDER_TIME: "14:00",
+        CONF_END_OF_DAY_REPORT_TIME: "21:30",
+        CONF_MORNING_SUMMARY_ENABLED: True,
+        CONF_AFTERNOON_REMINDER_ENABLED: True,
+        CONF_END_OF_DAY_REPORT_ENABLED: True,
+        CONF_CELEBRATION_ENABLED: True,
         CONF_ADMIN_USER_IDS: [],
     }
 
@@ -282,18 +326,14 @@ def test_options_flow_rejects_invalid_idle_timeout(bad_timeout) -> None:
     assert result["errors"] == {CONF_PANEL_IDLE_TIMEOUT: "invalid"}
 
 
-def test_options_flow_creates_entry_with_three_keys() -> None:
-    """A valid submit creates an entry with exactly the three validated keys."""
+def test_options_flow_creates_entry_with_four_keys() -> None:
+    """A valid submit creates an entry with exactly the four validated keys."""
     flow = _make_flow(_make_entry())
     result = _run(flow.async_step_init(dict(VALID_INPUT)))
     assert result["type"] == "create_entry"
     assert result["title"] == "NestQuest"
-    assert set(result["data"]) == {
-        CONF_HORIZON_DAYS,
-        CONF_DAY_ROLLOVER_TIME,
-        CONF_PANEL_IDLE_TIMEOUT,
-    }
-    assert result["data"] == VALID_INPUT
+    assert set(result["data"]) == set(FULL_INPUT)
+    assert result["data"] == FULL_INPUT
 
 
 def test_options_flow_create_entry_data_lands_in_entry_options_and_reloads_once() -> None:
@@ -316,7 +356,7 @@ def test_options_flow_create_entry_data_lands_in_entry_options_and_reloads_once(
     _run(registry.dispatch_options_update(entry))
     assert hass.config_entries.async_reload.call_count == 1
     assert registry.reloaded == [entry.entry_id]
-    assert entry.options == VALID_INPUT
+    assert entry.options == FULL_INPUT
 
 
 def test_options_flow_validation_never_raises() -> None:
@@ -635,3 +675,127 @@ def test_options_flow_omitted_picker_carries_allowlist_forward(
         assert result["data"][CONF_HORIZON_DAYS] == VALID_INPUT[CONF_HORIZON_DAYS]
     finally:
         _run(database.close())
+
+
+def test_options_flow_notification_section_defaults() -> None:
+    """A bare submit fills the notification section from const defaults:
+    08:00 / 15:00 / 20:00 — the report deliberately BEFORE the midnight
+    rollover sweep — an empty notify target, and all toggles enabled."""
+    flow = _make_flow(_make_entry())
+    result = _run(flow.async_step_init(dict(VALID_INPUT)))
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_MORNING_SUMMARY_TIME] == "08:00"
+    assert result["data"][CONF_AFTERNOON_REMINDER_TIME] == "15:00"
+    assert result["data"][CONF_END_OF_DAY_REPORT_TIME] == "20:00"
+    assert result["data"][CONF_NOTIFY_TARGET] == ""
+    for toggle in (
+        CONF_MORNING_SUMMARY_ENABLED,
+        CONF_AFTERNOON_REMINDER_ENABLED,
+        CONF_END_OF_DAY_REPORT_ENABLED,
+        CONF_CELEBRATION_ENABLED,
+    ):
+        assert result["data"][toggle] is True
+
+
+def test_options_flow_notification_times_must_be_strict_hh_mm() -> None:
+    flow = _make_flow(_make_entry())
+    for bad_time in ("9:00", "25:00", "08:0", "08-00", 800):
+        result = _run(
+            flow.async_step_init(
+                {
+                    **VALID_INPUT,
+                    CONF_MORNING_SUMMARY_TIME: bad_time,
+                }
+            )
+        )
+        assert result["type"] == "form"
+        assert result["errors"] == {CONF_MORNING_SUMMARY_TIME: "invalid_time"}
+
+
+def test_options_flow_notify_target_validation() -> None:
+    """The empty target is VALID (it is the shipped default and must be
+    savable); only malformed non-empty values reject."""
+    flow = _make_flow(_make_entry())
+    # The empty default saves cleanly.
+    result = _run(
+        flow.async_step_init(
+            {**VALID_INPUT, CONF_NOTIFY_TARGET: ""}
+        )
+    )
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_NOTIFY_TARGET] == ""
+
+    # Malformed non-empty values reject.
+    for bad_target in ("  notify.x  ", "   ", 42):
+        flow = _make_flow(_make_entry())
+        result = _run(
+            flow.async_step_init(
+                {
+                    **VALID_INPUT,
+                    CONF_NOTIFY_TARGET: bad_target,
+                }
+            )
+        )
+        assert result["type"] == "form"
+        assert result["errors"] == {CONF_NOTIFY_TARGET: "invalid"}
+
+
+def test_options_flow_toggles_must_be_real_booleans() -> None:
+    flow = _make_flow(_make_entry())
+    result = _run(
+        flow.async_step_init(
+            {
+                **VALID_INPUT,
+                CONF_CELEBRATION_ENABLED: "on",
+            }
+        )
+    )
+    assert result["type"] == "form"
+    assert result["errors"] == {CONF_CELEBRATION_ENABLED: "invalid"}
+
+
+def test_options_flow_notification_stored_values_round_trip() -> None:
+    """Stored notification settings are the form's defaults and a raw
+    submit without them keeps the stored values."""
+    entry = _make_entry(
+        options={
+            **VALID_INPUT,
+            CONF_UPDATE_INTERVAL: 90,
+            CONF_NOTIFY_TARGET: "notify.mobile_app_dad",
+            CONF_MORNING_SUMMARY_TIME: "07:15",
+            CONF_AFTERNOON_REMINDER_TIME: "16:45",
+            CONF_END_OF_DAY_REPORT_TIME: "21:00",
+            CONF_MORNING_SUMMARY_ENABLED: False,
+            CONF_AFTERNOON_REMINDER_ENABLED: True,
+            CONF_END_OF_DAY_REPORT_ENABLED: False,
+            CONF_CELEBRATION_ENABLED: True,
+        }
+    )
+    flow = _make_flow(entry)
+    form = _run(flow.async_step_init(None))
+    schema_defaults = form["data_schema"]({})
+    assert schema_defaults[CONF_NOTIFY_TARGET] == "notify.mobile_app_dad"
+    assert schema_defaults[CONF_MORNING_SUMMARY_TIME] == "07:15"
+    assert schema_defaults[CONF_END_OF_DAY_REPORT_ENABLED] is False
+
+    # A raw submit carrying only the legacy keys keeps the stored
+    # notification settings.
+    result = _run(flow.async_step_init(dict(VALID_INPUT)))
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_NOTIFY_TARGET] == "notify.mobile_app_dad"
+    assert result["data"][CONF_MORNING_SUMMARY_TIME] == "07:15"
+    assert result["data"][CONF_MORNING_SUMMARY_ENABLED] is False
+    assert result["data"][CONF_CELEBRATION_ENABLED] is True
+
+
+def test_options_flow_no_hard_coded_personal_target_in_source() -> None:
+    """The notify target's DEFAULT is the empty string: the household
+    fills their own service name, and no personal target ships as a
+    value anywhere in the const/flow defaults."""
+    from custom_components.nestquest import const
+
+    assert getattr(const, "CONF_NOTIFY_TARGET", None) == "notify_target"
+    # No const default carries a concrete notify service.
+    assert const.__dict__.get("DEFAULT_NOTIFY_TARGET", "") == ""
+    form = _run(_make_flow(_make_entry()).async_step_init(None))
+    assert form["data_schema"]({})[CONF_NOTIFY_TARGET] == ""

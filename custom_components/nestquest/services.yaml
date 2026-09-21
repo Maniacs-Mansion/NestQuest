@@ -10,3 +10,317 @@ regenerate:
     and the startup backfill. Safe to call at any time: a re-run refreshes the
     same rows instead of duplicating them, and completed instances are never
     touched.
+
+complete_quest:
+  name: Complete quest
+  description: Mark a quest instance as completed.
+  fields:
+    instance_id:
+      name: Instance ID
+      description: The quest instance to complete.
+      required: true
+      selector:
+        number:
+          mode: box
+    actor:
+      name: Actor
+      description: Who completed the quest (panel or user).
+      required: true
+      selector:
+        select:
+          options:
+            - panel
+            - user
+    actor_child_id:
+      name: Actor child ID
+      description: The tapped child profile. Required when actor is panel.
+      required: false
+      selector:
+        number:
+          mode: box
+    actor_user_id:
+      name: Actor user ID
+      description: Home Assistant user id when actor is user and no call context is present.
+      required: false
+      selector:
+        text:
+
+uncomplete_quest:
+  name: Uncomplete quest
+  description: Undo a quest instance completion.
+  fields:
+    instance_id:
+      name: Instance ID
+      description: The quest instance to uncomplete.
+      required: true
+      selector:
+        number:
+          mode: box
+    actor:
+      name: Actor
+      description: Who is undoing the completion (panel or user).
+      required: true
+      selector:
+        select:
+          options:
+            - panel
+            - user
+    actor_child_id:
+      name: Actor child ID
+      description: The tapped child profile. Required when actor is panel.
+      required: false
+      selector:
+        number:
+          mode: box
+    actor_user_id:
+      name: Actor user ID
+      description: Home Assistant user id when actor is user and no call context is present.
+      required: false
+      selector:
+        text:
+
+create_quest_definition:
+  name: Create quest definition
+  description: Create a quest definition with its schedule rule, assignees and windows.
+  fields:
+    title:
+      name: Title
+      description: Display title for the quest.
+      required: true
+      selector:
+        text:
+    rule:
+      name: Rule
+      description: Recurrence rule as a mapping (rule_type plus shape fields).
+      required: true
+      selector:
+        object:
+    assignee_child_ids:
+      name: Assignee child IDs
+      description: Child ids this definition is assigned to.
+      required: true
+      selector:
+        object:
+    windows:
+      name: Windows
+      description: Day windows (morning, afternoon, evening), optionally with a due time.
+      required: true
+      selector:
+        object:
+    description:
+      name: Description
+      description: Optional longer description.
+      required: false
+      selector:
+        text:
+    icon:
+      name: Icon
+      description: Optional icon name.
+      required: false
+      selector:
+        text:
+
+update_quest_definition:
+  name: Update quest definition
+  description: Edit a quest definition's title, description, icon, rule or windows.
+  fields:
+    definition_id:
+      name: Definition ID
+      description: The quest definition to update.
+      required: true
+      selector:
+        number:
+          mode: box
+    title:
+      name: Title
+      description: Replacement display title.
+      required: false
+      selector:
+        text:
+    description:
+      name: Description
+      description: Replacement description, or null to clear.
+      required: false
+      selector:
+        text:
+    icon:
+      name: Icon
+      description: Replacement icon, or null to clear.
+      required: false
+      selector:
+        text:
+    rule:
+      name: Rule
+      description: Replacement recurrence rule as a mapping.
+      required: false
+      selector:
+        object:
+    windows:
+      name: Windows
+      description: Replacement day windows.
+      required: false
+      selector:
+        object:
+
+set_quest_definition_active:
+  name: Set quest definition active
+  description: Deactivate or reactivate a quest definition.
+  fields:
+    definition_id:
+      name: Definition ID
+      description: The quest definition to update.
+      required: true
+      selector:
+        number:
+          mode: box
+    is_active:
+      name: Active
+      description: Whether the definition should generate future instances.
+      required: true
+      selector:
+        boolean:
+
+set_presence_pattern:
+  name: Set presence pattern
+  description: Upsert a child's repeating presence schedule.
+  fields:
+    child_id:
+      name: Child ID
+      description: The child whose schedule is being set.
+      required: true
+      selector:
+        number:
+          mode: box
+    cycle_length_weeks:
+      name: Cycle length weeks
+      description: Number of weeks in the repeating cycle (1 to 4).
+      required: true
+      selector:
+        number:
+          mode: box
+          min: 1
+          max: 4
+    anchor_date:
+      name: Anchor date
+      description: Cycle anchor as a YYYY-MM-DD date.
+      required: true
+      selector:
+        date:
+    pattern:
+      name: Pattern
+      description: Mapping of week index to present weekday ints (Monday is 0).
+      required: true
+      selector:
+        object:
+
+create_presence_override:
+  name: Create presence override
+  description: Create a date-range presence override for a child.
+  fields:
+    child_id:
+      name: Child ID
+      description: The child the override applies to.
+      required: true
+      selector:
+        number:
+          mode: box
+    start_date:
+      name: Start date
+      description: Inclusive start date (YYYY-MM-DD).
+      required: true
+      selector:
+        date:
+    end_date:
+      name: End date
+      description: Inclusive end date (YYYY-MM-DD).
+      required: true
+      selector:
+        date:
+    is_present:
+      name: Present
+      description: Whether the child is present for this range.
+      required: true
+      selector:
+        boolean:
+    note:
+      name: Note
+      description: Optional note stored with the override.
+      required: false
+      selector:
+        text:
+
+delete_presence_override:
+  name: Delete presence override
+  description: Delete a presence override by id.
+  fields:
+    override_id:
+      name: Override ID
+      description: The override to delete.
+      required: true
+      selector:
+        number:
+          mode: box
+
+export_history_csv:
+  name: Export history CSV
+  description: Export completion history as CSV. Not implemented until Feature 13.
+
+manage_child:
+  name: Manage child
+  description: Create, edit, activate or reorder child profiles.
+  fields:
+    action:
+      name: Action
+      description: create, edit, set_active, or reorder.
+      required: true
+      selector:
+        select:
+          options:
+            - create
+            - edit
+            - set_active
+            - reorder
+    child_id:
+      name: Child ID
+      description: Required for edit and set_active.
+      required: false
+      selector:
+        number:
+          mode: box
+    display_name:
+      name: Display name
+      description: Required for create; optional for edit.
+      required: false
+      selector:
+        text:
+    colour:
+      name: Colour
+      description: Optional colour string.
+      required: false
+      selector:
+        text:
+    avatar_ref:
+      name: Avatar
+      description: Optional avatar reference.
+      required: false
+      selector:
+        text:
+    sort_order:
+      name: Sort order
+      description: Optional panel sort order.
+      required: false
+      selector:
+        number:
+          mode: box
+    is_active:
+      name: Active
+      description: Required for set_active.
+      required: false
+      selector:
+        boolean:
+    ordered_ids:
+      name: Ordered IDs
+      description: Complete permutation of child ids. Required for reorder.
+      required: false
+      selector:
+        object:

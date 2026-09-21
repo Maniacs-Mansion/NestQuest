@@ -20,17 +20,23 @@ from .const import (
     CONF_ADMIN_USER_IDS,
     CONF_DAY_ROLLOVER_TIME,
     CONF_HORIZON_DAYS,
+    CONF_UPDATE_INTERVAL,
     DEFAULT_DAY_ROLLOVER_TIME,
     DEFAULT_HORIZON_DAYS,
+    DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     LOGGER,
-    SERVICE_REGENERATE,
+    PLATFORMS,
 )
+from .frontend import async_register_frontend
+from .coordinator import NestQuestCoordinator
 from .db import NestQuestDatabase
 from .materialize import materialize as _materialize_run
 from .migrations import apply_migrations
+from .services import async_deregister_services, async_register_services
 from .store import async_get_db_path
 from .admin_allowlist import seed_setup_admin
+from .sweep import run_missed_sweep
 
 _LOGGER = LOGGER
 
@@ -238,6 +244,7 @@ class NestQuestRuntimeData:
     database: NestQuestDatabase
     remove_update_listener: Callable[[], Any]
     remove_time_change_listener: Callable[[], Any]
+    coordinator: Any = None
 
 
 async def _async_owner_user_ids(hass: HomeAssistant) -> list[str]:
@@ -322,18 +329,23 @@ def _register_day_rollover_listener(
     database: NestQuestDatabase,
     options: dict[str, Any],
 ) -> Callable[[], Any]:
-    """Register the daily materialization listener and return its remover.
+    """Register the daily rollover listener and return its remover.
 
-    Fires once per day at the configured local ``day_rollover_time`` and
-    materializes the rolling horizon ``[today, today + horizon_days]``
-    through the shared :func:`_run_horizon_materialization` path, using the
-    entry's configured (validated) ``horizon_days``.
+    Fires once per day at the configured local ``day_rollover_time``:
+    first re-materializes the rolling horizon
+    ``[today, today + horizon_days]`` through the shared
+    :func:`_run_horizon_materialization` path (the entry's configured,
+    validated ``horizon_days``), then runs the Feature 11 missed sweep
+    — announcing yesterday's still-open quests as missed AFTER today's
+    instances exist, watermark-guarded so a re-fire of the listener the
+    same night announces nothing twice.
     """
     hour, minute = _day_rollover_hour_minute(options)
     horizon_days = _configured_horizon_days(options)
 
     async def _run_materialization(_now: datetime.datetime) -> None:
         await _run_horizon_materialization(hass, database, horizon_days)
+        await run_missed_sweep(hass, database)
 
     return async_track_time_change(
         hass, _run_materialization, hour=hour, minute=minute
@@ -356,21 +368,8 @@ def _find_live_runtime_data(hass: HomeAssistant) -> NestQuestRuntimeData | None:
     return None
 
 
-def _register_regenerate_service(hass: HomeAssistant) -> None:
-    """Register ``nestquest.regenerate`` once at domain scope.
-
-    The service triggers a full on-demand regeneration over the rolling
-    horizon, running the SAME idempotent materialize path
-    (:func:`_run_horizon_materialization`) as the startup backfill and the
-    daily rollover listener.  It is DOMAIN-global — registered exactly once
-    (guarded by ``has_service``) and NOT bound to any config entry — so the
-    handler resolves the currently-live database at call time and a name
-    collision or duplicate setup is impossible.  Removal is handled by the
-    unload path only once the LAST entry is removed (see
-    :func:`_deregister_regenerate_service`).
-    """
-    if hass.services.has_service(DOMAIN, SERVICE_REGENERATE):
-        return
+def _make_regenerate_handler(hass: HomeAssistant):
+    """Return the Feature 07 ``regenerate`` handler closed over ``hass``."""
 
     async def _regenerate(_call: Any) -> None:
         runtime_data = _find_live_runtime_data(hass)
@@ -385,22 +384,40 @@ def _register_regenerate_service(hass: HomeAssistant) -> None:
             hass, runtime_data.database, horizon_days
         )
 
-    hass.services.async_register(DOMAIN, SERVICE_REGENERATE, _regenerate)
+    return _regenerate
 
 
-def _deregister_regenerate_service(hass: HomeAssistant) -> None:
-    """Remove ``nestquest.regenerate`` when the last entry unloads."""
-    if hass.services.has_service(DOMAIN, SERVICE_REGENERATE):
-        hass.services.async_remove(DOMAIN, SERVICE_REGENERATE)
+def _register_services(hass: HomeAssistant) -> None:
+    """Register domain-global NestQuest services once.
+
+    Services are DOMAIN-global — registered exactly once (guarded by
+    ``has_service`` on regenerate) and NOT bound to any config entry —
+    so each handler resolves the currently-live database at call time
+    and a name collision or duplicate setup is impossible.  Removal is
+    handled by the unload path only once the LAST entry is removed
+    (see :func:`_deregister_services`).
+    """
+    async_register_services(
+        hass,
+        find_runtime=_find_live_runtime_data,
+        regenerate_handler=_make_regenerate_handler(hass),
+    )
+
+
+def _deregister_services(hass: HomeAssistant) -> None:
+    """Remove domain-global NestQuest services when the last entry unloads."""
+    async_deregister_services(hass)
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the NestQuest integration. YAML configuration is not used, returns True."""
+    await async_register_frontend(hass)
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up NestQuest from a config entry."""
+    await async_register_frontend(hass)
     hass.data.setdefault(DOMAIN, {})
     existing = hass.data[DOMAIN].get(entry.entry_id)
     if existing is not None:
@@ -453,6 +470,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     database = await _async_open_database(hass, await async_get_db_path(hass))
     remove_update_listener: Callable[[], Any] | None = None
     remove_time_change_listener: Callable[[], Any] | None = None
+    coordinator: Any = None
     try:
         # Seed the admin allowlist on first setup so the owner is never
         # locked out: an empty database takes the persisted admin copy
@@ -489,7 +507,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await _run_horizon_materialization(
             hass, database, _configured_horizon_days(dict(entry.options))
         )
-        _register_regenerate_service(hass)
+        # The missed sweep runs at startup too (Feature 11): if HA was
+        # down at the rollover time, the previous night's still-open
+        # quests are announced as missed now instead of waiting for
+        # the next midnight.  Watermark-guarded, so this is a no-op
+        # when the night's sweep already ran.
+        await run_missed_sweep(hass, database)
+        _register_services(hass)
+        # The shared Feature 10 coordinator: one refresh cycle every
+        # entity reads from (CONF_UPDATE_INTERVAL seconds, default
+        # five minutes).  Created AFTER services so a failure below
+        # unwinds them through the except path's listener handling.
+        coordinator = NestQuestCoordinator(
+            hass,
+            entry_id=entry.entry_id,
+            database=database,
+            update_interval_seconds=entry.options.get(
+                CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
+            ),
+        )
+        await coordinator.async_config_entry_first_refresh()
+        runtime_data = NestQuestRuntimeData(
+            entry_id=entry.entry_id,
+            options=dict(entry.options),
+            database=database,
+            remove_update_listener=remove_update_listener,
+            remove_time_change_listener=remove_time_change_listener,
+            coordinator=coordinator,
+        )
+        # runtime_data is assigned BEFORE the platforms forward so each
+        # platform's async_setup_entry reads its coordinator off the
+        # entry (the HA runtime-data contract); a forward failure below
+        # unwinds it through the except path.
+        entry.runtime_data = runtime_data
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except BaseException:
         # A failure anywhere after the database is open must not leak the
         # listeners already registered against that (now-closed) database:
@@ -508,18 +559,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await result
             except BaseException:
                 pass
+        # A coordinator created before the failure holds entity
+        # listeners pointed at the database being closed below —
+        # shut it down FIRST so no scheduled refresh can ever run
+        # against a closed connection.
+        if coordinator is not None:
+            try:
+                await coordinator.async_shutdown()
+            except BaseException:
+                pass
+        # A platform-forward failure reached this unwind AFTER
+        # runtime_data was assigned: clear it so no later unload path
+        # closes the already-closed database through the stale record.
+        if getattr(entry, "runtime_data", None) is not None:
+            entry.runtime_data = None
         await database.close()
         raise
     assert remove_update_listener is not None
     assert remove_time_change_listener is not None
-    runtime_data = NestQuestRuntimeData(
-        entry_id=entry.entry_id,
-        options=dict(entry.options),
-        database=database,
-        remove_update_listener=remove_update_listener,
-        remove_time_change_listener=remove_time_change_listener,
-    )
-    entry.runtime_data = runtime_data
     hass.data[DOMAIN][entry.entry_id] = runtime_data
     return True
 
@@ -533,6 +590,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data.pop(DOMAIN, None)
     if runtime_data is None:
         runtime_data = getattr(entry, "runtime_data", None)
+    # Platforms unload FIRST (mirroring HA conventions): entity
+    # listeners must not outlive the database and coordinator the
+    # teardown below closes.
+    platforms_unloaded = await hass.config_entries.async_unload_platforms(
+        entry, PLATFORMS
+    )
+    if platforms_unloaded is False and runtime_data is not None:
+        # Home Assistant KEPT one or more platforms loaded — their
+        # entities still live and must keep their database.  Restore
+        # the runtime record popped above and report failure so HA
+        # retries the unload later instead of leaving live entities
+        # backed by a closed database.
+        hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime_data
+        return False
     unload_error: BaseException | None = None
     if runtime_data is not None:
         remove_update_listener = getattr(runtime_data, "remove_update_listener", None)
@@ -559,14 +630,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if unload_error is None:
                         unload_error = err
         finally:
+            # The coordinator's entity listeners must stop BEFORE the
+            # database closes: a scheduled refresh starting during the
+            # close await would touch a cleared connection.  (The
+            # platform unload above already removed the entities; this
+            # clears the coordinator's own remaining listeners.)
+            coordinator = getattr(runtime_data, "coordinator", None)
+            if coordinator is not None:
+                shutdown = getattr(coordinator, "async_shutdown", None)
+                if shutdown is not None:
+                    await shutdown()
             database = getattr(runtime_data, "database", None)
             if database is not None:
                 await database.close()
-    # The ``regenerate`` service is DOMAIN-global: it is torn down only
-    # once the FINAL entry unloads (``hass.data[DOMAIN]`` is now empty),
-    # never when a sibling entry is still loaded.
+    # Domain-global services are torn down only once the FINAL entry
+    # unloads (``hass.data[DOMAIN]`` is now empty), never when a sibling
+    # entry is still loaded.
     if is_last:
-        _deregister_regenerate_service(hass)
+        _deregister_services(hass)
     if getattr(entry, "runtime_data", None) is not None:
         entry.runtime_data = None
     if unload_error is not None:

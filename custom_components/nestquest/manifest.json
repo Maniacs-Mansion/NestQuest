@@ -5,6 +5,10 @@
     "@overseer"
   ],
   "config_flow": true,
+  "dependencies": [
+    "frontend",
+    "http"
+  ],
   "documentation": "https://github.com/talon2king/NestQuest",
   "integration_type": "hub",
   "iot_class": "local_polling",

@@ -7,10 +7,46 @@ DOMAIN = "nestquest"
 LOGGER_NAME = "custom_components.nestquest"
 LOGGER = logging.getLogger(LOGGER_NAME)
 
-PLATFORMS: list[str] = []
+# Platforms set up per config entry (Feature 10): the per-child day
+# sensors and binary sensors.
+PLATFORMS: list[str] = ["sensor", "binary_sensor"]
 
-#: Service name for the on-demand regeneration service (``nestquest.regenerate``).
+# Home Assistant bus events (design/ENTITIES-AND-SERVICES.md §3).  The
+# panel and admin cards listen for these; Feature 10 fires completed,
+# uncompleted, and child_day_complete from the service paths, and
+# Feature 11's nightly sweep fires quest_missed.
+EVENT_QUEST_COMPLETED = "nestquest_quest_completed"
+EVENT_QUEST_UNCOMPLETED = "nestquest_quest_uncompleted"
+EVENT_QUEST_MISSED = "nestquest_quest_missed"
+EVENT_CHILD_DAY_COMPLETE = "nestquest_child_day_complete"
+
+#: Canonical domain-global service names (design/ENTITIES-AND-SERVICES.md §2
+#: plus the existing Feature 07 regenerate service).
+SERVICE_COMPLETE_QUEST = "complete_quest"
+SERVICE_UNCOMPLETE_QUEST = "uncomplete_quest"
+SERVICE_CREATE_QUEST_DEFINITION = "create_quest_definition"
+SERVICE_UPDATE_QUEST_DEFINITION = "update_quest_definition"
+SERVICE_SET_QUEST_DEFINITION_ACTIVE = "set_quest_definition_active"
+SERVICE_SET_PRESENCE_PATTERN = "set_presence_pattern"
+SERVICE_CREATE_PRESENCE_OVERRIDE = "create_presence_override"
+SERVICE_DELETE_PRESENCE_OVERRIDE = "delete_presence_override"
+SERVICE_EXPORT_HISTORY_CSV = "export_history_csv"
+SERVICE_MANAGE_CHILD = "manage_child"
 SERVICE_REGENERATE = "regenerate"
+
+DOMAIN_SERVICES: tuple[str, ...] = (
+    SERVICE_COMPLETE_QUEST,
+    SERVICE_UNCOMPLETE_QUEST,
+    SERVICE_CREATE_QUEST_DEFINITION,
+    SERVICE_UPDATE_QUEST_DEFINITION,
+    SERVICE_SET_QUEST_DEFINITION_ACTIVE,
+    SERVICE_SET_PRESENCE_PATTERN,
+    SERVICE_CREATE_PRESENCE_OVERRIDE,
+    SERVICE_DELETE_PRESENCE_OVERRIDE,
+    SERVICE_EXPORT_HISTORY_CSV,
+    SERVICE_MANAGE_CHILD,
+    SERVICE_REGENERATE,
+)
 
 SQLITE_DB_FILENAME = "nestquest.db"
 
@@ -29,6 +65,33 @@ DEFAULT_PANEL_IDLE_TIMEOUT = 300
 # database allowlist is authoritative; the config entry carries the same
 # list as a disaster-recovery copy so a lost database can be re-seeded.
 CONF_ADMIN_USER_IDS = "admin_user_ids"
+
+# Shared coordinator refresh interval (Feature 10), in SECONDS.  Every
+# entity reads one snapshot per refresh; completions push an immediate
+# refresh so this poll is only the fallback cadence.
+CONF_UPDATE_INTERVAL = "update_interval"
+DEFAULT_UPDATE_INTERVAL = 300
+MIN_UPDATE_INTERVAL = 30
+
+# Notification automations (Feature 11).  The notify target is a free-text
+# Home Assistant service name (e.g. "notify.mobile_app_dads_phone") the
+# household fills in — never a hard-coded personal target; the times are
+# strict HH:MM local; each of the four automations has an independent
+# enable toggle.  Per the owner-settled resolution the end-of-day report
+# defaults to 20:00 — deliberately BEFORE the midnight missed sweep —
+# and never defaults to the rollover time.
+CONF_NOTIFY_TARGET = "notify_target"
+CONF_MORNING_SUMMARY_TIME = "morning_summary_time"
+DEFAULT_MORNING_SUMMARY_TIME = "08:00"
+CONF_AFTERNOON_REMINDER_TIME = "afternoon_reminder_time"
+DEFAULT_AFTERNOON_REMINDER_TIME = "15:00"
+CONF_END_OF_DAY_REPORT_TIME = "end_of_day_report_time"
+DEFAULT_END_OF_DAY_REPORT_TIME = "20:00"
+CONF_MORNING_SUMMARY_ENABLED = "morning_summary_enabled"
+CONF_AFTERNOON_REMINDER_ENABLED = "afternoon_reminder_enabled"
+CONF_END_OF_DAY_REPORT_ENABLED = "end_of_day_report_enabled"
+CONF_CELEBRATION_ENABLED = "celebration_enabled"
+DEFAULT_AUTOMATION_ENABLED = True
 
 # Quest windows (D-008): a definition may declare several day windows;
 # each produces its own instance per day and groups the panel's Quest

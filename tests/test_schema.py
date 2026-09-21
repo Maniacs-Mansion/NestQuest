@@ -11,6 +11,7 @@ from custom_components.nestquest.schema import (
     SCHEMA_V1_ADMIN_USERS_DDL,
     SCHEMA_V1_CHILDREN_DDL,
     SCHEMA_V1_COMPLETION_EVENTS_DDL,
+    SCHEMA_V7_META_STATE_DDL,
     SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
     SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
     SCHEMA_V1_SCHEDULE_RULES_DDL,
@@ -168,7 +169,7 @@ def _insert_override(database, child_id, **overrides):
 # ---------------------------------------------------------------------------
 
 
-def test_schema_v1_statements_compose_the_eight_tables() -> None:
+def test_schema_v1_statements_compose_the_nine_tables() -> None:
     assert SCHEMA_V1_STATEMENTS == [
         *SCHEMA_V1_CHILDREN_DDL,
         *SCHEMA_V1_ADMIN_USERS_DDL,
@@ -180,6 +181,7 @@ def test_schema_v1_statements_compose_the_eight_tables() -> None:
         *SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
         *SCHEMA_V1_QUEST_INSTANCES_DDL,
         *SCHEMA_V1_COMPLETION_EVENTS_DDL,
+        *SCHEMA_V7_META_STATE_DDL,
     ]
 
 

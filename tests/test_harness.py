@@ -31,6 +31,23 @@ def test_mock_only_harness_contract(monkeypatch):
     assert sys.modules["homeassistant.core"].callback is conftest._callback_decorator
     assert sys.modules["homeassistant.data_entry_flow"].RESULT_TYPE_FORM == "form"
 
+    # Entity-platform stand-ins are wired with the shaped classes, and
+    # parent-package attributes resolve to the mocked submodules.
+    entity_module = sys.modules["homeassistant.helpers.entity"]
+    assert entity_module.DeviceInfo is conftest.DeviceInfo
+    assert entity_module.Entity is conftest.Entity
+    sensor_module = sys.modules["homeassistant.components.sensor"]
+    assert sensor_module.SensorEntity is conftest.SensorEntity
+    assert sensor_module.SensorStateClass.MEASUREMENT == "measurement"
+    assert sensor_module.SensorDeviceClass.PERCENTAGE == "percentage"
+    assert sys.modules[
+        "homeassistant.components.binary_sensor"
+    ].BinarySensorEntity is conftest.BinarySensorEntity
+    assert sys.modules[
+        "homeassistant.helpers.update_coordinator"
+    ].CoordinatorEntity is conftest.CoordinatorEntity
+    assert sys.modules["homeassistant"].components.sensor is sensor_module
+
     # No homeassistant distribution is installed in this suite's own venv.
     with pytest.raises(importlib.metadata.PackageNotFoundError):
         importlib.metadata.version("homeassistant")

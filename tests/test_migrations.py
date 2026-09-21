@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from custom_components.nestquest.db import NestQuestDatabase
+from custom_components.nestquest.schema import SCHEMA_V7_META_STATE_DDL
 from custom_components.nestquest.migrations import (
     MIGRATIONS,
     VERSION_TABLE,
@@ -110,6 +111,7 @@ def test_fresh_file_migration_creates_all_v1_tables(tmp_path) -> None:
             "presence_overrides",
             "quest_instances",
             "completion_events",
+            "nestquest_meta_state",
             VERSION_TABLE,
         }
         assert _tables(database) == expected
@@ -159,7 +161,8 @@ def test_migration_list_shape() -> None:
     assert MIGRATIONS[3] == SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL
     assert callable(MIGRATIONS[4])
     assert callable(MIGRATIONS[5])
-    assert len(MIGRATIONS) == 6
+    assert MIGRATIONS[6] == SCHEMA_V7_META_STATE_DDL
+    assert len(MIGRATIONS) == 7
 
 
 # ---------------------------------------------------------------------------

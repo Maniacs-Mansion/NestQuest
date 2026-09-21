@@ -11,13 +11,28 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import (
     CONF_ADMIN_USER_IDS,
+    CONF_AFTERNOON_REMINDER_ENABLED,
+    CONF_AFTERNOON_REMINDER_TIME,
+    CONF_CELEBRATION_ENABLED,
     CONF_DAY_ROLLOVER_TIME,
+    CONF_END_OF_DAY_REPORT_ENABLED,
+    CONF_END_OF_DAY_REPORT_TIME,
     CONF_HORIZON_DAYS,
+    CONF_MORNING_SUMMARY_ENABLED,
+    CONF_MORNING_SUMMARY_TIME,
+    CONF_NOTIFY_TARGET,
     CONF_PANEL_IDLE_TIMEOUT,
+    CONF_UPDATE_INTERVAL,
+    DEFAULT_AFTERNOON_REMINDER_TIME,
+    DEFAULT_AUTOMATION_ENABLED,
     DEFAULT_DAY_ROLLOVER_TIME,
+    DEFAULT_END_OF_DAY_REPORT_TIME,
     DEFAULT_HORIZON_DAYS,
+    DEFAULT_MORNING_SUMMARY_TIME,
     DEFAULT_PANEL_IDLE_TIMEOUT,
+    DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
+    MIN_UPDATE_INTERVAL,
 )
 from .admin_allowlist import list_admin_ids, set_admin_ids
 
@@ -56,7 +71,61 @@ def _async_validate(user_input: dict[str, Any]) -> dict[str, str]:
     ):
         errors[CONF_PANEL_IDLE_TIMEOUT] = "invalid"
 
+    # The coordinator refresh interval (Feature 10) is OPTIONAL in raw
+    # submits: a missing key keeps the current value, so pre-Feature-10
+    # form payloads (and API callers) are unaffected.  Schema-validated
+    # submits always carry it.
+    update_interval = user_input.get(CONF_UPDATE_INTERVAL)
+    if update_interval is not None and (
+        isinstance(update_interval, bool)
+        or not isinstance(update_interval, int)
+        or update_interval < MIN_UPDATE_INTERVAL
+    ):
+        errors[CONF_UPDATE_INTERVAL] = "invalid"
+
+    # The notification section (Feature 11) is OPTIONAL in raw submits
+    # the same way: a missing key keeps the current value.  The three
+    # times are strict HH:MM; the notify target is a non-empty HA
+    # service name; the toggles are real booleans.
+    for time_key in (
+        CONF_MORNING_SUMMARY_TIME,
+        CONF_AFTERNOON_REMINDER_TIME,
+        CONF_END_OF_DAY_REPORT_TIME,
+    ):
+        time_value = user_input.get(time_key)
+        if time_value is not None and (
+            not isinstance(time_value, str) or not _parse_time(time_value)
+        ):
+            errors[time_key] = "invalid_time"
+    notify_target = user_input.get(CONF_NOTIFY_TARGET)
+    if notify_target is not None and not isinstance(notify_target, str):
+        errors[CONF_NOTIFY_TARGET] = "invalid"
+    elif isinstance(notify_target, str) and notify_target != (
+        notify_target.strip()
+    ):
+        # An EMPTY target is valid — it means "no notifications
+        # configured yet" and is the shipped default; a value that
+        # differs from its own trim (padded or whitespace-only) is
+        # malformed and rejected.
+        errors[CONF_NOTIFY_TARGET] = "invalid"
+    for toggle_key in (
+        CONF_MORNING_SUMMARY_ENABLED,
+        CONF_AFTERNOON_REMINDER_ENABLED,
+        CONF_END_OF_DAY_REPORT_ENABLED,
+        CONF_CELEBRATION_ENABLED,
+    ):
+        toggle_value = user_input.get(toggle_key)
+        if toggle_value is not None and not isinstance(toggle_value, bool):
+            errors[toggle_key] = "invalid"
+
     return errors
+
+
+def _strict_bool(value: object) -> bool:
+    """Require a real bool; voluptuous ``bool`` would coerce strings."""
+    if not isinstance(value, bool):
+        raise vol.Invalid(f"expected a boolean, got {value!r}")
+    return value
 
 
 def _build_schema(
@@ -70,7 +139,10 @@ def _build_schema(
     The admin picker is a multi-select of EXISTING Home Assistant users
     (never a free-text field — the allowlist stores user IDs); its
     default is the current database allowlist, so an untouched submit
-    re-saves exactly who is already allowed.
+    re-saves exactly who is already allowed.  The notification section
+    (Feature 11) carries the household's notify target, the three
+    automation times, and four enable toggles — defaults from
+    :mod:`~.const`, never a hard-coded personal target.
     """
     fields: dict[Any, Any] = {
         vol.Required(
@@ -82,6 +154,40 @@ def _build_schema(
         vol.Required(
             CONF_PANEL_IDLE_TIMEOUT, default=current[CONF_PANEL_IDLE_TIMEOUT]
         ): int,
+        vol.Required(
+            CONF_UPDATE_INTERVAL, default=current[CONF_UPDATE_INTERVAL]
+        ): int,
+        vol.Required(
+            CONF_NOTIFY_TARGET, default=current[CONF_NOTIFY_TARGET]
+        ): str,
+        vol.Required(
+            CONF_MORNING_SUMMARY_TIME,
+            default=current[CONF_MORNING_SUMMARY_TIME],
+        ): str,
+        vol.Required(
+            CONF_AFTERNOON_REMINDER_TIME,
+            default=current[CONF_AFTERNOON_REMINDER_TIME],
+        ): str,
+        vol.Required(
+            CONF_END_OF_DAY_REPORT_TIME,
+            default=current[CONF_END_OF_DAY_REPORT_TIME],
+        ): str,
+        vol.Required(
+            CONF_MORNING_SUMMARY_ENABLED,
+            default=current[CONF_MORNING_SUMMARY_ENABLED],
+        ): _strict_bool,
+        vol.Required(
+            CONF_AFTERNOON_REMINDER_ENABLED,
+            default=current[CONF_AFTERNOON_REMINDER_ENABLED],
+        ): _strict_bool,
+        vol.Required(
+            CONF_END_OF_DAY_REPORT_ENABLED,
+            default=current[CONF_END_OF_DAY_REPORT_ENABLED],
+        ): _strict_bool,
+        vol.Required(
+            CONF_CELEBRATION_ENABLED,
+            default=current[CONF_CELEBRATION_ENABLED],
+        ): _strict_bool,
     }
     if admin_choices is not None:
         # HA's supported multi-select validator: the frontend can
@@ -210,7 +316,28 @@ class NestQuestOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             CONF_HORIZON_DAYS: user_input[CONF_HORIZON_DAYS],
             CONF_DAY_ROLLOVER_TIME: user_input[CONF_DAY_ROLLOVER_TIME],
             CONF_PANEL_IDLE_TIMEOUT: user_input[CONF_PANEL_IDLE_TIMEOUT],
+            CONF_UPDATE_INTERVAL: user_input.get(
+                CONF_UPDATE_INTERVAL,
+                self._current_values()[CONF_UPDATE_INTERVAL],
+            ),
         }
+        # The notification section (Feature 11) stores the household's
+        # choices the same fall-back-to-current way, so raw submits
+        # that predate the section keep their stored values.
+        current = self._current_values()
+        for notification_key in (
+            CONF_NOTIFY_TARGET,
+            CONF_MORNING_SUMMARY_TIME,
+            CONF_AFTERNOON_REMINDER_TIME,
+            CONF_END_OF_DAY_REPORT_TIME,
+            CONF_MORNING_SUMMARY_ENABLED,
+            CONF_AFTERNOON_REMINDER_ENABLED,
+            CONF_END_OF_DAY_REPORT_ENABLED,
+            CONF_CELEBRATION_ENABLED,
+        ):
+            data[notification_key] = user_input.get(
+                notification_key, current[notification_key]
+            )
         if admin_ids_present:
             data[CONF_ADMIN_USER_IDS] = admin_ids
         elif admin_default:
@@ -231,6 +358,15 @@ class NestQuestOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             (CONF_HORIZON_DAYS, DEFAULT_HORIZON_DAYS),
             (CONF_DAY_ROLLOVER_TIME, DEFAULT_DAY_ROLLOVER_TIME),
             (CONF_PANEL_IDLE_TIMEOUT, DEFAULT_PANEL_IDLE_TIMEOUT),
+            (CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL),
+            (CONF_NOTIFY_TARGET, ""),
+            (CONF_MORNING_SUMMARY_TIME, DEFAULT_MORNING_SUMMARY_TIME),
+            (CONF_AFTERNOON_REMINDER_TIME, DEFAULT_AFTERNOON_REMINDER_TIME),
+            (CONF_END_OF_DAY_REPORT_TIME, DEFAULT_END_OF_DAY_REPORT_TIME),
+            (CONF_MORNING_SUMMARY_ENABLED, DEFAULT_AUTOMATION_ENABLED),
+            (CONF_AFTERNOON_REMINDER_ENABLED, DEFAULT_AUTOMATION_ENABLED),
+            (CONF_END_OF_DAY_REPORT_ENABLED, DEFAULT_AUTOMATION_ENABLED),
+            (CONF_CELEBRATION_ENABLED, DEFAULT_AUTOMATION_ENABLED),
         ):
             if key in options:
                 values[key] = options[key]

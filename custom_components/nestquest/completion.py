@@ -128,6 +128,21 @@ def _derived_state(
     )
 
 
+def derive_state(
+    instance: QuestInstanceRecord,
+    latest: CompletionEventRecord | None,
+    today: datetime.date,
+) -> str:
+    """Public state derivation for the Feature 10 coordinator.
+
+    Thin wrapper over :func:`_derived_state`: ``open``, ``done``, or
+    ``missed`` from the latest event plus the due date (``missed`` is
+    derived, never an event_type).  ``today`` is the caller-resolved
+    HA-local date.
+    """
+    return _derived_state(instance, latest, today)
+
+
 def _was_on_time(
     instance: QuestInstanceRecord,
     now: datetime.datetime | None,
@@ -351,6 +366,36 @@ async def instance_state(
     return _derived_state(instance, latest, today_date)
 
 
+class CompletionResult(str):
+    """The derived instance state, carrying the append verdict.
+
+    A ``str`` subclass so every existing ``result == "done"`` contract
+    keeps working; ``appended`` reports whether THIS call actually
+    appended an event (decided under the same lock as the append), so
+    a caller — the Feature 09 service path firing bus events —
+    announces a transition exactly once even under a concurrent
+    duplicate call where the loser's write is a no-op.  A completion
+    also carries the ``was_on_time`` verdict computed under that same
+    lock, so the event payload never re-reads mutable latest state a
+    racing reversal could have replaced.
+    """
+
+    appended: bool
+    was_on_time: bool | None
+
+    def __new__(
+        cls,
+        state: str,
+        *,
+        appended: bool,
+        was_on_time: bool | None = None,
+    ) -> "CompletionResult":
+        obj = super().__new__(cls, state)
+        obj.appended = appended
+        obj.was_on_time = was_on_time
+        return obj
+
+
 async def complete_instance(
     database: NestQuestDatabase,
     instance_id: int,
@@ -360,14 +405,14 @@ async def complete_instance(
     actor_child_id: int | None = None,
     now: datetime.datetime | None = None,
     today: datetime.date | None = None,
-) -> str:
+) -> CompletionResult:
     """Append a completed event unless the instance is already done.
 
-    Returns the derived state ``done``.  An already-done instance is a
-    no-op: nothing is appended.  Unknown ``instance_id`` raises
-    ValueError naming the field.  Existence, latest-event, and the
-    append run under one connection lock so a concurrent complete
-    cannot double-append.
+    Returns the derived state ``done``; ``appended`` reports whether
+    THIS call appended (False on an already-done no-op).  Unknown
+    ``instance_id`` raises ValueError naming the field.  Existence,
+    latest-event, and the append run under one connection lock so a
+    concurrent complete cannot double-append.
 
     ``was_on_time`` is computed from the HA-local completion moment
     (threaded ``now`` / ``today``) against the instance ``due_date``
@@ -389,12 +434,16 @@ async def complete_instance(
             instance_id
         )
         if latest is not None and latest.event_type == EVENT_COMPLETED:
-            return "done"
+            return CompletionResult("done", appended=False)
         if latest is not None and latest.event_type != EVENT_UNCOMPLETED:
             raise ValueError(
                 f"event_type must be '{EVENT_COMPLETED}' or "
                 f"'{EVENT_UNCOMPLETED}', got {latest.event_type!r}"
             )
+        # Computed under the completion lock and carried on the result:
+        # the bus event must report THIS completion's timing, never a
+        # re-read of the latest event a racing reversal could replace.
+        on_time = _was_on_time(instance, now, today)
         await append_event(
             database,
             instance.id,
@@ -403,10 +452,10 @@ async def complete_instance(
             actor_source=actor_source,
             actor_user_id=actor_user_id,
             actor_child_id=actor_child_id,
-            was_on_time=_was_on_time(instance, now, today),
+            was_on_time=on_time,
             now=now,
         )
-    return "done"
+    return CompletionResult("done", appended=True, was_on_time=on_time)
 
 
 async def uncomplete_instance(
@@ -418,16 +467,16 @@ async def uncomplete_instance(
     actor_child_id: int | None = None,
     now: datetime.datetime | None = None,
     today: datetime.date | None = None,
-) -> str:
+) -> CompletionResult:
     """Append an uncompleted event unless the instance is already open.
 
     Returns the derived state ``open``, or ``missed`` when the instance
-    is past due (``due_date`` before HA-local ``today``).  An
-    already-open instance is a no-op: nothing is appended.  Unknown
-    ``instance_id`` raises ValueError naming the field.  Existence,
-    latest-event, and the append run under one connection lock so a
-    concurrent uncomplete cannot double-append.  The original completed
-    row is not modified.
+    is past due (``due_date`` before HA-local ``today``); ``appended``
+    reports whether THIS call appended (False on an already-open
+    no-op).  Unknown ``instance_id`` raises ValueError naming the
+    field.  Existence, latest-event, and the append run under one
+    connection lock so a concurrent uncomplete cannot double-append.
+    The original completed row is not modified.
     """
     instance_id = _validate_int_id(instance_id, "instance_id")
     actor_source, actor_user_id, actor_child_id = _validate_actor(
@@ -444,7 +493,10 @@ async def uncomplete_instance(
             instance_id
         )
         if latest is None or latest.event_type == EVENT_UNCOMPLETED:
-            return _derived_state(instance, latest, today_date)
+            return CompletionResult(
+                _derived_state(instance, latest, today_date),
+                appended=False,
+            )
         if latest.event_type != EVENT_COMPLETED:
             raise ValueError(
                 f"event_type must be '{EVENT_COMPLETED}' or "
@@ -461,7 +513,9 @@ async def uncomplete_instance(
             was_on_time=None,
             now=now,
         )
-    return _derived_state(instance, latest, today_date)
+    return CompletionResult(
+        _derived_state(instance, latest, today_date), appended=True
+    )
 
 
 async def list_missed_for_child(

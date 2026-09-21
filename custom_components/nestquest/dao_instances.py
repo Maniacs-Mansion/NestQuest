@@ -493,6 +493,43 @@ class QuestInstancesDao:
         )
         return [_instance_from_row(row) for row in rows]
 
+    async def list_missed_unswept(
+        self, today_iso: str, watermark: str | None
+    ) -> list[QuestInstanceRecord]:
+        """Return past-due open instances the sweep has not announced.
+
+        Feature 11's missed-sweep query: ``due_date`` strictly before
+        ``today_iso`` (past due), at or after ``watermark`` when one is
+        recorded, and with NO completion event ever (the Feature 08
+        append-only contract: an instance that was ever completed is
+        never reported missed, even when later reversed — history keeps
+        both rows and the sweep never mutates any).  The watermark is
+        the HA-local date the sweep last ran, and the window is
+        ``[watermark, today)``: the nightly run entering day D+1 sweeps
+        exactly day D's instances, so every day's quests are announced
+        once — at the midnight after their due date — and a same-night
+        rerun (watermark == today) sees an empty window.  Read-only;
+        ordered deterministically by (due_date, id).
+        """
+        _validate_date(today_iso, "today_iso")
+        if watermark is not None:
+            _validate_date(watermark, "watermark")
+        sql = (
+            f"SELECT {_INSTANCE_COLUMNS} FROM quest_instances "
+            "WHERE due_date < ? "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM completion_events "
+            "  WHERE instance_id = quest_instances.id"
+            ")"
+        )
+        parameters: tuple = (today_iso,)
+        if watermark is not None:
+            sql += " AND due_date >= ?"
+            parameters += (watermark,)
+        sql += " ORDER BY due_date, id"
+        rows = await self._database.fetch_all(sql, parameters)
+        return [_instance_from_row(row) for row in rows]
+
     async def delete_future_uncompleted(
         self, definition_id: int, cutoff_date: str, *, today: datetime.date | None = None
     ) -> int:
