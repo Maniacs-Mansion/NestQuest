@@ -61,7 +61,7 @@ D1 = _future_day(1)
 
 
 async def _prepare(path) -> tuple:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     await database.open(path)
     await apply_migrations(database)
     children = ChildrenDao(database)
@@ -630,7 +630,7 @@ def test_complete_instance_concurrent_second_call_is_noop(tmp_path) -> None:
         gate_open = asyncio.Event()
         a_started = asyncio.Event()
         hass = _gated_hass(armed, gate_open, a_started)
-        database = NestQuestDatabase(hass)
+        database = NestQuestDatabase(hass.async_add_executor_job)
         await database.open(tmp_path / "complete-race.db")
         try:
             await apply_migrations(database)
@@ -1060,7 +1060,7 @@ def test_uncomplete_instance_concurrent_second_call_is_noop(tmp_path) -> None:
         gate_open = asyncio.Event()
         a_started = asyncio.Event()
         hass = _gated_hass(armed, gate_open, a_started)
-        database = NestQuestDatabase(hass)
+        database = NestQuestDatabase(hass.async_add_executor_job)
         await database.open(tmp_path / "uncomplete-race.db")
         try:
             await apply_migrations(database)

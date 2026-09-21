@@ -33,7 +33,7 @@ def _make_hass_mock():
 def _with_db(tmp_path, name):
     def _run_test(body):
         async def _main():
-            database = NestQuestDatabase(_make_hass_mock())
+            database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
             await database.open(tmp_path / name)
             try:
                 await apply_migrations(database)
@@ -360,7 +360,7 @@ def test_create_child_concurrent_same_name_still_warns(tmp_path) -> None:
         gate_open = asyncio.Event()
         a_started = asyncio.Event()
         hass = _gated_hass(armed, gate_open, a_started)
-        database = NestQuestDatabase(hass)
+        database = NestQuestDatabase(hass.async_add_executor_job)
         await database.open(tmp_path / "create-race.db")
         try:
             await apply_migrations(database)
@@ -633,7 +633,7 @@ def test_edit_child_concurrent_opposite_edits_return_own_values(
         gate_open = asyncio.Event()
         a_started = asyncio.Event()
         hass = _gated_hass(armed, gate_open, a_started)
-        database = NestQuestDatabase(hass)
+        database = NestQuestDatabase(hass.async_add_executor_job)
         await database.open(tmp_path / "edit-race.db")
         try:
             await apply_migrations(database)
@@ -685,7 +685,7 @@ def test_set_child_active_concurrent_opposite_transitions_return_own(
         gate_open = asyncio.Event()
         a_started = asyncio.Event()
         hass = _gated_hass(armed, gate_open, a_started)
-        database = NestQuestDatabase(hass)
+        database = NestQuestDatabase(hass.async_add_executor_job)
         await database.open(tmp_path / "active-race.db")
         try:
             await apply_migrations(database)

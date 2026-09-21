@@ -30,7 +30,7 @@ from .const import (
 )
 from .frontend import async_register_frontend
 from .coordinator import NestQuestCoordinator
-from .db import NestQuestDatabase
+from .db import NestQuestDatabase, make_database
 from .materialize import materialize as _materialize_run
 from .migrations import apply_migrations
 from .services import async_deregister_services, async_register_services
@@ -174,7 +174,7 @@ async def _async_open_database(
     """
     try:
         await _preflight_existing_file(hass, db_path)
-        database = await NestQuestDatabase(hass).open(db_path)
+        database = await make_database(hass).open(db_path)
     except asyncio.CancelledError:
         raise
     except sqlite3.DatabaseError as err:

@@ -118,7 +118,7 @@ class World:
 
 
 async def _world(path) -> World:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     await database.open(path)
     await apply_migrations(database)
     world = World(database)
@@ -441,7 +441,7 @@ def test_completion_events_absolutely_no_mutation_path() -> None:
     )
     offenders = [
         py.name
-        for py in sorted(package.glob("*.py"))
+        for py in sorted(package.rglob("*.py"))
         if py.name != "__pycache__" and mutation.search(py.read_text())
     ]
     assert offenders == []

@@ -37,7 +37,7 @@ def _make_hass_mock():
 
 
 def _open_db(path) -> NestQuestDatabase:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     _run(database.open(path))
     return database
 

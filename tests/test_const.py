@@ -106,7 +106,7 @@ def test_window_clock_ranges_cover_every_window() -> None:
 def test_no_hardcoded_domain_or_db_filename_in_modules() -> None:
     """Ensure no module other than const.py hardcodes DOMAIN string or SQLITE_DB_FILENAME."""
     pkg_dir = Path(const.__file__).parent
-    py_files = [f for f in pkg_dir.glob("*.py") if f.name != "const.py"]
+    py_files = [f for f in pkg_dir.rglob("*.py") if f.name != "const.py"]
 
     assert len(py_files) > 0, "No python modules found in package to check"
 

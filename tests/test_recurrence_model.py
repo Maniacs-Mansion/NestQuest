@@ -276,7 +276,7 @@ def test_recurrence_module_imports_only_stdlib() -> None:
     from pathlib import Path
 
     source = Path(
-        __import__("custom_components.nestquest.recurrence",
+        __import__("custom_components.nestquest.core.recurrence",
                    fromlist=["__file__"]).__file__
     ).read_text()
     offenders = _scan_forbidden_imports(source)
