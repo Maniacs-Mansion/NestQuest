@@ -163,12 +163,38 @@ is simply a Home Assistant client.
 
 1. **Create a dedicated kiosk user.** In *Settings → People → Users*, add
    a new user for the wall device. Make it **non-admin**, and ensure it is
-   not in the NestQuest admin allowlist. This is the account the panel
-   runs as, and it should have no authority beyond viewing the dashboard.
+   not in the NestQuest admin allowlist. The allowlist blocks the NestQuest
+   **admin** operations — `uncomplete_quest`, `create_quest_definition`,
+   `update_quest_definition`, `set_quest_definition_active`,
+   `set_presence_pattern`, `create_presence_override`,
+   `delete_presence_override`, `export_history_csv`, and `manage_child`
+   (plus `regenerate` flows) — it does not make the account view-only. The
+   kiosk user *can* call `nestquest.complete_quest`, the one open NestQuest
+   service, to complete quests from the panel, and as a non-admin Home
+   Assistant user it may also reach other permitted Home Assistant entities
+   and services.
 
-2. **Build a dashboard with only the NestQuest panel card.** Create a new
-   Lovelace dashboard that contains only the NestQuest panel card. Keep
-   the surface minimal — no other cards, no admin controls.
+2. **Build a dashboard with only the NestQuest panel cards.** A functional
+   panel needs **two** Lovelace views, each with its own card config from
+   `design/ENTITIES-AND-SERVICES.md` §4. The dashboard contains only the
+   NestQuest panel card for each view — no other cards, no admin controls.
+
+   - **View 1 — party board** (`type: custom:nestquest-party-board-card`):
+     the household quest board. Set `weather_entity` (optional; the dock
+     falls back to date/time), `quest_log_path: /nestquest/log` (the view
+     the crest tap navigates to), and `child_order: [slug1, slug2, slug3]`
+     listing each child's slug in display order.
+
+   - **View 2 — quest log** (`type: custom:nestquest-quest-log-card`): the
+     per-child quest screen the party board hops to. Set
+     `board_path: /nestquest/board` (the party-board view to return to),
+     `weather_entity`, `idle_return_seconds` (must be shorter than
+     TouchHub Auto-Return), `confirm_timeout_seconds`, and
+     `complete_screen_seconds`. The quest log reads the selected child's
+     slug from the view's URL path, so the board → log hop is a plain
+     Lovelace navigation.
+
+   See `design/ENTITIES-AND-SERVICES.md` §4 for the full card YAML.
 
 3. **Point TouchHub at it.** In the TouchHub launcher, add the **Home
    Assistant Lovelace** app to the dock and paste the dashboard URL from
