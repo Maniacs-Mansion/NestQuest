@@ -1,9 +1,10 @@
-"""Re-export of :mod:`core.dao_rules` for the integration package.
+"""Re-export of :mod:`custom_components.nestquest.core.dao_rules` for the integration package.
 
 The schedule-rules/quest-definitions DAO lives in
-:mod:`core.dao_rules` (extracted in task d0b691d8); this module
-re-exports it so existing ``from .dao_rules import ...`` references
-inside the integration keep working.
+:mod:`custom_components.nestquest.core.dao_rules` (extracted in task
+d0b691d8); this module re-exports it so existing
+``from .dao_rules import ...`` references inside the integration keep
+working.
 """
 from __future__ import annotations
 

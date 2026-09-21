@@ -1,6 +1,7 @@
-"""Re-export of :mod:`core.schema` for the integration package.
+"""Re-export of :mod:`custom_components.nestquest.core.schema` for the integration package.
 
-The declarative schema DDL lives in :mod:`core.schema` (extracted in
+The declarative schema DDL lives in
+:mod:`custom_components.nestquest.core.schema` (extracted in
 task d0b691d8); this module re-exports it so existing
 ``from .schema import ...`` references inside the integration keep
 working.

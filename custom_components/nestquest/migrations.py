@@ -1,6 +1,7 @@
-"""Re-export of :mod:`core.migrations` for the integration package.
+"""Re-export of :mod:`custom_components.nestquest.core.migrations` for the integration package.
 
-The versioned migration runner lives in :mod:`core.migrations`
+The versioned migration runner lives in
+:mod:`custom_components.nestquest.core.migrations`
 (extracted in task d0b691d8); this module re-exports it so existing
 ``from .migrations import ...`` references inside the integration keep
 working.

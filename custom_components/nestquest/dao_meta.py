@@ -1,6 +1,7 @@
-"""Re-export of :mod:`core.dao_meta` for the integration package.
+"""Re-export of :mod:`custom_components.nestquest.core.dao_meta` for the integration package.
 
-The meta-state DAO lives in :mod:`core.dao_meta` (extracted in task
+The meta-state DAO lives in
+:mod:`custom_components.nestquest.core.dao_meta` (extracted in task
 d0b691d8); this module re-exports it so existing
 ``from .dao_meta import ...`` references inside the integration keep
 working.

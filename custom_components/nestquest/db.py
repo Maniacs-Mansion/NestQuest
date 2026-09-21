@@ -1,6 +1,6 @@
-"""Re-export of :mod:`core.db` for the integration package.
+"""Re-export of :mod:`custom_components.nestquest.core.db` for the integration package.
 
-The async SQLite wrapper lives in :mod:`core.db` (extracted in task
+The async SQLite wrapper lives in :mod:`custom_components.nestquest.core.db` (extracted in task
 d0b691d8) and is Home-Assistant-free: :class:`NestQuestDatabase` takes
 an executor callable rather than a ``hass`` object.  This module
 re-exports it and provides :func:`make_database`, a thin adapter that

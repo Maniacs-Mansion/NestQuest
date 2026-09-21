@@ -9,10 +9,10 @@ from custom_components.nestquest.recurrence import (
     RuleType,
     RuleValidationError,
     ScheduleRule,
-    _month_end,
     occurs_on,
     occurrences_between,
 )
+from custom_components.nestquest.core.recurrence import _month_end
 
 
 def _d(date: str) -> datetime.date:

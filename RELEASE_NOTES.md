@@ -1,5 +1,19 @@
 # NestQuest Release Notes
 
+## Unreleased
+
+- **Storage layer extraction (task d0b691d8):** the SQLite storage layer
+  (schema, migrations, db, store, const, recurrence, DAOs) is bundled
+  under `custom_components/nestquest/core/`, with the integration's
+  original module names preserved as re-export shims.
+- **Logger namespace change (breaking for logging configuration):** the
+  migrations runner now logs under
+  `custom_components.nestquest.core.migrations` instead of
+  `custom_components.nestquest.migrations`. Users who tuned the old
+  logger name (e.g. in `logger.yaml` or `configuration.yaml`) must
+  update the entry to keep that level, as the old name no longer
+  receives migration log output.
+
 ## Version 0.5.0 — 2026-09-18
 
 ### Scope

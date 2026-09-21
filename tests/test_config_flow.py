@@ -140,7 +140,7 @@ def test_flow_strings_match_translations(
 def test_no_hardcoded_domain_or_db_filename_in_new_modules() -> None:
     """Ensure no module other than const.py hardcodes the domain or db filename."""
     pkg_dir = Path(config_flow.__file__).parent
-    py_files = [f for f in pkg_dir.glob("*.py") if f.name not in ("const.py",)]
+    py_files = [f for f in pkg_dir.rglob("*.py") if f.name not in ("const.py",)]
 
     assert len(py_files) > 0, "No python modules found in package to check"
 

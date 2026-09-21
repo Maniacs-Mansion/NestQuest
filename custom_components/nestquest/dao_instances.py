@@ -1,6 +1,7 @@
-"""Re-export of :mod:`core.dao_instances` for the integration package.
+"""Re-export of :mod:`custom_components.nestquest.core.dao_instances` for the integration package.
 
-The instances/completion-events DAO lives in :mod:`core.dao_instances`
+The instances/completion-events DAO lives in
+:mod:`custom_components.nestquest.core.dao_instances`
 (extracted in task d0b691d8); this module re-exports it so existing
 ``from .dao_instances import ...`` references inside the integration keep
 working.

@@ -441,7 +441,7 @@ def test_completion_events_absolutely_no_mutation_path() -> None:
     )
     offenders = [
         py.name
-        for py in sorted(package.glob("*.py"))
+        for py in sorted(package.rglob("*.py"))
         if py.name != "__pycache__" and mutation.search(py.read_text())
     ]
     assert offenders == []
