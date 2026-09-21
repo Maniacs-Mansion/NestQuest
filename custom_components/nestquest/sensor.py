@@ -25,7 +25,6 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from homeassistant.components.sensor import (
-    SensorDeviceClass,
     SensorEntity,
     SensorStateClass,
 )
@@ -280,7 +279,6 @@ class NestQuestCompletionPctTodaySensor(_NestQuestChildDaySensor):
     """The child's completion percentage for today (100 on a zero-quest day)."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_device_class = SensorDeviceClass.PERCENTAGE
     _attr_native_unit_of_measurement = "%"
     _name_suffix = "completion pct today"
 
