@@ -19,7 +19,6 @@ from homeassistant.helpers.event import async_track_time_change
 from .const import (
     CONF_ADMIN_USER_IDS,
     CONF_UPDATE_INTERVAL,
-    DEFAULT_HORIZON_DAYS,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     LOGGER,
@@ -268,43 +267,10 @@ async def _async_owner_user_ids(hass: HomeAssistant) -> list[str]:
     return owners
 
 
-def _day_rollover_hour_minute(options: dict[str, Any]) -> tuple[int, int]:
-    """Return the (hour, minute) the daily rollover fires at from ``options``.
-
-    Thin shim over :class:`NestQuestSettings`: the options flow validates
-    ``day_rollover_time`` as a strict ``HH:MM`` string, so a stored value
-    never needs re-validation here; a missing key falls back to
-    :data:`~.const.DEFAULT_DAY_ROLLOVER_TIME`.
-    """
-    return NestQuestSettings.from_options(options).day_rollover_hour_minute
-
-
-def _configured_horizon_days(options: dict[str, Any]) -> int:
-    """Return the configured generation horizon, validated, else the default.
-
-    Thin shim over :class:`NestQuestSettings`.  The settings object's
-    ``from_options`` re-checks ``horizon_days`` — rejecting bools,
-    non-ints, and sub-1 values, falling back to
-    :data:`~.const.DEFAULT_HORIZON_DAYS` — so a malformed option can
-    never shrink or explode the materialized horizon.
-    """
-    try:
-        return NestQuestSettings.from_options(options).horizon_days
-    except ValueError:
-        # A malformed stored option (a bad time string) must not crash
-        # startup; the horizon itself was already validated above, so a
-        # ValueError here can only come from a sibling time field — fall
-        # back to the default horizon the same way the pre-settings path
-        # tolerated partial options.
-        return DEFAULT_HORIZON_DAYS
-
-
 async def _run_horizon_materialization(
     hass: HomeAssistant,
     database: NestQuestDatabase,
     settings: NestQuestSettings | None = None,
-    *,
-    horizon_days: int | None = None,
 ) -> None:
     """Materialize the rolling horizon ``[today, today + horizon_days]``.
 
@@ -315,24 +281,18 @@ async def _run_horizon_materialization(
 
     This is the ONE generation path: the startup backfill, the daily rollover
     listener and the ``regenerate`` service all funnel through it, so there is
-    no duplicated materialization logic.  Callers SHOULD pass a
-    :class:`NestQuestSettings` instance built from ``entry.options``; the
-    legacy ``horizon_days`` keyword is kept for callers that have not yet
-    been converted and overrides the settings value when supplied.  When
-    neither is given the window sizes to
-    :data:`~.const.DEFAULT_HORIZON_DAYS`.
+    no duplicated materialization logic.  ``settings`` carries the entry's
+    validated ``horizon_days``; when omitted a default
+    :class:`NestQuestSettings` is used (its horizon is the configured
+    default).  The window itself comes from :meth:`settings.horizon_window`
+    so the helper is real and shared (not recomputed inline here).
     """
-    if settings is not None:
-        horizon = settings.horizon_days
-    else:
-        horizon = horizon_days if horizon_days is not None else DEFAULT_HORIZON_DAYS
+    if settings is None:
+        settings = NestQuestSettings()
     time_zone = ZoneInfo(hass.config.time_zone)
     today = datetime.datetime.now(time_zone).date()
-    start_date = today.isoformat()
-    end_date = (
-        today + datetime.timedelta(days=horizon)
-    ).isoformat()
-    await _materialize_run(database, start_date, end_date, today=today)
+    start, end = settings.horizon_window(today)
+    await _materialize_run(database, start.isoformat(), end.isoformat(), today=today)
 
 
 def _register_day_rollover_listener(
@@ -507,13 +467,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Build the explicit settings object from entry.options ONCE: the
         # horizon materialization and the daily-rollover listener both
         # consume it, so core never reads HA config itself.  A malformed
-        # stored option falls back to the defaults (the same way the
-        # pre-settings path tolerated a partial options dict) rather than
-        # crashing setup.
-        try:
-            settings = NestQuestSettings.from_options(entry.options)
-        except ValueError:
-            settings = NestQuestSettings()
+        # stored option falls back PER FIELD (via from_options_resilient)
+        # so a single bad sibling option cannot silently reset the user's
+        # horizon_days or day_rollover_time — the two fields core consumes
+        # — rather than the all-or-nothing reset a single try/except would
+        # cause (a malformed morning_summary_time used to wipe horizon_days).
+        settings = NestQuestSettings.from_options_resilient(entry.options)
         remove_update_listener = entry.add_update_listener(_async_update_listener)
         remove_time_change_listener = _register_day_rollover_listener(
             hass, database, settings

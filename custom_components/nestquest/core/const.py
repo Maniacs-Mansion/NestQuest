@@ -2,10 +2,18 @@
 from __future__ import annotations
 
 import logging
+import re
 
 DOMAIN = "nestquest"
 LOGGER_NAME = "custom_components.nestquest"
 LOGGER = logging.getLogger(LOGGER_NAME)
+
+#: Strict 24-hour ``HH:MM`` pattern shared by the options flow and the
+#: settings object's time validation, so a stored option and a freshly
+#: validated form submit parse the same way.  Defined here (HA-free) so
+#: both the integration's options flow and the core settings module
+#: import ONE pattern instead of re-copying it.
+TIME_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 
 # Platforms set up per config entry (Feature 10): the per-child day
 # sensors and binary sensors.

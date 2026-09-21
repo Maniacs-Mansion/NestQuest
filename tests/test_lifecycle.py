@@ -526,24 +526,29 @@ async def test_setup_backfills_configured_horizon_days(hass, make_entry) -> None
     ).list_by_date_range(child_id, beyond, beyond_end) == []
 
 
-def test_configured_horizon_days_validates_and_falls_back() -> None:
-    """The configured horizon is validated; a malformed value uses the default."""
-    import custom_components.nestquest as nestquest
+def test_from_options_horizon_validates_and_defaults() -> None:
+    """from_options returns the configured horizon, defaulting when absent/None.
 
-    assert nestquest._configured_horizon_days({CONF_HORIZON_DAYS: 5}) == 5
-    assert nestquest._configured_horizon_days({}) == DEFAULT_HORIZON_DAYS
+    Repointed from the removed ``_configured_horizon_days`` shim: a valid
+    horizon is read, an absent or None key falls back to the default, and
+    a malformed value RAISES (the integration's ``from_options_resilient``
+    handles the per-field fall-back at setup, not this strict path).
+    """
+    from custom_components.nestquest.settings import NestQuestSettings
+
+    assert NestQuestSettings.from_options({CONF_HORIZON_DAYS: 5}).horizon_days == 5
     assert (
-        nestquest._configured_horizon_days({CONF_HORIZON_DAYS: True})
-        == DEFAULT_HORIZON_DAYS
+        NestQuestSettings.from_options({}).horizon_days == DEFAULT_HORIZON_DAYS
     )
     assert (
-        nestquest._configured_horizon_days({CONF_HORIZON_DAYS: "5"})
+        NestQuestSettings.from_options(
+            {CONF_HORIZON_DAYS: None}
+        ).horizon_days
         == DEFAULT_HORIZON_DAYS
     )
-    assert (
-        nestquest._configured_horizon_days({CONF_HORIZON_DAYS: 0})
-        == DEFAULT_HORIZON_DAYS
-    )
+    for bad in (True, "5", 0):
+        with pytest.raises(ValueError):
+            NestQuestSettings.from_options({CONF_HORIZON_DAYS: bad})
 
 
 async def test_regenerate_service_registered_and_materializes(
