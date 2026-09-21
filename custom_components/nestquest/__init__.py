@@ -496,6 +496,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             entry_id=entry.entry_id,
             database=database,
+            settings=settings,
             update_interval_seconds=entry.options.get(
                 CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
             ),
