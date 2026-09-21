@@ -1,7 +1,6 @@
 """Options flow for NestQuest post-setup settings."""
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import voluptuous as vol
@@ -33,18 +32,17 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     MIN_UPDATE_INTERVAL,
+    TIME_PATTERN,
 )
 from .admin_allowlist import list_admin_ids, set_admin_ids
 
 MIN_HORIZON_DAYS = 1
 MIN_PANEL_IDLE_TIMEOUT = 30
 
-_TIME_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
-
 
 def _parse_time(value: str) -> bool:
     """Return True when value is a valid 24-hour HH:MM string."""
-    return _TIME_PATTERN.fullmatch(value) is not None
+    return TIME_PATTERN.fullmatch(value) is not None
 
 
 def _async_validate(user_input: dict[str, Any]) -> dict[str, str]:
