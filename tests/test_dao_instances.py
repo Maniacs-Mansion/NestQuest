@@ -352,7 +352,7 @@ def test_upsert_no_past_check_uses_execution_date_not_call_date(
 
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(
-            "core.dao_instances.datetime",
+            "custom_components.nestquest.core.dao_instances.datetime",
             _ShiftingModule(),
         )
         try:
@@ -362,7 +362,7 @@ def test_upsert_no_past_check_uses_execution_date_not_call_date(
             # the lock, the IN-LOCK re-check sees tomorrow and must
             # reject the insert — the stale call-date pre-check alone
             # would have let it through.
-            import core.dao_instances as mod
+            import custom_components.nestquest.core.dao_instances as mod
 
             async def _lock_holder():
                 # Hold the CONNECTION lock across a transaction until
@@ -1030,8 +1030,8 @@ def test_no_mutation_sql_for_completion_events_anywhere() -> None:
     # INSERT statements are stripped before scanning so only genuine
     # UPDATE/DELETE/non-DAO-INSERT paths hit the pattern.
     insert_exempt = {
-        "custom_components/nestquest/dao_instances.py",
-        "custom_components/nestquest/migrations.py",  # the rebuild
+        "custom_components/nestquest/core/dao_instances.py",
+        "custom_components/nestquest/core/migrations.py",  # the rebuild
         # migrations re-create the table via INSERT..SELECT (append-
         # order preserved); UPDATE/DELETE stays forbidden everywhere
         "tests/test_schema.py",

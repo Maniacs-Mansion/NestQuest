@@ -7,4 +7,4 @@ working.
 """
 from __future__ import annotations
 
-from core.dao_meta import *  # noqa: F401,F403
+from .core.dao_meta import *  # noqa: F401,F403

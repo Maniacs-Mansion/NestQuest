@@ -313,7 +313,7 @@ def test_definition_business_regeneration_uses_pinned_today_not_host(
     business operations must regenerate against the pinned date and keep
     that first local day, proving the threaded ``today`` wins.
     """
-    import core.dao_instances as dao_instances_module
+    import custom_components.nestquest.core.dao_instances as dao_instances_module
 
     pinned = datetime.date(2026, 1, 14)
     host_today = datetime.date(2026, 1, 15)

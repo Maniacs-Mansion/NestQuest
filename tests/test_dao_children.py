@@ -487,17 +487,17 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
     scan_roots = [package, repo_root / "tests"]
 
     allowed = {
-        "custom_components/nestquest/dao_children.py",  # the DAO itself
-        "custom_components/nestquest/dao_rules.py",  # validates child
+        "custom_components/nestquest/core/dao_children.py",  # the DAO itself
+        "custom_components/nestquest/core/dao_rules.py",  # validates child
         # activeness on assignment (FK to children, done-condition
         # 'validates that the assigned child is active')
-        "custom_components/nestquest/dao_presence.py",  # validates the
+        "custom_components/nestquest/core/dao_presence.py",  # validates the
         # schedule/override child exists before writing (same FK shape
         # as dao_rules: one existence SELECT per write)
-        "custom_components/nestquest/dao_instances.py",  # validates the
+        "custom_components/nestquest/core/dao_instances.py",  # validates the
         # instance/event child exists before writing (same FK shape)
-        "custom_components/nestquest/schema.py",  # declares the DDL
-        "custom_components/nestquest/migrations.py",  # applies the DDL
+        "custom_components/nestquest/core/schema.py",  # declares the DDL
+        "custom_components/nestquest/core/migrations.py",  # applies the DDL
         "tests/test_schema.py",  # tests the DDL
         "tests/test_migrations.py",  # tests migration application
         "tests/test_dao_children.py",  # this file, scanned separately

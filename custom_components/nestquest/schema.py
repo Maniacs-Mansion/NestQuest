@@ -7,4 +7,4 @@ working.
 """
 from __future__ import annotations
 
-from core.schema import *  # noqa: F401,F403
+from .core.schema import *  # noqa: F401,F403

@@ -553,9 +553,9 @@ def test_presence_sql_lives_only_in_dao_module() -> None:
     scan_roots = [package, repo_root / "tests"]
 
     allowed = {
-        "custom_components/nestquest/dao_presence.py",  # this DAO
-        "custom_components/nestquest/schema.py",  # declares the DDL
-        "custom_components/nestquest/migrations.py",  # applies the DDL
+        "custom_components/nestquest/core/dao_presence.py",  # this DAO
+        "custom_components/nestquest/core/schema.py",  # declares the DDL
+        "custom_components/nestquest/core/migrations.py",  # applies the DDL
         "tests/test_schema.py",  # tests the DDL
         "tests/test_migrations.py",  # tests migration application
         "tests/test_dao_presence.py",  # this file, scanned separately

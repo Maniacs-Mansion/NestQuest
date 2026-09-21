@@ -7,5 +7,5 @@ working.
 """
 from __future__ import annotations
 
-from core.recurrence import *  # noqa: F401,F403
-from core.recurrence import _month_end, _nth_weekday_of_month  # noqa: F401
+from .core.recurrence import *  # noqa: F401,F403
+from .core.recurrence import _month_end, _nth_weekday_of_month  # noqa: F401

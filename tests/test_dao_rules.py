@@ -1218,12 +1218,12 @@ def test_rules_and_definitions_sql_lives_only_in_dao_module() -> None:
     scan_roots = [package, repo_root / "tests"]
 
     allowed = {
-        "custom_components/nestquest/dao_rules.py",  # this DAO
-        "custom_components/nestquest/dao_instances.py",  # validates the
+        "custom_components/nestquest/core/dao_rules.py",  # this DAO
+        "custom_components/nestquest/core/dao_instances.py",  # validates the
         # definition exists + fetches its assignee before generating an
         # instance (the instance must snapshot the definition's child)
-        "custom_components/nestquest/schema.py",  # declares the DDL
-        "custom_components/nestquest/migrations.py",  # applies the DDL
+        "custom_components/nestquest/core/schema.py",  # declares the DDL
+        "custom_components/nestquest/core/migrations.py",  # applies the DDL
         "tests/test_schema.py",  # tests the DDL
         "tests/test_migrations.py",  # tests migration application
         "tests/test_dao_rules.py",  # this file, scanned separately

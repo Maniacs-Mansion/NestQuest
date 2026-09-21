@@ -7,8 +7,8 @@ inside the integration keep working.
 """
 from __future__ import annotations
 
-from core.dao_rules import *  # noqa: F401,F403
-from core.dao_rules import (  # noqa: F401
+from .core.dao_rules import *  # noqa: F401,F403
+from .core.dao_rules import (  # noqa: F401
     _UNSET,
     _validate_date,
     _validate_time,

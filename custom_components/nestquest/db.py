@@ -13,7 +13,7 @@ from typing import Any, TypeVar
 
 from homeassistant.core import HomeAssistant
 
-from core.db import ExecutionResult, NestQuestDatabase
+from .core.db import ExecutionResult, NestQuestDatabase
 
 __all__ = ["ExecutionResult", "NestQuestDatabase", "make_database"]
 

@@ -13,7 +13,7 @@ import pytest
 
 from conftest import executor_for, make_hass
 
-import core.db as db_module
+import custom_components.nestquest.core.db as db_module
 from custom_components.nestquest.db import NestQuestDatabase
 
 

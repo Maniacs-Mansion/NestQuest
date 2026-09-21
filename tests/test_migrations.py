@@ -707,7 +707,7 @@ def test_noop_run_logs_no_migration(caplog, tmp_path) -> None:
     try:
         _migrate(database)
         caplog.clear()
-        with caplog.at_level(logging.INFO, logger="core.migrations"):
+        with caplog.at_level(logging.INFO, logger="custom_components.nestquest.core.migrations"):
             _migrate(database)
         migrated = [
             r for r in caplog.records if "migrated" in r.getMessage().lower()
@@ -722,7 +722,7 @@ def test_noop_run_is_logged_at_debug_level(caplog, tmp_path) -> None:
     try:
         _migrate(database)
         caplog.clear()
-        with caplog.at_level(logging.DEBUG, logger="core.migrations"):
+        with caplog.at_level(logging.DEBUG, logger="custom_components.nestquest.core.migrations"):
             _migrate(database)
         assert any(
             f"already at version {len(MIGRATIONS)}" in r.getMessage()

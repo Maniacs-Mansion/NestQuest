@@ -1039,7 +1039,7 @@ def test_regenerate_for_child_uses_single_anchor_across_midnight(
         clock["reads"] += 1
         return day0 if clock["reads"] == 1 else day1
 
-    import core.dao_instances as dao_instances_module
+    import custom_components.nestquest.core.dao_instances as dao_instances_module
 
     monkeypatch.setattr(dao_instances_module, "_today", _fake_today)
 

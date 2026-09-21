@@ -7,5 +7,5 @@ working.
 """
 from __future__ import annotations
 
-from core.dao_children import *  # noqa: F401,F403
-from core.dao_children import _CONNECTION_LOCKS, _connection_lock  # noqa: F401
+from .core.dao_children import *  # noqa: F401,F403
+from .core.dao_children import _CONNECTION_LOCKS, _connection_lock  # noqa: F401

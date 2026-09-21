@@ -27,7 +27,7 @@ def test_returns_absolute_path_from_config_path(monkeypatch) -> None:
     # Path resolution only: the parent-dir mkdir is a side effect of
     # core.store and is exercised elsewhere; suppress it here so the
     # absolute-path assertion can run against /config (non-writable).
-    monkeypatch.setattr("core.store._ensure_dir", lambda path: None)
+    monkeypatch.setattr("custom_components.nestquest.core.store._ensure_dir", lambda path: None)
     hass = _make_hass(Path("/config"), execute=False)
     db_path = _run(store.async_get_db_path(hass))
     hass.config.path.assert_called_once_with(SQLITE_DB_FILENAME)
@@ -203,7 +203,7 @@ def test_no_file_creation_calls_in_store() -> None:
 
 
 def test_container_style_path_resolves(monkeypatch) -> None:
-    monkeypatch.setattr("core.store._ensure_dir", lambda path: None)
+    monkeypatch.setattr("custom_components.nestquest.core.store._ensure_dir", lambda path: None)
     hass = _make_hass(Path("/config"), execute=False)
     assert _run(store.async_get_db_path(hass)) == Path("/config") / SQLITE_DB_FILENAME
 

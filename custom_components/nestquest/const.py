@@ -7,4 +7,4 @@ working without touching every import line.
 """
 from __future__ import annotations
 
-from core.const import *  # noqa: F401,F403
+from .core.const import *  # noqa: F401,F403

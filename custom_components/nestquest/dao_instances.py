@@ -7,5 +7,5 @@ working.
 """
 from __future__ import annotations
 
-from core.dao_instances import *  # noqa: F401,F403
-from core.dao_instances import _resolve_today  # noqa: F401
+from .core.dao_instances import *  # noqa: F401,F403
+from .core.dao_instances import _resolve_today  # noqa: F401
