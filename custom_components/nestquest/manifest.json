@@ -9,10 +9,10 @@
     "frontend",
     "http"
   ],
-  "documentation": "https://github.com/talon2king/NestQuest",
+  "documentation": "https://github.com/Maniacs-Mansion/NestQuest",
   "integration_type": "hub",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/talon2king/NestQuest/issues",
+  "issue_tracker": "https://github.com/Maniacs-Mansion/NestQuest/issues",
   "requirements": [],
-  "version": "0.3.0"
+  "version": "0.5.0"
 }

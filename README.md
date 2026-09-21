@@ -13,14 +13,14 @@ NestQuest helps households coordinate daily life, chore tracking, custody schedu
 1. Ensure [HACS (Home Assistant Community Store)](https://hacs.xyz/) is installed.
 2. In Home Assistant, open **HACS** > **Integrations**.
 3. Select the three-dots menu in the top right and click **Custom repositories**.
-4. Enter the repository URL: `https://github.com/talon2king/NestQuest`
+4. Enter the repository URL: `https://github.com/Maniacs-Mansion/NestQuest`
 5. Select category **Integration** and click **Add**.
 6. Search for **NestQuest** and click **Download**.
 7. Restart Home Assistant.
 
 > **Note:** Development happens in the private Gitea repository
 > (`https://code.cubecraftlabs.com/Maniacs_Mansion/NestQuest`). The GitHub
-> repository is a public mirror maintained for HACS distribution.
+> repository is a private mirror maintained for HACS distribution.
 
 ### Manual Installation
 
