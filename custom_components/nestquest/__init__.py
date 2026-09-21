@@ -24,7 +24,7 @@ from .const import (
     LOGGER,
     PLATFORMS,
 )
-from .settings import NestQuestSettings
+from .core.settings import NestQuestSettings
 from .frontend import async_register_frontend
 from .coordinator import NestQuestCoordinator
 from .db import NestQuestDatabase, make_database
@@ -237,7 +237,6 @@ class NestQuestRuntimeData:
     """Runtime data stored on a NestQuest config entry."""
 
     entry_id: str
-    options: dict[str, Any]
     settings: NestQuestSettings
     database: NestQuestDatabase
     remove_update_listener: Callable[[], Any]
@@ -270,7 +269,7 @@ async def _async_owner_user_ids(hass: HomeAssistant) -> list[str]:
 async def _run_horizon_materialization(
     hass: HomeAssistant,
     database: NestQuestDatabase,
-    settings: NestQuestSettings | None = None,
+    settings: NestQuestSettings,
 ) -> None:
     """Materialize the rolling horizon ``[today, today + horizon_days]``.
 
@@ -281,14 +280,12 @@ async def _run_horizon_materialization(
 
     This is the ONE generation path: the startup backfill, the daily rollover
     listener and the ``regenerate`` service all funnel through it, so there is
-    no duplicated materialization logic.  ``settings`` carries the entry's
-    validated ``horizon_days``; when omitted a default
-    :class:`NestQuestSettings` is used (its horizon is the configured
-    default).  The window itself comes from :meth:`settings.horizon_window`
-    so the helper is real and shared (not recomputed inline here).
+    no duplicated materialization logic.  ``settings`` (REQUIRED — there is no
+    silent default; every caller already passes the entry's validated
+    :class:`NestQuestSettings`) carries the configured ``horizon_days``.  The
+    window itself comes from :meth:`settings.horizon_window` so the helper is
+    real and shared (not recomputed inline here).
     """
-    if settings is None:
-        settings = NestQuestSettings()
     time_zone = ZoneInfo(hass.config.time_zone)
     today = datetime.datetime.now(time_zone).date()
     start, end = settings.horizon_window(today)
@@ -329,7 +326,9 @@ def _find_live_runtime_data(hass: HomeAssistant) -> NestQuestRuntimeData | None:
     their own; they resolve whichever config entry's runtime data is
     currently live at call time, so none of them can hold a stale handle
     to a closed connection after another entry unloads.  The record also
-    carries that entry's options (e.g. the configured horizon).
+    carries that entry's validated ``settings`` (e.g. the configured
+    horizon) so service handlers read horizon days off it rather than
+    re-reading HA config.
     """
     for runtime_data in hass.data.get(DOMAIN, {}).values():
         database = getattr(runtime_data, "database", None)
@@ -505,7 +504,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_config_entry_first_refresh()
         runtime_data = NestQuestRuntimeData(
             entry_id=entry.entry_id,
-            options=dict(entry.options),
             settings=settings,
             database=database,
             remove_update_listener=remove_update_listener,

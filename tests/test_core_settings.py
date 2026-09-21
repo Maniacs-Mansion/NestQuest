@@ -353,6 +353,19 @@ def test_direct_construction_rejects_non_int_horizon(value: Any) -> None:
 
 
 
+def test_direct_construction_strips_notify_target() -> None:
+    """__post_init__ normalises notify_target the SAME way from_options does.
+
+    P3: a hand-built ``NestQuestSettings(notify_target=' x ')`` is
+    stripped to ``'x'`` (and a whitespace-only value to ``''``) so direct
+    construction behaves like the options flow; a padded value cannot
+    slip through __post_init__ either.
+    """
+    assert NestQuestSettings(notify_target="  notify.x  ").notify_target == "notify.x"
+    assert NestQuestSettings(notify_target="   ").notify_target == ""
+    assert NestQuestSettings(notify_target="notify.x").notify_target == "notify.x"
+
+
 def test_settings_is_frozen() -> None:
     """The dataclass is frozen so a stale settings object cannot be mutated."""
     s = NestQuestSettings()
@@ -440,6 +453,22 @@ _CONFIG_ATTRS = frozenset({"config", "options", "data"})
 #: Dynamic config-entry reads via getattr/hasattr with a string argument.
 _GETATTR_FUNCS = frozenset({"getattr", "hasattr"})
 
+#: The dynamic-import function the string-based import bypass uses.
+#: ``importlib.import_module("homeassistant...")`` reaches the HA package
+#: without an ``import homeassistant`` statement the static import check
+#: sees, so the scanner must recognise the call shape too.
+_IMPORT_MODULE_FUNCS = frozenset({"import_module"})
+
+
+def _is_import_module_call(node: ast.Call) -> bool:
+    """True for ``importlib.import_module(...)`` or a bare ``import_module(...)``."""
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return func.attr in _IMPORT_MODULE_FUNCS
+    if isinstance(func, ast.Name):
+        return func.id in _IMPORT_MODULE_FUNCS
+    return False
+
 
 def _scan_source_for_ha_config(
     source: str, *, name: str = "<snippet>"
@@ -450,14 +479,24 @@ def _scan_source_for_ha_config(
     chain check missed):
 
     - any ``import homeassistant`` / ``from homeassistant ...``;
+    - any ``importlib.import_module('homeassistant...')`` (a string-based
+      import that reaches HA without an ``import homeassistant`` statement
+      the static import check can see);
     - any ``Name``/``arg`` whose id is ``hass`` or ``config_entry``
       (HA-specific identifiers with no legitimate core use);
+    - any call keyword whose name is ``hass`` or ``config_entry``
+      (catches ``foo(hass=...)`` / ``handler(config_entry=...)`` — the
+      bare-Name check misses keyword arguments);
     - any attribute access whose ``attr`` is ``hass``/``entry``/
       ``config_entry`` (catches ``self.hass``, ``self.entry``,
       ``obj.config_entry`` — root names the old check could not see);
     - any attribute access whose ``attr`` is ``config``/``options``/
-      ``data`` (catches ``hass.config``, ``config_entry.options``,
-      ``self.entry.options``, ``runtime.options`` regardless of root);
+      ``data`` — these are Home Assistant config-entry attributes with no
+      legitimate core use (``.config`` reads ``hass.config``, ``.options``
+      reads ``config_entry.options``, ``.data`` reads ``config_entry.data``);
+      flagging the attribute ANYWHERE (regardless of root) is what catches
+      ``runtime.options``, which the old root-only check missed.  No core
+      module currently reads any of these attributes;
     - any ``getattr``/``hasattr`` call whose string argument is
       ``'config'``/``'options'``/``'data'`` (catches the dynamic read
       ``getattr(hass, 'config')`` the static attribute check cannot see).
@@ -501,6 +540,16 @@ def _scan_source_for_ha_config(
                 offenders.append(
                     f"{name}:{node.lineno} forbidden parameter: {node.arg!r}"
                 )
+        elif isinstance(node, ast.keyword):
+            # A call keyword like ``foo(hass=...)``: the bare-Name check
+            # sees the value, not the keyword's own name, so a HA object
+            # could be passed by keyword without tripping it.  ``arg`` is
+            # ``None`` for ``**kwargs`` unpacking, which is not a name.
+            if node.arg is not None and node.arg in _FORBIDDEN_NAMES:
+                offenders.append(
+                    f"{name}:{node.lineno} forbidden keyword argument: "
+                    f"{node.arg!r}"
+                )
         elif isinstance(node, ast.Attribute):
             if node.attr in _FORBIDDEN_ATTRS:
                 offenders.append(
@@ -512,6 +561,19 @@ def _scan_source_for_ha_config(
                     f".{node.attr}"
                 )
         elif isinstance(node, ast.Call):
+            if _is_import_module_call(node):
+                # The first positional argument is the module string; a
+                # constant ``'homeassistant...'`` is the bypass shape.
+                for arg in node.args:
+                    if (
+                        isinstance(arg, ast.Constant)
+                        and isinstance(arg.value, str)
+                        and _is_homeassistant(arg.value)
+                    ):
+                        offenders.append(
+                            f"{name}:{node.lineno} dynamic homeassistant "
+                            f"import: import_module({arg.value!r})"
+                        )
             func = node.func
             if isinstance(func, ast.Name) and func.id in _GETATTR_FUNCS:
                 for arg in node.args:
@@ -543,7 +605,13 @@ def test_core_modules_have_no_ha_config_reads() -> None:
     config-entry attribute reads ``.config``/``.options``/``.data``, and
     dynamic ``getattr``/``hasattr`` reads of them — so a chain rooted at
     ``self`` or ``runtime`` (which the old root-only check missed) is now
-    caught.  Docstring mentions pass: AST only sees code.
+    caught.  ``.config``/``.options``/``.data`` are banned because they are
+    Home Assistant config-entry attributes with no legitimate core use:
+    core receives the resolved values via the explicit
+    :class:`NestQuestSettings` object the integration builds from
+    ``entry.options``, so any read of those attributes in ``core/`` is a
+    config-entry coupling the settings object exists to remove.
+    Docstring mentions pass: AST only sees code.
     """
     py_files = sorted(CORE_PKG.rglob("*.py"))
     assert py_files, "core package not found"
@@ -570,10 +638,46 @@ def test_ast_scan_flags_each_bypass_shape() -> None:
         "getattr(hass,'config')": "x = getattr(hass, 'config')\n",
         "runtime.options": "x = runtime.options\n",
         "hasattr(obj,'data')": "x = hasattr(obj, 'data')\n",
+        "importlib.import_module('homeassistant')": (
+            "import importlib\nimportlib.import_module('homeassistant')\n"
+        ),
+        "import_module('homeassistant.helpers')": (
+            "from importlib import import_module\n"
+            "import_module('homeassistant.helpers')\n"
+        ),
+        "handler(hass=...)": "handler(hass=obj)\n",
+        "handler(config_entry=...)": "handler(config_entry=obj)\n",
     }
     for label, src in snippets.items():
         offenders = _scan_source_for_ha_config(src, name=label)
         assert offenders, f"scanner missed {label!r}: {src!r}"
+
+
+def test_ast_scan_allows_non_homeassistant_import_module() -> None:
+    """A dynamic import of a NON-homeassistant module is not flagged.
+
+    ``importlib.import_module`` is a legitimate way to load a non-HA
+    module lazily; only a ``homeassistant...`` target is the bypass shape.
+    """
+    src = (
+        "import importlib\n"
+        "m = importlib.import_module('custom_components.nestquest.core')\n"
+    )
+    assert _scan_source_for_ha_config(src, name="non-ha-import") == []
+
+
+def test_ast_scan_allows_non_forbidden_keyword_arguments() -> None:
+    """A call with non-forbidden keyword arguments is not flagged.
+
+    Only ``hass=``/``config_entry=`` are forbidden as keyword names; an
+    unrelated keyword like ``hass_data=`` or ``entry_id=`` must not
+    false-positive (and ``**kwargs`` unpacking has ``arg=None``).
+    """
+    src = (
+        "foo(entry_id=1, name='x')\n"
+        "bar(**kwargs)\n"
+    )
+    assert _scan_source_for_ha_config(src, name="non-forbidden-kwargs") == []
 
 
 def test_ast_scan_allows_legitimate_entry_loop_var() -> None:

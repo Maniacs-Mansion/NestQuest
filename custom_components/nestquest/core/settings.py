@@ -142,11 +142,79 @@ def _resolve_optional_str(value: Any) -> str:
     padded value (e.g. one migrated from an older schema) by normalizing
     it rather than crashing setup.  The ``None``-as-absent mapping lives
     ONLY in :meth:`NestQuestSettings.from_options` (via
-    :func:`_option_value`).
+    :func:`_option_value`).  :meth:`NestQuestSettings.__post_init__`
+    applies this SAME normalizer so a hand-built
+    ``NestQuestSettings(notify_target=' x ')`` is stripped to ``'x'``
+    exactly like the options-flow path (no padded value can slip through
+    direct construction either).
     """
     if not isinstance(value, str):
         raise ValueError(f"notify_target must be a string, got {value!r}")
     return value.strip()
+
+
+#: The single field table the two builders share.  Each row is
+#: ``(field_name, CONF_* key, default, validator)``.  ``from_options``
+#: applies every validator (raising on the first invalid value) while
+#: ``from_options_resilient`` wraps each in its own try/except so a single
+#: bad sibling falls back to its default alone.  Driving both builders
+#: from this table avoids three-way drift between ``__post_init__``'s
+#: inline checks and the two option builders' field lists: the only
+#: places that enumerate the fields are this table and
+#: ``__post_init__`` (which validates a hand-built instance without the
+#: None->default mapping, so it stays inline).
+_FIELDS: tuple[tuple[str, str, Any, Callable[[Any], Any]], ...] = (
+    ("horizon_days", CONF_HORIZON_DAYS, DEFAULT_HORIZON_DAYS, _resolve_horizon_days),
+    (
+        "day_rollover_time",
+        CONF_DAY_ROLLOVER_TIME,
+        DEFAULT_DAY_ROLLOVER_TIME,
+        lambda v: _validate_hhmm(v, field="day_rollover_time"),
+    ),
+    ("notify_target", CONF_NOTIFY_TARGET, "", _resolve_optional_str),
+    (
+        "morning_summary_time",
+        CONF_MORNING_SUMMARY_TIME,
+        DEFAULT_MORNING_SUMMARY_TIME,
+        lambda v: _validate_hhmm(v, field="morning_summary_time"),
+    ),
+    (
+        "afternoon_reminder_time",
+        CONF_AFTERNOON_REMINDER_TIME,
+        DEFAULT_AFTERNOON_REMINDER_TIME,
+        lambda v: _validate_hhmm(v, field="afternoon_reminder_time"),
+    ),
+    (
+        "end_of_day_report_time",
+        CONF_END_OF_DAY_REPORT_TIME,
+        DEFAULT_END_OF_DAY_REPORT_TIME,
+        lambda v: _validate_hhmm(v, field="end_of_day_report_time"),
+    ),
+    (
+        "morning_summary_enabled",
+        CONF_MORNING_SUMMARY_ENABLED,
+        DEFAULT_AUTOMATION_ENABLED,
+        _resolve_bool,
+    ),
+    (
+        "afternoon_reminder_enabled",
+        CONF_AFTERNOON_REMINDER_ENABLED,
+        DEFAULT_AUTOMATION_ENABLED,
+        _resolve_bool,
+    ),
+    (
+        "end_of_day_report_enabled",
+        CONF_END_OF_DAY_REPORT_ENABLED,
+        DEFAULT_AUTOMATION_ENABLED,
+        _resolve_bool,
+    ),
+    (
+        "celebration_enabled",
+        CONF_CELEBRATION_ENABLED,
+        DEFAULT_AUTOMATION_ENABLED,
+        _resolve_bool,
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -181,14 +249,20 @@ class NestQuestSettings:
         # cannot carry an invalid value: the same rules from_options
         # applies, but WITHOUT the None->default mapping (that lives
         # only in from_options via _option_value).  A None horizon, time,
-        # toggle, or notify target raises here rather than later blowing
-        # up horizon_window or the rollover listener.
+        # or toggle raises here rather than later blowing up
+        # horizon_window or the rollover listener.
         _resolve_horizon_days(self.horizon_days)
         _validate_hhmm(self.day_rollover_time, field="day_rollover_time")
-        if not isinstance(self.notify_target, str):
-            raise ValueError(
-                f"notify_target must be a string, got {self.notify_target!r}"
-            )
+        # ``notify_target`` is normalised the SAME way as from_options
+        # (via _resolve_optional_str): a non-str is rejected and a
+        # padded/whitespace-only value is STRIPPED to its trim.  This
+        # keeps a hand-built ``NestQuestSettings(notify_target=' x ')``
+        # behaving like the options flow (which strips on persist) so a
+        # padded value cannot slip through direct construction either.
+        # The dataclass is frozen, so the stripped value is written via
+        # object.__setattr__.
+        stripped_notify_target = _resolve_optional_str(self.notify_target)
+        object.__setattr__(self, "notify_target", stripped_notify_target)
         _validate_hhmm(self.morning_summary_time, field="morning_summary_time")
         _validate_hhmm(
             self.afternoon_reminder_time, field="afternoon_reminder_time"
@@ -259,66 +333,10 @@ class NestQuestSettings:
             MappingProxyType({}) if options is None else MappingProxyType(options)
         )
         return cls(
-            horizon_days=_resolve_horizon_days(
-                _option_value(opts, CONF_HORIZON_DAYS, DEFAULT_HORIZON_DAYS)
-            ),
-            day_rollover_time=_validate_hhmm(
-                _option_value(
-                    opts, CONF_DAY_ROLLOVER_TIME, DEFAULT_DAY_ROLLOVER_TIME
-                ),
-                field="day_rollover_time",
-            ),
-            notify_target=_resolve_optional_str(
-                _option_value(opts, CONF_NOTIFY_TARGET, "")
-            ),
-            morning_summary_time=_validate_hhmm(
-                _option_value(
-                    opts,
-                    CONF_MORNING_SUMMARY_TIME,
-                    DEFAULT_MORNING_SUMMARY_TIME,
-                ),
-                field="morning_summary_time",
-            ),
-            afternoon_reminder_time=_validate_hhmm(
-                _option_value(
-                    opts,
-                    CONF_AFTERNOON_REMINDER_TIME,
-                    DEFAULT_AFTERNOON_REMINDER_TIME,
-                ),
-                field="afternoon_reminder_time",
-            ),
-            end_of_day_report_time=_validate_hhmm(
-                _option_value(
-                    opts,
-                    CONF_END_OF_DAY_REPORT_TIME,
-                    DEFAULT_END_OF_DAY_REPORT_TIME,
-                ),
-                field="end_of_day_report_time",
-            ),
-            morning_summary_enabled=_resolve_bool(
-                _option_value(
-                    opts, CONF_MORNING_SUMMARY_ENABLED, DEFAULT_AUTOMATION_ENABLED
-                )
-            ),
-            afternoon_reminder_enabled=_resolve_bool(
-                _option_value(
-                    opts,
-                    CONF_AFTERNOON_REMINDER_ENABLED,
-                    DEFAULT_AUTOMATION_ENABLED,
-                )
-            ),
-            end_of_day_report_enabled=_resolve_bool(
-                _option_value(
-                    opts,
-                    CONF_END_OF_DAY_REPORT_ENABLED,
-                    DEFAULT_AUTOMATION_ENABLED,
-                )
-            ),
-            celebration_enabled=_resolve_bool(
-                _option_value(
-                    opts, CONF_CELEBRATION_ENABLED, DEFAULT_AUTOMATION_ENABLED
-                )
-            ),
+            **{
+                field: validator(_option_value(opts, key, default))
+                for field, key, default, validator in _FIELDS
+            }
         )
 
     @classmethod
@@ -345,13 +363,10 @@ class NestQuestSettings:
             MappingProxyType({}) if options is None else MappingProxyType(options)
         )
         resolved: dict[str, Any] = {}
-
-        def _resolve(
-            field: str, key: str, default: Any, fn: Callable[[Any], Any]
-        ) -> None:
+        for field, key, default, validator in _FIELDS:
             raw = _option_value(opts, key, default)
             try:
-                resolved[field] = fn(raw)
+                resolved[field] = validator(raw)
             except ValueError as err:
                 LOGGER.warning(
                     "NestQuest option %s is invalid (%s); falling back "
@@ -361,65 +376,4 @@ class NestQuestSettings:
                     default,
                 )
                 resolved[field] = default
-
-        _resolve(
-            "horizon_days",
-            CONF_HORIZON_DAYS,
-            DEFAULT_HORIZON_DAYS,
-            _resolve_horizon_days,
-        )
-        _resolve(
-            "day_rollover_time",
-            CONF_DAY_ROLLOVER_TIME,
-            DEFAULT_DAY_ROLLOVER_TIME,
-            lambda v: _validate_hhmm(v, field="day_rollover_time"),
-        )
-        _resolve(
-            "notify_target",
-            CONF_NOTIFY_TARGET,
-            "",
-            _resolve_optional_str,
-        )
-        _resolve(
-            "morning_summary_time",
-            CONF_MORNING_SUMMARY_TIME,
-            DEFAULT_MORNING_SUMMARY_TIME,
-            lambda v: _validate_hhmm(v, field="morning_summary_time"),
-        )
-        _resolve(
-            "afternoon_reminder_time",
-            CONF_AFTERNOON_REMINDER_TIME,
-            DEFAULT_AFTERNOON_REMINDER_TIME,
-            lambda v: _validate_hhmm(v, field="afternoon_reminder_time"),
-        )
-        _resolve(
-            "end_of_day_report_time",
-            CONF_END_OF_DAY_REPORT_TIME,
-            DEFAULT_END_OF_DAY_REPORT_TIME,
-            lambda v: _validate_hhmm(v, field="end_of_day_report_time"),
-        )
-        _resolve(
-            "morning_summary_enabled",
-            CONF_MORNING_SUMMARY_ENABLED,
-            DEFAULT_AUTOMATION_ENABLED,
-            _resolve_bool,
-        )
-        _resolve(
-            "afternoon_reminder_enabled",
-            CONF_AFTERNOON_REMINDER_ENABLED,
-            DEFAULT_AUTOMATION_ENABLED,
-            _resolve_bool,
-        )
-        _resolve(
-            "end_of_day_report_enabled",
-            CONF_END_OF_DAY_REPORT_ENABLED,
-            DEFAULT_AUTOMATION_ENABLED,
-            _resolve_bool,
-        )
-        _resolve(
-            "celebration_enabled",
-            CONF_CELEBRATION_ENABLED,
-            DEFAULT_AUTOMATION_ENABLED,
-            _resolve_bool,
-        )
         return cls(**resolved)

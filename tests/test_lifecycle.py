@@ -36,12 +36,12 @@ async def test_setup_stores_runtime_data_in_hass_data(hass, make_entry) -> None:
     assert hass.data[DOMAIN][entry.entry_id] is entry.runtime_data
 
 
-async def test_setup_runtime_data_has_entry_id_and_options(hass, make_entry) -> None:
+async def test_setup_runtime_data_has_entry_id_and_settings(hass, make_entry) -> None:
     entry = _wire(make_entry(options={"horizon_days": 7}), hass.registry)
     await async_setup_entry(hass, entry)
     runtime = entry.runtime_data
     assert runtime.entry_id == entry.entry_id
-    assert runtime.options == {"horizon_days": 7}
+    assert runtime.settings.horizon_days == 7
     assert callable(runtime.remove_update_listener)
 
 
@@ -534,7 +534,7 @@ def test_from_options_horizon_validates_and_defaults() -> None:
     a malformed value RAISES (the integration's ``from_options_resilient``
     handles the per-field fall-back at setup, not this strict path).
     """
-    from custom_components.nestquest.settings import NestQuestSettings
+    from custom_components.nestquest.core.settings import NestQuestSettings
 
     assert NestQuestSettings.from_options({CONF_HORIZON_DAYS: 5}).horizon_days == 5
     assert (
