@@ -18,9 +18,10 @@ the panel payload shaper (:func:`instance_payload`), and the async
 service's panel snapshot route share ONE implementation of both the
 snapshot assembly and the entity-facing attribute payload shape.
 Nothing here imports :mod:`homeassistant`; the builder takes the
-database, the settings object, the target date, and the HA-local
-``now`` (a single clock read the caller already resolved) and returns
-the snapshot, mirroring exactly what the coordinator used to do inline.
+database, the settings object, and the HA-local ``now`` (a single
+clock read the caller already resolved, from which it derives
+``today``) and returns the snapshot, mirroring exactly what the
+coordinator used to do inline.
 
 ``settings`` is accepted because the API route hands in the entry's
 :class:`~.settings.NestQuestSettings`; it is CURRENTLY UNUSED — the
@@ -158,7 +159,6 @@ def instance_payload(
 async def build_snapshot(
     database: NestQuestDatabase,
     settings: NestQuestSettings,
-    today: datetime.date,
     now: datetime.datetime,
 ) -> NestQuestSnapshot:
     """Build the household panel snapshot for ``today`` at the ``now`` instant.
@@ -180,12 +180,13 @@ async def build_snapshot(
     ``now.time()`` against the instance's ``due_time`` for today's open
     instances.  The builder performs NO internal clock read — it never
     calls :func:`datetime.datetime.now` — so the instant is pinned in
-    tests and date and time can never disagree across two reads.
-    ``today`` is the calendar date the caller resolved from the same
-    clock (``now.date()``); it anchors the due-date and cycle-day
-    arithmetic.  ``settings`` is accepted but currently unused (see the
-    module docstring).
+    tests.  ``today`` is derived INSIDE the builder as ``now.date()``,
+    so the calendar date that anchors the due-date and cycle-day
+    arithmetic is always the SAME clock read as the wall-clock time;
+    the two can never disagree.  ``settings`` is accepted but currently
+    unused (see the module docstring).
     """
+    today = now.date()
     today_iso = today.isoformat()
 
     children = await ChildrenDao(database).list_active()

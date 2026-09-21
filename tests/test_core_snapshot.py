@@ -105,7 +105,7 @@ async def test_instance_payload_shape_and_missed_omission() -> None:
     )
 
 
-async def test_build_snapshot_explicit_values(hass, make_entry) -> None:
+async def test_build_snapshot_explicit_values(hass, make_entry, monkeypatch) -> None:
     """The builder produces the documented shape as literals, pinned in time.
 
     Ada is AWAY today (a 2-week schedule whose absent week 0 covers today,
@@ -189,7 +189,7 @@ async def test_build_snapshot_explicit_values(hass, make_entry) -> None:
         today=today,
     )
 
-    built = await build_snapshot(database, settings, today, pinned_now)
+    built = await build_snapshot(database, settings, pinned_now)
 
     assert isinstance(built, NestQuestSnapshot)
     assert built.today_iso == today_iso
@@ -231,7 +231,9 @@ async def test_build_snapshot_explicit_values(hass, make_entry) -> None:
     assert bo_view.state == "done"
     assert bo_view.due_time == "17:00"
     assert bo_view.overdue is False, "overdue is only computed for open state"
-    assert bo_view.completed_at == f"{today_iso}T12:00:00+00:00"
+    assert bo_view.completed_at == pinned_now.astimezone(
+        datetime.timezone.utc
+    ).isoformat()
     assert bo_view.was_on_time is True
 
     # Panel payload shape: Ada open+overdue stays open; Bo done -> completed.
@@ -263,7 +265,9 @@ async def test_build_snapshot_explicit_values(hass, make_entry) -> None:
             "due_time": "17:00",
             "state": "completed",
             "overdue": False,
-            "completed_at": f"{today_iso}T12:00:00+00:00",
+            "completed_at": pinned_now.astimezone(
+                datetime.timezone.utc
+            ).isoformat(),
             "on_time": True,
         }
     ]
@@ -289,3 +293,14 @@ async def test_build_snapshot_explicit_values(hass, make_entry) -> None:
         instance_payload([missed_view], include_missed=True)[0]["state"]
         == "missed"
     )
+
+    # REQUIRED wrapper tie-in: the coordinator's _async_update_data is a
+    # thin WRAPPER over build_snapshot, so pinning its clock to the SAME
+    # pinned_now the builder was called with must reproduce the builder's
+    # snapshot byte-for-byte.  The dataclasses are frozen, so == is a full
+    # deep compare — a wrapper that mis-passed today vs now, or stopped
+    # calling the builder, would diverge here even though the literal
+    # assertions above still pass.
+    monkeypatch.setattr(coordinator, "_local_now", lambda: pinned_now)
+    await coordinator.async_refresh()
+    assert coordinator.data == built

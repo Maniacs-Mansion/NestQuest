@@ -117,7 +117,6 @@ class NestQuestCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> NestQuestSnapshot:
         now = self._local_now()
-        today = now.date()
         return await build_snapshot(
-            self.database, self.settings, today, now
+            self.database, self.settings, now
         )
