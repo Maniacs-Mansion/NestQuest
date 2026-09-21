@@ -8,10 +8,13 @@ dependencies = []
 
 [dependency-groups]
 dev = [
+    "fastapi>=0.115",
+    "httpx>=0.28",
     "jinja2>=3",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24",
     "pyyaml>=6",
+    "uvicorn>=0.30",
     "voluptuous>=0.14",
 ]
 
