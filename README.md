@@ -197,8 +197,13 @@ is simply a Home Assistant client.
      log reads the selected child's slug from the view's URL path, so the
      board → log hop is a plain Lovelace navigation.
 
-   The dashboard contains only the NestQuest panel card for each view —
-   no other cards, no admin controls.
+    Each view's layout MUST be set to **Panel** (Edit Dashboard → pencil on the
+    view → View type: Panel). Home Assistant's default Masonry layout constrains
+    the 1080px-tall NestQuest card to a narrow column; Panel (single-card)
+    layout is what renders the card full-screen at 1920×1080.
+
+    The dashboard contains only the NestQuest panel card for each view —
+    no other cards, no admin controls.
 
    The `quest_log_path` and `board_path` values must match the dashboard
    slug and view paths above: `/<slug>/<view>`. If you chose `nestquest`
@@ -216,7 +221,11 @@ is simply a Home Assistant client.
 3. **Point TouchHub at it.** In the TouchHub launcher, add the **Home
    Assistant Lovelace** app to the dock and paste the dashboard URL from
    step 2 — the party-board view URL, e.g. `/nestquest/board` (TouchHub
-   loads that URL directly as the kiosk landing page).
+   loads that URL directly as the kiosk landing page). Set TouchHub
+   **Auto-Return** to a value GREATER than the quest log's
+   `idle_return_seconds` (default 40s) — recommend **60s or higher**. If
+   Auto-Return is at or below 40s, TouchHub returns to its launcher before
+   the quest log's idle return can navigate back to the party board.
 
 4. **Log the kiosk session in.** Sign in on the device as the dedicated
    kiosk user from step 1, and leave that session logged in.
