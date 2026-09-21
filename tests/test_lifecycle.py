@@ -12,6 +12,7 @@ from custom_components.nestquest.const import (
     CONF_ADMIN_USER_IDS,
     CONF_DAY_ROLLOVER_TIME,
     CONF_HORIZON_DAYS,
+    CONF_MORNING_SUMMARY_TIME,
     DEFAULT_HORIZON_DAYS,
     SERVICE_REGENERATE,
     DOMAIN as DOMAIN_CONST,
@@ -526,29 +527,78 @@ async def test_setup_backfills_configured_horizon_days(hass, make_entry) -> None
     ).list_by_date_range(child_id, beyond, beyond_end) == []
 
 
-def test_from_options_horizon_validates_and_defaults() -> None:
-    """from_options returns the configured horizon, defaulting when absent/None.
+async def test_setup_succeeds_with_fully_malformed_options(
+    hass, make_entry
+) -> None:
+    """A fully malformed options dict falls back per field and setup succeeds.
 
-    Repointed from the removed ``_configured_horizon_days`` shim: a valid
-    horizon is read, an absent or None key falls back to the default, and
-    a malformed value RAISES (the integration's ``from_options_resilient``
-    handles the per-field fall-back at setup, not this strict path).
+    ``horizon_days=True``, ``day_rollover_time='99:99'`` and
+    ``morning_summary_time='25:00'`` are all invalid; the integration's
+    ``from_options_resilient`` falls each back to its default, so setup
+    SUCCEEDS, the day-rollover listener registers at the default hour 0
+    minute 0, and the startup backfill materializes the default horizon
+    window.
     """
-    from custom_components.nestquest.core.settings import NestQuestSettings
+    import datetime
 
-    assert NestQuestSettings.from_options({CONF_HORIZON_DAYS: 5}).horizon_days == 5
-    assert (
-        NestQuestSettings.from_options({}).horizon_days == DEFAULT_HORIZON_DAYS
+    from custom_components.nestquest.dao_instances import QuestInstancesDao
+    from custom_components.nestquest.db import NestQuestDatabase
+    from custom_components.nestquest.migrations import apply_migrations
+    from custom_components.nestquest.store import async_get_db_path
+
+    db_path = await async_get_db_path(hass)
+    pre = NestQuestDatabase(hass.async_add_executor_job)
+    await pre.open(db_path)
+    await apply_migrations(pre)
+    child_id = await _seed_daily_child_and_definition(pre, _local_today(hass))
+    await pre.close()
+
+    entry = _wire(
+        make_entry(
+            options={
+                CONF_HORIZON_DAYS: True,
+                CONF_DAY_ROLLOVER_TIME: "99:99",
+                CONF_MORNING_SUMMARY_TIME: "25:00",
+            }
+        ),
+        hass.registry,
     )
-    assert (
-        NestQuestSettings.from_options(
-            {CONF_HORIZON_DAYS: None}
-        ).horizon_days
-        == DEFAULT_HORIZON_DAYS
+    assert await async_setup_entry(hass, entry) is True
+
+    # The day-rollover listener fell back to the default 00:00.
+    registration = hass.time_change.registrations[0]
+    assert registration["hour"] == 0
+    assert registration["minute"] == 0
+
+    # The startup backfill used the default horizon window.
+    today = _local_today(hass)
+    end = (today + datetime.timedelta(days=DEFAULT_HORIZON_DAYS)).isoformat()
+    records = await QuestInstancesDao(
+        entry.runtime_data.database
+    ).list_by_date_range(child_id, today.isoformat(), end)
+    assert len(records) == DEFAULT_HORIZON_DAYS + 1
+
+
+async def test_setup_keeps_horizon_when_sibling_option_is_bad(
+    hass, make_entry
+) -> None:
+    """A malformed sibling option does not reset the configured horizon.
+
+    ``horizon_days=5`` is valid while ``morning_summary_time='25:00'`` is
+    invalid; ``from_options_resilient`` falls back ONLY the bad sibling,
+    so the entry's resolved settings keep ``horizon_days == 5``.
+    """
+    entry = _wire(
+        make_entry(
+            options={
+                CONF_HORIZON_DAYS: 5,
+                CONF_MORNING_SUMMARY_TIME: "25:00",
+            }
+        ),
+        hass.registry,
     )
-    for bad in (True, "5", 0):
-        with pytest.raises(ValueError):
-            NestQuestSettings.from_options({CONF_HORIZON_DAYS: bad})
+    assert await async_setup_entry(hass, entry) is True
+    assert entry.runtime_data.settings.horizon_days == 5
 
 
 async def test_regenerate_service_registered_and_materializes(

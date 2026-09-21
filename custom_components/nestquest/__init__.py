@@ -467,10 +467,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # horizon materialization and the daily-rollover listener both
         # consume it, so core never reads HA config itself.  A malformed
         # stored option falls back PER FIELD (via from_options_resilient)
-        # so a single bad sibling option cannot silently reset the user's
-        # horizon_days or day_rollover_time — the two fields core consumes
-        # — rather than the all-or-nothing reset a single try/except would
-        # cause (a malformed morning_summary_time used to wipe horizon_days).
+        # so a single bad sibling option cannot reset the user's
+        # horizon_days or day_rollover_time — the two fields core
+        # consumes — to their defaults.
         settings = NestQuestSettings.from_options_resilient(entry.options)
         remove_update_listener = entry.add_update_listener(_async_update_listener)
         remove_time_change_listener = _register_day_rollover_listener(

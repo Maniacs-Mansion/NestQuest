@@ -13,6 +13,7 @@ import datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+from conftest import freeze_nestquest_clock
 from custom_components.nestquest.const import DEFAULT_HORIZON_DAYS
 from custom_components.nestquest.core.settings import NestQuestSettings
 from custom_components.nestquest.dao_children import ChildrenDao
@@ -54,35 +55,10 @@ def _freeze_clock(
 ) -> tuple[datetime.datetime, list]:
     """Freeze the integration's ``datetime`` clock to a fixed aware instant.
 
-    Only ``custom_components.nestquest``'s ``datetime`` binding is patched, so
-    the generation path's "today" reads this instant (localized to whatever
-    time zone it asks for) while every other module and the test harness keep
-    the real clock.  Returns ``(frozen, requested)`` where ``frozen`` is the
-    instant normalized to UTC and ``requested`` is the list of ``tzinfo``
-    objects the code under test passed to ``now`` — so a test can prove the
-    generation path actually requested the configured HA time zone rather
-    than silently reading UTC.
+    Thin wrapper over :func:`conftest.freeze_nestquest_clock` kept for the
+    ``(frozen, requested)`` return shape the timezone assertions read.
     """
-    import custom_components.nestquest as nestquest
-
-    frozen = instant.astimezone(datetime.timezone.utc)
-    requested: list = []
-
-    class _FrozenDatetime(datetime.datetime):
-        @classmethod
-        def now(cls, tz=None):
-            requested.append(tz)
-            if tz is None:
-                return frozen.replace(tzinfo=None)
-            return frozen.astimezone(tz)
-
-    fake_module = SimpleNamespace(
-        datetime=_FrozenDatetime,
-        timedelta=datetime.timedelta,
-        date=datetime.date,
-    )
-    monkeypatch.setattr(nestquest, "datetime", fake_module)
-    return frozen, requested
+    return freeze_nestquest_clock(monkeypatch, instant)
 
 
 def _assert_requested_ha_timezone(requested, time_zone: str) -> None:

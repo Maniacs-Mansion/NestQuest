@@ -24,10 +24,12 @@ import ast
 import datetime
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+import custom_components.nestquest.core as _core_mod
+from conftest import freeze_nestquest_clock
 
 from custom_components.nestquest.const import (
     CONF_AFTERNOON_REMINDER_ENABLED,
@@ -139,6 +141,29 @@ def test_from_options_horizon_absent_falls_back_to_default() -> None:
     )
 
 
+def test_from_options_horizon_validates_and_defaults() -> None:
+    """from_options returns the configured horizon, defaulting when absent/None.
+
+    A valid horizon is read; an absent or None key falls back to the
+    default; and a malformed value RAISES (the integration's
+    ``from_options_resilient`` handles the per-field fall-back at setup,
+    not this strict path).
+    """
+    assert NestQuestSettings.from_options({CONF_HORIZON_DAYS: 5}).horizon_days == 5
+    assert (
+        NestQuestSettings.from_options({}).horizon_days == DEFAULT_HORIZON_DAYS
+    )
+    assert (
+        NestQuestSettings.from_options(
+            {CONF_HORIZON_DAYS: None}
+        ).horizon_days
+        == DEFAULT_HORIZON_DAYS
+    )
+    for bad in (True, "5", 0):
+        with pytest.raises(ValueError):
+            NestQuestSettings.from_options({CONF_HORIZON_DAYS: bad})
+
+
 @pytest.mark.parametrize(
     "value",
     ["25:00", "00:60", "24:00", "9:5", "abc", "07:00:00", 700, ""],
@@ -212,7 +237,7 @@ def test_from_options_strips_notify_target() -> None:
 
 
 # ---------------------------------------------------------------------------
-# from_options_resilient: per-field fallback (P2-1).
+# from_options_resilient: per-field fallback.
 # ---------------------------------------------------------------------------
 
 
@@ -335,7 +360,7 @@ def test_direct_construction_validates() -> None:
 def test_direct_construction_rejects_none(field: str, kwargs: dict[str, Any]) -> None:
     """__post_init__ is STRICT: None is rejected for every field.
 
-    P2-5: the None->default mapping lives ONLY in from_options (via
+    The None->default mapping lives ONLY in from_options (via
     _option_value).  A hand-built NestQuestSettings(field=None) must raise
     in __post_init__ rather than constructing and later blowing up
     horizon_window (timedelta(days=None) -> TypeError) or the rollover
@@ -419,11 +444,7 @@ def test_horizon_window_non_default_horizon() -> None:
 # AST: no HA config reads under core/.
 # ---------------------------------------------------------------------------
 
-CORE_PKG = Path(
-    __import__(
-        "custom_components.nestquest.core", fromlist=["__file__"]
-    ).__file__
-).parent
+CORE_PKG = Path(_core_mod.__file__).parent
 
 
 def _is_homeassistant(module: str) -> bool:
@@ -446,8 +467,8 @@ _FORBIDDEN_ATTRS = frozenset({"hass", "entry", "config_entry"})
 #: Config-entry attribute reads — the shapes ``hass.config``,
 #: ``config_entry.options``, ``self.entry.options``, ``runtime.options``,
 #: ``entry.data``.  Flagging the attribute ANYWHERE (regardless of root)
-#: is what catches ``runtime.options``, which the old root-only check
-#: missed.  No core module currently reads any of these attributes.
+#: catches ``runtime.options``, whose root name is not a forbidden
+#: identifier.  No core module currently reads any of these attributes.
 _CONFIG_ATTRS = frozenset({"config", "options", "data"})
 
 #: Dynamic config-entry reads via getattr/hasattr with a string argument.
@@ -475,8 +496,8 @@ def _scan_source_for_ha_config(
 ) -> list[str]:
     """Return offender strings for HA-coupling in ``source``.
 
-    Flags (each closes a bypass the old root-only ``hass``/``entry``
-    chain check missed):
+    Flags (each closes a bypass a root-only ``hass``/``entry`` chain
+    check would not catch):
 
     - any ``import homeassistant`` / ``from homeassistant ...``;
     - any ``importlib.import_module('homeassistant...')`` (a string-based
@@ -489,14 +510,14 @@ def _scan_source_for_ha_config(
       bare-Name check misses keyword arguments);
     - any attribute access whose ``attr`` is ``hass``/``entry``/
       ``config_entry`` (catches ``self.hass``, ``self.entry``,
-      ``obj.config_entry`` — root names the old check could not see);
+      ``obj.config_entry`` — root names a root-only check could not see);
     - any attribute access whose ``attr`` is ``config``/``options``/
       ``data`` — these are Home Assistant config-entry attributes with no
       legitimate core use (``.config`` reads ``hass.config``, ``.options``
       reads ``config_entry.options``, ``.data`` reads ``config_entry.data``);
       flagging the attribute ANYWHERE (regardless of root) is what catches
-      ``runtime.options``, which the old root-only check missed.  No core
-      module currently reads any of these attributes;
+      ``runtime.options``, whose root name is not a forbidden identifier.
+      No core module currently reads any of these attributes;
     - any ``getattr``/``hasattr`` call whose string argument is
       ``'config'``/``'options'``/``'data'`` (catches the dynamic read
       ``getattr(hass, 'config')`` the static attribute check cannot see).
@@ -604,13 +625,13 @@ def test_core_modules_have_no_ha_config_reads() -> None:
     the HA-object attributes ``.hass``/``.entry``/``.config_entry``, the
     config-entry attribute reads ``.config``/``.options``/``.data``, and
     dynamic ``getattr``/``hasattr`` reads of them — so a chain rooted at
-    ``self`` or ``runtime`` (which the old root-only check missed) is now
-    caught.  ``.config``/``.options``/``.data`` are banned because they are
-    Home Assistant config-entry attributes with no legitimate core use:
-    core receives the resolved values via the explicit
-    :class:`NestQuestSettings` object the integration builds from
-    ``entry.options``, so any read of those attributes in ``core/`` is a
-    config-entry coupling the settings object exists to remove.
+    ``self`` or ``runtime`` (whose root name is not a forbidden
+    identifier) is caught.  ``.config``/``.options``/``.data`` are banned
+    because they are Home Assistant config-entry attributes with no
+    legitimate core use: core receives the resolved values via the
+    explicit :class:`NestQuestSettings` object the integration builds
+    from ``entry.options``, so any read of those attributes in ``core/``
+    is a config-entry coupling the settings object exists to remove.
     Docstring mentions pass: AST only sees code.
     """
     py_files = sorted(CORE_PKG.rglob("*.py"))
@@ -625,11 +646,11 @@ def test_core_modules_have_no_ha_config_reads() -> None:
 
 
 def test_ast_scan_flags_each_bypass_shape() -> None:
-    """Negative control: the scanner flags each bypass shape the old check missed.
+    """Negative control: the scanner flags each bypass a root-only check misses.
 
-    The old scan only flagged chains rooted at a literal name ``hass``/
-    ``entry``.  Each snippet below is a shape it missed; the new scanner
-    must flag every one.
+    A root-only scan flags chains rooted at a literal name ``hass``/
+    ``entry``.  Each snippet below is a shape such a scan would miss;
+    this scanner must flag every one.
     """
     snippets: dict[str, str] = {
         "self.hass.config": "x = self.hass.config\n",
@@ -809,49 +830,18 @@ async def test_materialize_over_non_default_horizon(hass, tmp_path) -> None:
         await database.close()
 
 
-def _freeze_nestquest_clock(
-    monkeypatch, instant: datetime.datetime
-) -> None:
-    """Freeze the integration's ``datetime`` clock to a fixed aware instant.
-
-    Only ``custom_components.nestquest``'s ``datetime`` binding is patched,
-    so ``_run_horizon_materialization``'s ``datetime.datetime.now`` reads
-    this instant (localized to ``hass.config.time_zone``) while the test
-    harness and core keep the real clock.  Mirrors the helper in
-    test_timezones.py.
-    """
-    import custom_components.nestquest as nestquest
-
-    frozen = instant.astimezone(datetime.timezone.utc)
-
-    class _FrozenDatetime(datetime.datetime):
-        @classmethod
-        def now(cls, tz=None):
-            if tz is None:
-                return frozen.replace(tzinfo=None)
-            return frozen.astimezone(tz)
-
-    fake_module = SimpleNamespace(
-        datetime=_FrozenDatetime,
-        timedelta=datetime.timedelta,
-        date=datetime.date,
-    )
-    monkeypatch.setattr(nestquest, "datetime", fake_module)
-
-
 async def test_integration_path_threads_settings(
     hass, tmp_path, monkeypatch
 ) -> None:
     """The integration path threads ``settings`` through horizon_window + rollover.
 
-    P2-3: ``_run_horizon_materialization`` now calls
+    ``_run_horizon_materialization`` calls
     ``settings.horizon_window(today)`` (so the helper is real and shared,
     not recomputed inline), and ``_register_day_rollover_listener``
     registers at ``settings.day_rollover_hour_minute``.  This runs the
     INTEGRATION path with ``horizon_days=3`` and
     ``day_rollover_time='03:30'`` and asserts the resulting instance
-    window matches [today, today+3] AND the registered hour/minute are 3/30
-    — a test the requirement-level core-only check could not fail.
+    window matches [today, today+3] AND the registered hour/minute are 3/30.
     """
     import custom_components.nestquest as nestquest
     from custom_components.nestquest.core.dao_children import ChildrenDao
@@ -869,7 +859,7 @@ async def test_integration_path_threads_settings(
     # Freeze the integration clock so "today" is deterministic (the
     # hass fixture's config.time_zone is UTC, so 2026-03-01 12:00 UTC
     # localizes to 2026-03-01).
-    _freeze_nestquest_clock(
+    freeze_nestquest_clock(
         monkeypatch, datetime.datetime(2026, 3, 1, 12, 0, tzinfo=datetime.timezone.utc)
     )
 
