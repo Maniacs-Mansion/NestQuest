@@ -31,7 +31,19 @@ ADMIN_CTX = {"user_id": "admin-1"}
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$")
 
 
-async def _setup_and_seed(hass, make_entry, *, windows=("morning",)):
+async def _setup_and_seed(hass, make_entry, *, windows=("morning",), seed_date=None):
+    """Seed a household and materialize today's instances.
+
+    ``seed_date`` pins the date instances are materialized for (and the
+    daily rule's ``start_date``); it defaults to the host's
+    ``datetime.date.today()``.  Callers that need to test the day-complete
+    rule against a non-UTC HA-local timezone pass the local zone's
+    ``today`` here so the seeded instance's ``due_date`` matches it.
+    """
+    import datetime
+
+    if seed_date is None:
+        seed_date = datetime.date.today()
     entry = wire_entry_to_registry(
         make_entry(data={CONF_ADMIN_USER_IDS: ["admin-1"]}), hass.registry
     )
@@ -43,7 +55,6 @@ async def _setup_and_seed(hass, make_entry, *, windows=("morning",)):
         {"action": "create", "display_name": "Ada"},
         context=ADMIN_CTX,
     )
-    child = None
     from custom_components.nestquest.children import list_children
 
     child = (await list_children(database))[0]
@@ -51,18 +62,16 @@ async def _setup_and_seed(hass, make_entry, *, windows=("morning",)):
         database,
         "Brush teeth",
         ScheduleRule.from_dict(
-            {"rule_type": "daily", "start_date": __import__("datetime").date.today().isoformat()}
+            {"rule_type": "daily", "start_date": seed_date.isoformat()}
         ),
         [child.id],
         list(windows),
     )
-    import datetime
-
-    today = datetime.date.today().isoformat()
-    end = (datetime.date.today() + datetime.timedelta(days=3)).isoformat()
-    await materialize(database, today, end, today=datetime.date.today())
+    today_iso = seed_date.isoformat()
+    end_iso = (seed_date + datetime.timedelta(days=3)).isoformat()
+    await materialize(database, today_iso, end_iso, today=seed_date)
     instances = await QuestInstancesDao(database).list_by_date_range(
-        child.id, today, today
+        child.id, today_iso, today_iso
     )
     return entry, child, instances
 
@@ -376,4 +385,409 @@ async def test_forced_refreshes_serialize_no_stale_publish(
     await asyncio.gather(coordinator.async_refresh(), coordinator.async_refresh())
     assert order == ["start", "end", "start", "end"], (
         "overlapping refreshes must serialize: " + str(order)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Direct core-builder unit tests (P2.2a): exact payload key sets, event
+# order, and was_on_time threading.  These target
+# custom_components.nestquest.core.events directly, bypassing the shim,
+# so a payload-shape regression is caught even if the shim masks it.
+# ---------------------------------------------------------------------------
+
+_COMPLETED_KEYS = {
+    "child_id",
+    "child_name",
+    "instance_id",
+    "quest_title",
+    "window",
+    "due_date",
+    "due_time",
+    "occurred_at",
+    "was_on_time",
+}
+_UNCOMPLETED_KEYS = {
+    "child_id",
+    "child_name",
+    "instance_id",
+    "quest_title",
+    "window",
+    "due_date",
+    "due_time",
+    "occurred_at",
+}
+_DAY_COMPLETE_KEYS = {
+    "child_id",
+    "child_name",
+    "quests_due",
+    "quests_completed",
+    "occurred_at",
+}
+
+
+async def test_build_quest_completed_event_payload_key_set(hass, make_entry) -> None:
+    """The completed-event payload carries exactly the documented keys
+    (no extra fields, no missing field) and threads ``was_on_time``."""
+    from custom_components.nestquest.core.events import build_quest_completed_event
+
+    entry, child, instances = await _setup_and_seed(hass, make_entry)
+    database = entry.runtime_data.database
+    event_type, payload = await build_quest_completed_event(
+        database, instances[0].id, was_on_time=True
+    )
+    assert event_type == EVENT_QUEST_COMPLETED
+    assert set(payload) == _COMPLETED_KEYS, (
+        f"completed payload keys drift: got {set(payload)} expected {_COMPLETED_KEYS}"
+    )
+    assert payload["was_on_time"] is True
+    assert payload["child_id"] == child.id
+    assert payload["child_name"] == "Ada"
+    assert payload["instance_id"] == instances[0].id
+    assert payload["quest_title"] == "Brush teeth"
+    assert _TIMESTAMP.match(payload["occurred_at"]), payload["occurred_at"]
+
+
+async def test_build_quest_completed_event_was_on_time_threads_all_shapes(
+    hass, make_entry
+) -> None:
+    """``was_on_time`` is carried verbatim — True, False, and None
+    (the unknown-timing shape) all round-trip into the payload."""
+    from custom_components.nestquest.core.events import build_quest_completed_event
+
+    entry, _child, instances = await _setup_and_seed(hass, make_entry)
+    database = entry.runtime_data.database
+    for wanted in (True, False, None):
+        _etype, payload = await build_quest_completed_event(
+            database, instances[0].id, was_on_time=wanted
+        )
+        assert payload["was_on_time"] is wanted, (
+            f"was_on_time={wanted!r} did not thread through"
+        )
+
+
+async def test_build_quest_uncompleted_events_payload_key_set(
+    hass, make_entry
+) -> None:
+    """The uncompleted-event payload carries exactly the documented keys
+    (no ``was_on_time`` — that field is completion-only)."""
+    from custom_components.nestquest.core.events import (
+        build_quest_uncompleted_events,
+    )
+
+    entry, _child, instances = await _setup_and_seed(hass, make_entry)
+    database = entry.runtime_data.database
+    events = await build_quest_uncompleted_events(database, instances[0].id)
+    assert len(events) == 1
+    event_type, payload = events[0]
+    assert event_type == EVENT_QUEST_UNCOMPLETED
+    assert set(payload) == _UNCOMPLETED_KEYS, (
+        f"uncompleted payload keys drift: got {set(payload)} "
+        f"expected {_UNCOMPLETED_KEYS}"
+    )
+    assert _TIMESTAMP.match(payload["occurred_at"]), payload["occurred_at"]
+
+
+async def test_build_child_day_complete_event_payload_key_set(
+    hass, make_entry
+) -> None:
+    """The day-complete payload carries exactly the documented keys
+    when the child's whole day clears, and reuses the completed
+    event's ``occurred_at`` stamp (one transition, one timestamp)."""
+    import datetime
+
+    from custom_components.nestquest.core.events import (
+        build_child_day_complete_event,
+        build_quest_completed_event,
+    )
+
+    entry, _child, instances = await _setup_and_seed(hass, make_entry)
+    database = entry.runtime_data.database
+    today = datetime.date.today()
+    completed_type, completed_payload = await build_quest_completed_event(
+        database, instances[0].id, was_on_time=True
+    )
+    # Mark every today-instance done so the day clears.
+    from custom_components.nestquest.completion import complete_instance
+
+    for instance in instances:
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="panel",
+            actor_child_id=_child.id,
+            today=today,
+        )
+    day_event = await build_child_day_complete_event(
+        database, completed_payload, today=today
+    )
+    assert day_event is not None
+    event_type, day_payload = day_event
+    assert event_type == EVENT_CHILD_DAY_COMPLETE
+    assert set(day_payload) == _DAY_COMPLETE_KEYS, (
+        f"day-complete payload keys drift: got {set(day_payload)} "
+        f"expected {_DAY_COMPLETE_KEYS}"
+    )
+    assert day_payload["occurred_at"] == completed_payload["occurred_at"], (
+        "day-complete must reuse the completed event's occurred_at stamp"
+    )
+    assert day_payload["quests_due"] == len(instances)
+    assert day_payload["quests_completed"] == len(instances)
+
+
+async def test_shim_fires_completed_before_day_complete(hass, make_entry) -> None:
+    """The shim fires ``nestquest_quest_completed`` BEFORE
+    ``nestquest_child_day_complete`` (the pre-extraction ordering), so
+    a failure in the day-complete DB reads cannot suppress the
+    completed event.  Asserted by bus event ORDER, not just counts."""
+    entry, child, instances = await _setup_and_seed(hass, make_entry)
+    for instance in instances:
+        await hass.services.call(
+            DOMAIN,
+            SERVICE_COMPLETE_QUEST,
+            {
+                "instance_id": instance.id,
+                "actor": "panel",
+                "actor_child_id": child.id,
+            },
+        )
+    ordered = [
+        etype for etype, _payload in hass.bus.events
+        if etype in (EVENT_QUEST_COMPLETED, EVENT_CHILD_DAY_COMPLETE)
+    ]
+    # The completed event must precede the day-complete event.
+    first_completed = ordered.index(EVENT_QUEST_COMPLETED)
+    first_day = ordered.index(EVENT_CHILD_DAY_COMPLETE)
+    assert first_completed < first_day, (
+        f"completed must fire before day-complete; order was {ordered}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Day-complete rule coverage (P2.2b): an explicit ``today`` proves the
+# four outcomes — zero-quest day, non-today instance, partial day, and
+# fully-cleared today.
+# ---------------------------------------------------------------------------
+
+
+async def test_day_complete_zero_quest_day_yields_no_event(
+    hass, make_entry
+) -> None:
+    """A zero-quest day never fires day-complete: when the completed
+    payload's ``due_date`` matches ``today`` but the child has NO
+    instances due that date, the builder returns ``None`` (the
+    all-done binary sensor's rule — a day with zero quests owed can
+    never be "cleared")."""
+    import datetime
+
+    from custom_components.nestquest.core.events import (
+        build_child_day_complete_event,
+        build_quest_completed_event,
+    )
+
+    entry, _child, instances = await _setup_and_seed(hass, make_entry)
+    database = entry.runtime_data.database
+    # A date the daily rule does NOT cover (well past the materialized
+    # horizon) — zero instances due this date.
+    zero_quest_day = datetime.date.today() + datetime.timedelta(days=365)
+    _etype, completed_payload = await build_quest_completed_event(
+        database, instances[0].id, was_on_time=True
+    )
+    # Override due_date to the zero-quest day so the builder evaluates
+    # it (otherwise the due_date != today short-circuit fires first).
+    crafted = dict(completed_payload, due_date=zero_quest_day.isoformat())
+    result = await build_child_day_complete_event(
+        database, crafted, today=zero_quest_day
+    )
+    assert result is None, (
+        "a zero-quest day must not yield a day-complete event"
+    )
+
+
+async def test_day_complete_non_today_instance_yields_no_event(
+    hass, make_entry
+) -> None:
+    """Completing an instance NOT due today never evaluates the
+    child's day-complete for today: only the completed event fires."""
+    import datetime
+
+    from custom_components.nestquest.core.events import (
+        build_child_day_complete_event,
+        build_quest_completed_event,
+    )
+
+    entry, _child, instances = await _setup_and_seed(hass, make_entry)
+    database = entry.runtime_data.database
+    # Complete a FUTURE instance (tomorrow), pass today = today.
+    from custom_components.nestquest.dao_instances import QuestInstancesDao
+
+    today = datetime.date.today()
+    end = (today + datetime.timedelta(days=3)).isoformat()
+    all_instances = await QuestInstancesDao(database).list_by_date_range(
+        _child.id, today.isoformat(), end
+    )
+    today_ids = {i.id for i in instances}
+    tomorrow_instance = next(i for i in all_instances if i.id not in today_ids)
+    _etype, completed_payload = await build_quest_completed_event(
+        database, tomorrow_instance.id, was_on_time=True
+    )
+    assert completed_payload["due_date"] != today.isoformat()
+    result = await build_child_day_complete_event(
+        database, completed_payload, today=today
+    )
+    assert result is None, (
+        "a non-today instance must not yield a day-complete event for today"
+    )
+
+
+async def test_day_complete_partial_day_yields_no_event(
+    hass, make_entry
+) -> None:
+    """A partial day (some quests still open) yields only the
+    completed event — day-complete does not fire until the WHOLE day
+    clears."""
+    import datetime
+
+    from custom_components.nestquest.core.events import (
+        build_child_day_complete_event,
+        build_quest_completed_event,
+    )
+    from custom_components.nestquest.completion import complete_instance
+
+    entry, child, instances = await _setup_and_seed(
+        hass, make_entry, windows=("morning", "evening")
+    )
+    assert len(instances) == 2
+    database = entry.runtime_data.database
+    today = datetime.date.today()
+    # Complete ONLY the morning instance — the evening one stays open.
+    await complete_instance(
+        database,
+        instances[0].id,
+        actor_source="panel",
+        actor_child_id=child.id,
+        today=today,
+    )
+    _etype, completed_payload = await build_quest_completed_event(
+        database, instances[0].id, was_on_time=True
+    )
+    result = await build_child_day_complete_event(
+        database, completed_payload, today=today
+    )
+    assert result is None, (
+        "a partial day (evening quest still open) must not fire day-complete"
+    )
+
+
+async def test_day_complete_fully_cleared_today_yields_event(
+    hass, make_entry
+) -> None:
+    """A fully-cleared today (all owed quests done) yields the
+    completed event AND the child_day_complete event."""
+    import datetime
+
+    from custom_components.nestquest.core.events import (
+        build_child_day_complete_event,
+        build_quest_completed_event,
+    )
+    from custom_components.nestquest.completion import complete_instance
+
+    entry, child, instances = await _setup_and_seed(
+        hass, make_entry, windows=("morning", "evening")
+    )
+    assert len(instances) == 2
+    database = entry.runtime_data.database
+    today = datetime.date.today()
+    for instance in instances:
+        await complete_instance(
+            database,
+            instance.id,
+            actor_source="panel",
+            actor_child_id=child.id,
+            today=today,
+        )
+    # The last completion's payload drives the day-complete evaluation.
+    _etype, completed_payload = await build_quest_completed_event(
+        database, instances[-1].id, was_on_time=True
+    )
+    result = await build_child_day_complete_event(
+        database, completed_payload, today=today
+    )
+    assert result is not None, (
+        "a fully-cleared today must yield the day-complete event"
+    )
+    assert result[0] == EVENT_CHILD_DAY_COMPLETE
+    assert result[1]["quests_due"] == len(instances)
+    assert result[1]["quests_completed"] == len(instances)
+
+
+# ---------------------------------------------------------------------------
+# Shim timezone wiring (P2.2c): the conftest fake hass defaults
+# hass.config.time_zone to UTC, so the day-complete rule's HA-local
+# ``today`` wiring is otherwise untested.  This test sets the zone to
+# one whose current local date differs from UTC and asserts the
+# day-complete rule uses THAT local date, not UTC.
+# ---------------------------------------------------------------------------
+
+
+async def test_shim_day_complete_uses_ha_local_timezone(
+    hass, make_entry
+) -> None:
+    """The day-complete rule reads ``hass.config.time_zone`` and
+    derives ``today`` in HA-local time, not UTC.
+
+    Picks a zone whose current local date differs from UTC, seeds an
+    instance for THAT zone's today (not UTC's today), completes it
+    through the service path, and asserts
+    ``nestquest_child_day_complete`` fires — proving the local date
+    reached the day-complete rule.  If no candidate zone has a
+    different date right now (only possible inside the ~1h window
+    around 12:00 UTC when all zones share one date), the test skips
+    rather than run vacuously.
+    """
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    utc_today = _dt.datetime.now(_dt.timezone.utc).date()
+    far_zone = None
+    far_today = None
+    for tz_name in (
+        "Pacific/Kiritimati",   # +14 (UTC+14)
+        "Pacific/Auckland",     # +12/+13
+        "Pacific/Chatham",      # +12:45/+13:45
+        "Pacific/Honolulu",     # -10
+        "America/Los_Angeles",  # -8/-7
+        "Etc/GMT+12",           # -12
+        "Etc/GMT-13",           # +13
+    ):
+        local_today = _dt.datetime.now(ZoneInfo(tz_name)).date()
+        if local_today != utc_today:
+            far_zone = tz_name
+            far_today = local_today
+            break
+    if far_zone is None:
+        import pytest
+
+        pytest.skip(
+            "no candidate zone has a date different from UTC right now"
+        )
+
+    hass.config.time_zone = far_zone
+    entry, child, instances = await _setup_and_seed(
+        hass, make_entry, seed_date=far_today
+    )
+    for instance in instances:
+        await hass.services.call(
+            DOMAIN,
+            SERVICE_COMPLETE_QUEST,
+            {
+                "instance_id": instance.id,
+                "actor": "panel",
+                "actor_child_id": child.id,
+            },
+        )
+    day_complete = hass.bus.fired(EVENT_CHILD_DAY_COMPLETE)
+    assert len(day_complete) == 1, (
+        f"day-complete must fire under {far_zone} (local today "
+        f"{far_today.isoformat()}, UTC today {utc_today.isoformat()}); "
+        f"got {len(day_complete)} events"
     )

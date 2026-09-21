@@ -442,6 +442,11 @@ def test_package_never_unlinks_or_truncates_db_files() -> None:
     """Guardrail: no code path may delete or overwrite an existing
     database file.  Scans the package for unlink/rmtree/write on the
     DB filename constant or *.db patterns.
+
+    Recursive (``rglob``) so the bundled ``core/`` package (extracted
+    in task d0b691d8 / 510c1f78) is scanned alongside the integration's
+    own modules — a non-recursive ``glob`` skips ``core/`` and leaves
+    the guardrail vacuous against it.
     """
     import re
     from pathlib import Path
@@ -459,7 +464,7 @@ def test_package_never_unlinks_or_truncates_db_files() -> None:
         re.IGNORECASE,
     )
     offenders: list[str] = []
-    for py in sorted(package.glob("*.py")):
+    for py in sorted(package.rglob("*.py")):
         if pattern.search(py.read_text()):
             offenders.append(py.name)
     assert offenders == [], (

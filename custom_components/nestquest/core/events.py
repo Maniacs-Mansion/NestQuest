@@ -16,6 +16,19 @@ remain — a zero-quest day can never fire it, matching the all-done
 binary sensor's rule).  ``nestquest_quest_missed`` is the documented
 contract Feature 11's nightly sweep fires; nothing here builds it.
 
+The completed-event and day-complete-event builders are split so the
+shim can fire ``nestquest_quest_completed`` BEFORE it evaluates the
+day-complete rule (the pre-extraction implementation fired the
+completed event on the bus first, then ran the day-complete DB reads;
+a failure in those reads or the ZoneInfo lookup must not suppress the
+completed event).  :func:`build_quest_completed_event` builds the
+completed event from the instance and its child/definition only;
+:func:`build_child_day_complete_event` runs the day-complete DB reads
+and returns the day-complete event (or ``None``).  The shim fires the
+completed event, then calls the day-complete builder and fires its
+result.  :func:`build_quest_uncompleted_events` builds the single
+uncompleted event.
+
 Payload policy: one dict carrying ``child_id``, ``child_name``,
 ``instance_id``, ``quest_title``, the instance's ``window``/
 ``due_date``/``due_time`` so automation authors can filter without a
@@ -80,14 +93,14 @@ async def _instance_payload(
     }
 
 
-async def build_quest_completed_events(
+async def build_quest_completed_event(
     database: NestQuestDatabase,
     instance_id: int,
     *,
     was_on_time: bool | None,
-    today: datetime.date,
-) -> list[tuple[str, dict]]:
-    """Build the transition events for an actual completion.
+) -> tuple[str, dict]:
+    """Build the ``nestquest_quest_completed`` event for an actual
+    completion.
 
     Called by the complete_quest service handler AFTER an actual
     completion transition, with the completion's ``was_on_time`` —
@@ -95,30 +108,54 @@ async def build_quest_completed_events(
     the payload never re-reads mutable latest state a racing reversal
     could have replaced.  A no-op re-complete never reaches here.
 
-    Returns a list of ``(event_type, payload)`` tuples to fire, in
-    order: always ``nestquest_quest_completed`` first, and — when the
-    completion cleared the child's whole day —
-    ``nestquest_child_day_complete`` after it.  The caller fires them
-    on the bus.
+    Returns the ``(event_type, payload)`` tuple to fire.  This builder
+    touches NO day-complete state: it only reads the instance, its
+    child, and its definition, so a failure in the day-complete
+    evaluation (DB reads, timezone lookup in the shim) cannot suppress
+    the completed event.  The caller fires this BEFORE asking
+    :func:`build_child_day_complete_event` for the day-complete event.
+    """
+    now_stamp = _now_stamp()
+    payload = await _instance_payload(database, instance_id, now_stamp)
+    payload["was_on_time"] = was_on_time
+    return (EVENT_QUEST_COMPLETED, payload)
+
+
+async def build_child_day_complete_event(
+    database: NestQuestDatabase,
+    completed_payload: dict,
+    *,
+    today: datetime.date,
+) -> tuple[str, dict] | None:
+    """Build the ``nestquest_child_day_complete`` event for a
+    completion that cleared the child's whole day, or ``None`` when no
+    day-complete event should fire.
+
+    Called by the complete_quest service handler AFTER the
+    ``nestquest_quest_completed`` event has already been fired, with
+    that event's payload (so this builder reuses the same
+    ``occurred_at`` stamp and the same ``child_id`` / ``child_name``
+    the completed event carried — one transition, one shared
+    timestamp, matching the pre-extraction implementation).
+
+    Day-complete rule (identical to the pre-extraction implementation
+    and to the all-done binary sensor): quests were owed today and
+    none remain — a zero-quest day can never fire it.  Only a
+    completion of TODAY'S instance evaluates it: completing a
+    back-dated or future instance must not announce a cleared day.
 
     ``today`` is the HA-local calendar date the day-complete rule is
     evaluated against; the integration reads it from
     ``hass.config.time_zone`` and passes it in, so this module never
     touches HA config.
     """
-    now_stamp = _now_stamp()
-    payload = await _instance_payload(database, instance_id, now_stamp)
-    payload["was_on_time"] = was_on_time
-    events: list[tuple[str, dict]] = [(EVENT_QUEST_COMPLETED, payload)]
-
-    # Day-complete: quests were owed today and none remain (the same
-    # rule as the all-done binary sensor; a zero-quest day never fires).
-    # Only a completion of TODAY'S instance evaluates it: completing a
-    # back-dated or future instance must not announce a cleared day.
-    if payload["due_date"] != today.isoformat():
-        return events
+    # Only a completion of TODAY'S instance evaluates the day-complete
+    # rule: completing a back-dated or future instance must not
+    # announce a cleared day.
+    if completed_payload["due_date"] != today.isoformat():
+        return None
     instances = await QuestInstancesDao(database).list_by_date_range(
-        payload["child_id"], today.isoformat(), today.isoformat()
+        completed_payload["child_id"], today.isoformat(), today.isoformat()
     )
     completion_events = CompletionEventsDao(database)
     remaining = 0
@@ -128,20 +165,18 @@ async def build_quest_completed_events(
         )
         if derive_state(instance, latest_for_instance, today) != "done":
             remaining += 1
-    if instances and remaining == 0:
-        events.append(
-            (
-                EVENT_CHILD_DAY_COMPLETE,
-                {
-                    "child_id": payload["child_id"],
-                    "child_name": payload["child_name"],
-                    "quests_due": len(instances),
-                    "quests_completed": len(instances),
-                    "occurred_at": now_stamp,
-                },
-            )
-        )
-    return events
+    if not instances or remaining:
+        return None
+    return (
+        EVENT_CHILD_DAY_COMPLETE,
+        {
+            "child_id": completed_payload["child_id"],
+            "child_name": completed_payload["child_name"],
+            "quests_due": len(instances),
+            "quests_completed": len(instances),
+            "occurred_at": completed_payload["occurred_at"],
+        },
+    )
 
 
 async def build_quest_uncompleted_events(
