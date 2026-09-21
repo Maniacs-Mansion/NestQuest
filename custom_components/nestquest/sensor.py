@@ -39,6 +39,7 @@ from .coordinator import (
     NestQuestCoordinator,
     QuestInstanceView,
 )
+from .core.snapshot import instance_payload
 
 #: Home Assistant's state machine refuses states longer than 255
 #: characters (its hard recorder/state limit).  These sensors' states
@@ -61,40 +62,6 @@ def _state_within_limit(state: Any) -> Any:
             f"limit ({len(state)} characters)"
         )
     return state
-
-
-def _instance_payload(
-    instances: Iterable[QuestInstanceView], *, include_missed: bool
-) -> list[dict[str, Any]]:
-    """Shape instance dicts per ENTITIES-AND-SERVICES.md §1.
-
-    ``state`` maps the coordinator's derived ``done`` to the panel's
-    ``completed`` spelling; ``missed`` instances are omitted unless
-    ``include_missed`` (the admin payload, D-009, keeps them with
-    their ``missed`` state).
-    """
-    payload: list[dict[str, Any]] = []
-    for view in instances:
-        if view.state == "missed" and not include_missed:
-            continue
-        payload.append(
-            {
-                "id": view.instance_id,
-                "definition_id": view.definition_id,
-                "child_id": view.child_id,
-                "title": view.title,
-                "icon": view.icon,
-                "window": view.window,
-                "due_time": view.due_time,
-                "state": (
-                    "completed" if view.state == "done" else view.state
-                ),
-                "overdue": view.overdue,
-                "completed_at": view.completed_at,
-                "on_time": view.was_on_time,
-            }
-        )
-    return payload
 
 
 #: State reported by the next-quest sensor when the child owes nothing
@@ -215,10 +182,10 @@ class NestQuestQuestsDueTodaySensor(_NestQuestChildDaySensor):
         if child is None:
             return None
         return {
-            "instances": _instance_payload(
+            "instances": instance_payload(
                 child.instances, include_missed=False
             ),
-            "admin_instances": _instance_payload(
+            "admin_instances": instance_payload(
                 child.instances, include_missed=True
             ),
             "child_id": child.child_id,
