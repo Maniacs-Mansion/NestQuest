@@ -3,14 +3,19 @@
 These tests start the NestQuest API app with httpx against the ASGI
 app and assert the skeleton contract of Feature 16's first task:
 
-- ``GET /health`` returns 200 with a JSON status body (``status: ok``
-  plus the resolved ``db_path``);
+- ``GET /health`` returns 200 with a JSON status body (``status: ok``)
+  and does NOT leak the filesystem path;
 - ``GET /docs`` (Swagger UI) is served, and ``GET /openapi.json``
   returns the OpenAPI document;
 - the app wires core (opens the configured SQLite file and applies
-  migrations on startup via the lifespan);
-- the test is hermetic — each test points ``NESTQUEST_DB_PATH`` at a
-  fresh temp file.
+  migrations on startup via the lifespan) and closes the connection on
+  shutdown (``connected is False`` afterwards);
+- ``ApiConfig.from_env`` raises when ``NESTQUEST_DB_PATH`` is missing or
+  empty, and returns the value when set;
+- a startup failure (unwritable path / non-SQLite file) surfaces from
+  the lifespan rather than the first request;
+- each test is hermetic — it points ``NESTQUEST_DB_PATH`` at a fresh
+  temp file.
 
 A SEPARATE subprocess test asserts the stronger invariant the task
 calls out: the app imports the bundled ``core`` WITHOUT importing
@@ -22,7 +27,6 @@ before any test imports the integration; a subprocess with a clean
 """
 from __future__ import annotations
 
-import asyncio
 import subprocess
 import sys
 import tempfile
@@ -33,7 +37,8 @@ import httpx
 import pytest
 
 from api.app import create_app
-from api.config import ApiConfig
+from api.config import ApiConfig, ConfigError
+from api.database import DatabaseState, _executor, make_database
 
 #: The repo root, so the no-HA subprocess can import the API package.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -57,6 +62,10 @@ class _AppRunner:
     session in it drives the same startup/shutdown path uvicorn would,
     so ``open_and_migrate`` runs before the first request and ``close``
     runs after the last.
+
+    ``__aexit__`` uses try/finally so a client-side error still shuts
+    the lifespan down — otherwise a failure mid-test would leak the
+    database connection open.
     """
 
     def __init__(self, db_path: str) -> None:
@@ -72,8 +81,10 @@ class _AppRunner:
         return await self._client.__aenter__()
 
     async def __aexit__(self, *exc) -> None:
-        await self._client.__aexit__(*exc)
-        await self._lifespan.__aexit__(*exc)
+        try:
+            await self._client.__aexit__(*exc)
+        finally:
+            await self._lifespan.__aexit__(*exc)
 
 
 @pytest.fixture
@@ -82,19 +93,43 @@ async def app_client(temp_db_path: str) -> httpx.AsyncClient:
         yield client
 
 
+# --- ApiConfig.from_env -------------------------------------------------
+
+
+def test_from_env_returns_set_value() -> None:
+    """A set, non-empty NESTQUEST_DB_PATH is returned verbatim."""
+    cfg = ApiConfig.from_env({"NESTQUEST_DB_PATH": "/data/nq.db"})
+    assert cfg.db_path == "/data/nq.db"
+
+
+def test_from_env_raises_on_empty_value() -> None:
+    """An empty/whitespace-only value raises ConfigError (no silent default)."""
+    with pytest.raises(ConfigError):
+        ApiConfig.from_env({"NESTQUEST_DB_PATH": "   "})
+
+
+def test_from_env_raises_on_missing_value() -> None:
+    """A missing NESTQUEST_DB_PATH raises ConfigError (no silent default)."""
+    with pytest.raises(ConfigError):
+        ApiConfig.from_env({})
+
+
+# --- health / openapi / docs -------------------------------------------
+
+
 async def test_health_returns_200_with_status_body(
-    app_client: httpx.AsyncClient, temp_db_path: str
+    app_client: httpx.AsyncClient,
 ) -> None:
-    """GET /health returns 200 with status ok and the resolved db path."""
+    """GET /health returns 200 with status ok and no filesystem path."""
     response = await app_client.get("/health")
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "ok"
-    assert body["db_path"] == temp_db_path
+    assert body == {"status": "ok"}
+    assert "db_path" not in body
 
 
 async def test_openapi_document_is_served(
-    app_client: httpx.AsyncClient
+    app_client: httpx.AsyncClient,
 ) -> None:
     """GET /openapi.json returns the OpenAPI document."""
     response = await app_client.get("/openapi.json")
@@ -111,8 +146,11 @@ async def test_docs_swagger_ui_is_served(app_client: httpx.AsyncClient) -> None:
     assert "swagger" in response.text.lower()
 
 
+# --- core wiring & shutdown --------------------------------------------
+
+
 async def test_app_wires_core_and_applies_migrations(
-    temp_db_path: str
+    temp_db_path: str,
 ) -> None:
     """The lifespan opens the SQLite file and applies migrations.
 
@@ -123,11 +161,9 @@ async def test_app_wires_core_and_applies_migrations(
     async with _AppRunner(temp_db_path):
         assert Path(temp_db_path).exists()
     # Re-open the file with a fresh core database to read the version
-    # stamp independent of the app's connection.
+    # stamp independent of the app's connection.  Reuse the API's own
+    # executor so the test exercises the same wiring the app does.
     from api.nestquest_core import core_db, core_migrations
-
-    async def _executor(fn, *args, **kwargs):
-        return await asyncio.to_thread(fn, *args, **kwargs)
 
     database = core_db.NestQuestDatabase(_executor)
     await database.open(temp_db_path)
@@ -138,16 +174,71 @@ async def test_app_wires_core_and_applies_migrations(
     assert version >= 1
 
 
+async def test_shutdown_closes_the_connection(temp_db_path: str) -> None:
+    """The lifespan closes the database connection on shutdown.
+
+    After the runner exits, ``DatabaseState.database.connected`` is
+    False — proving ``close()`` ran (the lifespan's finally block) even
+    on a clean exit.
+    """
+    runner = _AppRunner(temp_db_path)
+    async with runner as _client:
+        state: DatabaseState = runner.app.state.db
+        assert state.database.connected
+    assert not state.database.connected
+
+
+# --- startup failure ----------------------------------------------------
+
+
+async def test_startup_fails_on_unwritable_path(tmp_path: Path) -> None:
+    """A database path whose parent directory does not exist fails fast.
+
+    ``sqlite3.connect`` raises ``OperationalError`` for a path under a
+    non-existent directory; the lifespan surfaces that as a startup
+    error rather than the first request.  The connection is closed
+    through the lifespan's finally block (``close`` is a no-op on a
+    never-opened wrapper).
+    """
+    bad_path = str(tmp_path / "does_not_exist" / "nestquest.db")
+    runner = _AppRunner(bad_path)
+    with pytest.raises(Exception):
+        async with runner:
+            pass
+
+
+async def test_startup_fails_on_non_sqlite_file(tmp_path: Path) -> None:
+    """A path pointing at a non-SQLite file fails fast on startup.
+
+    Opening an existing file that is not a SQLite database makes the
+    ``PRAGMA journal_mode=WAL`` run during :meth:`open` raise
+    ``DatabaseError: file is not a database``; the lifespan surfaces it.
+    """
+    bad_file = tmp_path / "not_a_db.bin"
+    bad_file.write_bytes(b"this is not a sqlite database")
+    runner = _AppRunner(str(bad_file))
+    with pytest.raises(Exception):
+        async with runner:
+            pass
+
+
+# --- no-HA subprocess ---------------------------------------------------
+
 #: The no-HA subprocess script.  Runs with ``sys.executable -c`` so it
 #: starts with a clean ``sys.modules`` and no ``homeassistant`` installed
 #: (the suite's conftest stubs are not present in a subprocess).  It
 #: builds the app — which triggers the core bootstrap — and asserts
 #: neither ``homeassistant`` nor ``custom_components`` entered
-#: ``sys.modules``.
+#: ``sys.modules``, and that the loaded core package's ``__file__``
+#: points at the bundled directory.
 _NO_HA_SCRIPT = textwrap.dedent(
     """\
     import sys
+    import tempfile
+    from pathlib import Path
+
     sys.path.insert(0, sys.argv[1])
+    REPO_ROOT = Path(sys.argv[1])
 
     # homeassistant must not be present before we touch the API.
     assert "homeassistant" not in sys.modules, (
@@ -157,25 +248,46 @@ _NO_HA_SCRIPT = textwrap.dedent(
 
     from api.app import create_app
     from api.config import ApiConfig
-
-    app = create_app(ApiConfig(db_path=":memory:"))
+    from api.nestquest_core import core
 
     # The app build imports core via api.nestquest_core.  core is a
-    # Home-Assistant-free package; if it (or its bootstrap) ever drags
-    # HA in, this fails.
+    # Home-Assistant-free package; if it (or its loader) ever drags HA
+    # in, this fails.
     assert "homeassistant" not in sys.modules, (
         "homeassistant imported while building the NestQuest API app — "
         "the core wiring is no longer Home-Assistant-free"
     )
-    # The bootstrap must import core as a TOP-LEVEL package without
-    # executing custom_components.nestquest.__init__, so the parent
-    # integration package must never be registered.
+    # The loader registers core under the distinct name "nestquest_core"
+    # WITHOUT executing custom_components.nestquest.__init__, so the
+    # parent integration package must never be registered, and no
+    # sys.path mutation places the integration directory on sys.path.
     assert "custom_components" not in sys.modules, (
-        "custom_components registered in sys.modules — the core bootstrap "
-        "executed the integration's HA-coupled __init__ instead of importing "
-        "core as a top-level package"
+        "custom_components registered in sys.modules — the core loader "
+        "executed the integration's HA-coupled __init__ instead of loading "
+        "core by file location"
     )
-    assert "core" in sys.modules, "core was not imported"
+    assert "nestquest_core" in sys.modules, "core was not imported"
+
+    # core.__file__ must point at the bundled directory inside the
+    # integration, proving the file-location loader resolved against the
+    # bundled package rather than some other "core" on sys.path.
+    expected_core_dir = (
+        REPO_ROOT / "custom_components" / "nestquest" / "core"
+    )
+    assert Path(core.__file__).resolve() == (
+        expected_core_dir / "__init__.py"
+    ).resolve(), (
+        f"core.__file__={core.__file__} does not point at the bundled "
+        f"directory {expected_core_dir}"
+    )
+
+    # Build the app (the lifespan is NOT run here, so the path is never
+    # opened — it just needs to be a non-empty string to satisfy the
+    # fail-fast config check).  Use a temp path so nothing is created.
+    app = create_app(ApiConfig(db_path=str(
+        Path(tempfile.gettempdir()) / "nq-noha-buildonly.db"
+    )))
+    assert app is not None
 
     print("API NO-HA IMPORT OK")
     """
@@ -190,7 +302,7 @@ def test_app_imports_core_without_importing_homeassistant() -> None:
     before any test runs, so an in-process check could never
     distinguish "core never touched HA" from "conftest already stubbed
     HA for us".  The subprocess is a genuine no-HA process; if the
-    core bootstrap (or core itself) ever grows a ``homeassistant``
+    core loader (or core itself) ever grows a ``homeassistant``
     import, the subprocess exits non-zero with ``ModuleNotFoundError``.
     """
     result = subprocess.run(

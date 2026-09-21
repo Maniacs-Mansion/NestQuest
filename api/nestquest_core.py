@@ -10,11 +10,18 @@ API cannot start.
 
 ``core`` itself is a clean, Home-Assistant-free package: its
 ``__init__.py`` is a bare docstring and every internal import is
-relative (``from .db import ...``).  It can therefore be imported as a
-top-level package if the integration directory is placed on
-``sys.path``.  This module does exactly that, in ONE documented place,
-so the coupling between the API and the bundled core is explicit and
-testable rather than scattered across route handlers.
+relative (``from .db import ...``).  It can therefore be imported by
+file location as a standalone package.
+
+This module loads ``core`` with :func:`importlib.util.spec_from_file_location`
+— registering it under the distinct top-level name ``nestquest_core``
+with ``submodule_search_locations`` set to the bundled ``core``
+directory — so its relative imports resolve against that directory
+without touching ``sys.path``.  No generic top-level name (``db``,
+``const``, ``schema``, ...) is published, so nothing here can silently
+shadow a future dependency, and the integration's HA-coupled
+``__init__.py`` is never executed: ``custom_components.nestquest`` is
+never imported.
 
 Usage::
 
@@ -25,9 +32,22 @@ This is a TRANSITIONAL coupling.  Feature 18 (task 430f7f98) converts
 the integration into a thin API client and moves ``core`` out of the
 integration bundle; once that lands, this bootstrap helper goes away and
 the API imports ``core`` as an ordinary installed dependency.
+
+NOTE on the pytest process: the suite's ``conftest.py`` stubs the
+parent integration package and imports ``custom_components.nestquest.core.*``
+BEFORE any API test runs, so two copies of the core package coexist in
+the pytest process — the one registered here as ``nestquest_core.*``
+(loaded by file location) and the conftest-stubbed
+``custom_components.nestquest.core.*``.  Later tasks must NOT compare
+class or exception identity across these two copies: a
+``nestquest_core.db.NestQuestDatabase`` is a DIFFERENT class object from
+``custom_components.nestquest.core.db.NestQuestDatabase`` even though
+they share source.  Operate on a single copy within any one code path.
 """
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -35,53 +55,56 @@ from types import ModuleType
 #: The repository root (this file is ``<root>/api/nestquest_core.py``).
 _REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 
-#: The integration directory that contains the bundled ``core`` package.
-#: Adding this to ``sys.path`` makes ``import core`` resolve to
-#: ``custom_components/nestquest/core/`` WITHOUT executing the
-#: integration's ``__init__.py`` (which would import ``homeassistant``).
-_INTEGRATION_DIR: Path = _REPO_ROOT / "custom_components" / "nestquest"
+#: The bundled ``core`` package directory, inside the HA integration.
+_CORE_DIR: Path = _REPO_ROOT / "custom_components" / "nestquest" / "core"
 
-_BOOTSTRAPPED = False
+#: The ``core`` package's ``__init__.py`` — a bare docstring, so loading
+#: it by file location executes no imports of its own.
+_CORE_INIT: Path = _CORE_DIR / "__init__.py"
+
+#: The distinct top-level name under which the bundled ``core`` package
+#: is registered in ``sys.modules``.  A distinctive name (rather than the
+#: generic ``core``) avoids publishing shadow-able top-level names and
+#: keeps the bundled copy separate from the conftest-stubbed
+#: ``custom_components.nestquest.core`` present in the pytest process.
+_CORE_MODULE_NAME = "nestquest_core"
 
 
-def bootstrap_core() -> None:
-    """Make the bundled ``core`` package importable as a top-level package.
+def _load_core() -> ModuleType:
+    """Load the bundled ``core`` package by file location and return it.
 
-    Inserts the integration directory at the front of ``sys.path`` (once,
-    idempotently).  After this call, ``import core`` resolves to the
-    bundled ``custom_components/nestquest/core`` package, and its
-    relative internal imports (``from .db import ...``) resolve against
-    that same directory.  The integration's HA-coupled ``__init__.py`` is
-    never executed: ``core`` is imported directly as a top-level package,
-    so ``custom_components.nestquest`` is never touched.
+    Registers the package under :data:`_CORE_MODULE_NAME` in
+    ``sys.modules`` with ``submodule_search_locations`` pointing at the
+    bundled directory, so its relative imports (``from .db import ...``)
+    resolve to ``nestquest_core.<submodule>`` against that directory
+    without mutating ``sys.path``.  Idempotent: a second call returns
+    the already-registered module.
     """
-    global _BOOTSTRAPPED
-    if _BOOTSTRAPPED:
-        return
-    path = str(_INTEGRATION_DIR)
-    if path not in sys.path:
-        sys.path.insert(0, path)
-    _BOOTSTRAPPED = True
+    existing = sys.modules.get(_CORE_MODULE_NAME)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        _CORE_MODULE_NAME,
+        _CORE_INIT,
+        submodule_search_locations=[str(_CORE_DIR)],
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load core from {_CORE_INIT}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[_CORE_MODULE_NAME] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-def _ensure_core() -> ModuleType:
-    """Import ``core`` (bootstrapping first) and return the module object."""
-    bootstrap_core()
-    import core  # type: ignore[import-not-found]  # noqa: F401
-
-    return core
-
-
-#: The bundled core package, imported via the sys.path bootstrap.  Hold a
-#: reference here so callers import the submodules through it
-#: (``core.db``, ``core.migrations``) the same way the integration does.
-core: ModuleType = _ensure_core()
+#: The bundled core package, loaded by file location and registered as
+#: ``nestquest_core`` in ``sys.modules``.  Held here so callers import the
+#: submodules through it (``nestquest_core.db``, ``nestquest_core.migrations``)
+#: the same relative way the integration does.
+core: ModuleType = _load_core()
 
 #: Re-exported for convenience; route handlers import these names from
-#: here rather than reaching into ``core`` directly.
-core_db = __import__("core.db", fromlist=["db"])  # type: ignore[import-not-found]
-core_migrations = __import__(  # type: ignore[import-not-found]
-    "core.migrations", fromlist=["migrations"]
-)
+#: here rather than reaching into the core package directly.
+core_db = importlib.import_module(f"{_CORE_MODULE_NAME}.db")
+core_migrations = importlib.import_module(f"{_CORE_MODULE_NAME}.migrations")
 
-__all__ = ["bootstrap_core", "core", "core_db", "core_migrations"]
+__all__ = ["core", "core_db", "core_migrations"]

@@ -7,6 +7,12 @@ requires-python = ">=3.11"
 dependencies = []
 
 [dependency-groups]
+# fastapi and uvicorn live in the DEV group only so the monorepo's test
+# venv can exercise the API app (tests under tests/test_api_health.py).
+# They are NOT runtime dependencies of the NestQuest HA integration.
+# When the API deployable is packaged (Feature 17), its runtime
+# dependencies — fastapi, uvicorn, and any others — MUST be declared in
+# that deployable's own dependency manifest, not here.
 dev = [
     "fastapi>=0.115",
     "httpx>=0.28",
