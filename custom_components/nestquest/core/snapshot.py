@@ -13,24 +13,27 @@ the assembly itself touches no HA surface.
 This module holds the pure pieces — the snapshot dataclasses
 (:class:`QuestInstanceView`, :class:`ChildDaySnapshot`,
 :class:`NestQuestSnapshot`), the cycle-day helper (:func:`_cycle_day`),
-and the async :func:`build_snapshot` builder — so the HA coordinator and
-the API service's panel snapshot route share ONE implementation.
+the panel payload shaper (:func:`instance_payload`), and the async
+:func:`build_snapshot` builder — so the HA coordinator and the API
+service's panel snapshot route share ONE implementation of both the
+snapshot assembly and the entity-facing attribute payload shape.
 Nothing here imports :mod:`homeassistant`; the builder takes the
-database, the settings object, the target date, and the timezone and
-returns the snapshot, mirroring exactly what the coordinator used to do
-inline.
+database, the settings object, the target date, and the HA-local
+``now`` (a single clock read the caller already resolved) and returns
+the snapshot, mirroring exactly what the coordinator used to do inline.
 
-``settings`` is accepted for forward-compatibility (the API route hands
-in the entry's :class:`~.settings.NestQuestSettings`); the current
-assembly does not read it, but the parameter keeps the builder's
-contract stable as future panel features derive scan caps or rollup
-behaviour from configuration.
+``settings`` is accepted because the API route hands in the entry's
+:class:`~.settings.NestQuestSettings`; it is CURRENTLY UNUSED — the
+assembly reads nothing from it — and is retained so the builder's
+contract stays stable if a future panel feature derives scan caps or
+rollup behaviour from configuration.  No speculative read is wired in.
 """
 from __future__ import annotations
 
 import datetime
+from collections.abc import Iterable
 from dataclasses import dataclass
-from zoneinfo import ZoneInfo
+from typing import Any
 
 from .completion import derive_state
 from .dao_children import ChildrenDao
@@ -112,13 +115,53 @@ def _cycle_day(
     return 0
 
 
+def instance_payload(
+    instances: Iterable[QuestInstanceView], *, include_missed: bool
+) -> list[dict[str, Any]]:
+    """Shape instance dicts per ENTITIES-AND-SERVICES.md §1.
+
+    The panel payload ``state`` is the documented ``open`` | ``completed``
+    spelling, so the builder's derived ``done`` maps to ``completed`` here;
+    ``open`` passes through.  ``missed`` instances are OMITTED from the
+    entity-facing attribute payload (decision 5) unless ``include_missed``
+    is set — the admin payload (D-009) keeps them with their ``missed``
+    state.  ``on_time`` passes the builder's ``was_on_time`` through
+    verbatim (``True`` / ``False`` for a completed instance, ``None`` for
+    an open one).  This is the SINGLE shared implementation both the HA
+    sensor layer and the API panel route read; it touches no Home
+    Assistant surface.
+    """
+    payload: list[dict[str, Any]] = []
+    for view in instances:
+        if view.state == "missed" and not include_missed:
+            continue
+        payload.append(
+            {
+                "id": view.instance_id,
+                "definition_id": view.definition_id,
+                "child_id": view.child_id,
+                "title": view.title,
+                "icon": view.icon,
+                "window": view.window,
+                "due_time": view.due_time,
+                "state": (
+                    "completed" if view.state == "done" else view.state
+                ),
+                "overdue": view.overdue,
+                "completed_at": view.completed_at,
+                "on_time": view.was_on_time,
+            }
+        )
+    return payload
+
+
 async def build_snapshot(
     database: NestQuestDatabase,
     settings: NestQuestSettings,
     today: datetime.date,
-    time_zone: ZoneInfo,
+    now: datetime.datetime,
 ) -> NestQuestSnapshot:
-    """Build the household panel snapshot for ``today`` in ``time_zone``.
+    """Build the household panel snapshot for ``today`` at the ``now`` instant.
 
     Mirrors the assembly that lived in the coordinator's
     ``_async_update_data``: active children in sort order, each child's
@@ -128,10 +171,21 @@ async def build_snapshot(
     per-child rollup counts, and the custody cycle day of the first
     scheduled active child.  Missed instances are retained on the
     snapshot (the rollup counts and the panel's missed plate need them)
-    but the entity-facing attribute payload omits them at the sensor
-    layer — this builder produces the shared shape both consumers read.
+    but the entity-facing attribute payload omits them at the
+    :func:`instance_payload` layer — this builder produces the shared
+    shape both consumers read.
+
+    ``now`` is the HA-local timezone-aware datetime the caller already
+    resolved (a SINGLE clock read); the overdue check compares
+    ``now.time()`` against the instance's ``due_time`` for today's open
+    instances.  The builder performs NO internal clock read — it never
+    calls :func:`datetime.datetime.now` — so the instant is pinned in
+    tests and date and time can never disagree across two reads.
+    ``today`` is the calendar date the caller resolved from the same
+    clock (``now.date()``); it anchors the due-date and cycle-day
+    arithmetic.  ``settings`` is accepted but currently unused (see the
+    module docstring).
     """
-    now = datetime.datetime.now(time_zone)
     today_iso = today.isoformat()
 
     children = await ChildrenDao(database).list_active()

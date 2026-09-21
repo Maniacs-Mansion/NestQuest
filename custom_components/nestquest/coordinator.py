@@ -14,10 +14,11 @@ layers.
 The snapshot assembly itself lives in the Home-Assistant-free
 :mod:`custom_components.nestquest.core.snapshot` module
 (:func:`~core.snapshot.build_snapshot`); this coordinator is now a thin
-HA wrapper that resolves the local timezone and settings off the config
-entry and delegates to that builder.  The API service's panel snapshot
-route shares the same builder, so both consumers render ONE snapshot
-shape.
+HA wrapper that resolves the local timezone and reads the settings handed
+into its constructor, then delegates to that builder, passing the SAME
+HA-local ``now`` it resolved in one clock read.  The API service's panel
+snapshot route shares the same builder, so both consumers render ONE
+snapshot shape.
 
 Presence is resolved through the SAME engine the materializer uses
 (:class:`~.presence.PresenceEngine`): schedules and overrides are read
@@ -53,7 +54,6 @@ from .core.snapshot import (
     ChildDaySnapshot,
     NestQuestSnapshot,
     QuestInstanceView,
-    _cycle_day,
     build_snapshot,
 )
 
@@ -62,8 +62,6 @@ __all__ = [
     "NestQuestCoordinator",
     "NestQuestSnapshot",
     "QuestInstanceView",
-    "_cycle_day",
-    "build_snapshot",
 ]
 
 
@@ -120,7 +118,6 @@ class NestQuestCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> NestQuestSnapshot:
         now = self._local_now()
         today = now.date()
-        time_zone = ZoneInfo(self.hass.config.time_zone)
         return await build_snapshot(
-            self.database, self.settings, today, time_zone
+            self.database, self.settings, today, now
         )
