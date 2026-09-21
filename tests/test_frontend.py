@@ -169,7 +169,9 @@ def test_readme_documents_the_touchhub_setup_runbook() -> None:
     readme = " ".join(
         (REPO_ROOT / "README.md").read_text(encoding="utf-8").split()
     )
-    for required in ("use_x_frame_options", "TouchHub", "kiosk", "clickjacking"):
+    for required in ("TouchHub", "kiosk"):
         assert required in readme, required
     assert "not in the NestQuest admin allowlist" in readme
     assert "contains only the NestQuest panel card" in readme
+    assert "use_x_frame_options" not in readme
+    assert "clickjacking" not in readme
