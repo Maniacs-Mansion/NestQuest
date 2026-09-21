@@ -90,6 +90,7 @@ child_order: [declan, jordyn, chloe]
 # kids' panel, view 2
 type: custom:nestquest-quest-log-card
 board_path: /nestquest/board
+weather_entity: weather.home          # optional; dock falls back to date/time
 idle_return_seconds: 40               # must be shorter than TouchHub Auto-Return
 confirm_timeout_seconds: 15
 complete_screen_seconds: 12

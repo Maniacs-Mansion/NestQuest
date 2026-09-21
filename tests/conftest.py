@@ -51,6 +51,8 @@ _HA_MODULES = (
     "homeassistant.components",
     "homeassistant.components.sensor",
     "homeassistant.components.binary_sensor",
+    "homeassistant.components.http",
+    "homeassistant.components.frontend",
 )
 
 def _find_spec(name: str):
@@ -96,6 +98,8 @@ for _parent, _child in (
     ("homeassistant", "components"),
     ("homeassistant.components", "sensor"),
     ("homeassistant.components", "binary_sensor"),
+    ("homeassistant.components", "http"),
+    ("homeassistant.components", "frontend"),
 ):
     setattr(sys.modules[_parent], _child, sys.modules[f"{_parent}.{_child}"])
 
@@ -429,6 +433,28 @@ _sensor_mock.SensorStateClass = SensorStateClass
 _binary_sensor_mock = _ha_mock("homeassistant.components.binary_sensor")
 _binary_sensor_mock.BinarySensorEntity = BinarySensorEntity
 
+
+@dataclass(frozen=True)
+class StaticPathConfig:
+    """Stand-in mirroring homeassistant.components.http.StaticPathConfig."""
+
+    url_path: str
+    path: str
+    cache_headers: bool = True
+
+
+def _add_extra_js_url(hass, url, es5=False):
+    """Stand-in mirroring homeassistant.components.frontend.add_extra_js_url."""
+    urls = getattr(hass, "extra_js_urls", None)
+    if urls is None:
+        hass.extra_js_urls = []
+        urls = hass.extra_js_urls
+    urls.append(url)
+
+
+_ha_mock("homeassistant.components.http").StaticPathConfig = StaticPathConfig
+_ha_mock("homeassistant.components.frontend").add_extra_js_url = _add_extra_js_url
+
 import voluptuous as vol
 
 
@@ -547,6 +573,16 @@ def _async_track_time_change(hass, action, hour=None, minute=None, second=None):
 
 
 _ha_mock("homeassistant.helpers.event").async_track_time_change = _async_track_time_change
+
+
+class HttpRegistry:
+    """Models HA's ``hass.http`` static-path registration."""
+
+    def __init__(self):
+        self.static_paths: list[StaticPathConfig] = []
+
+    async def async_register_static_paths(self, configs):
+        self.static_paths.extend(list(configs))
 
 
 class EventBus:
@@ -697,6 +733,8 @@ def make_hass() -> tuple:
     hass.time_change = TimeChangeRegistry(hass)
     hass.services = ServiceRegistry(hass)
     hass.bus = EventBus()
+    hass.http = HttpRegistry()
+    hass.extra_js_urls: list[str] = []
     # A valid IANA time zone (the day-rollover listener reads it to
     # compute "today" in HA local time).
     hass.config.time_zone = "UTC"

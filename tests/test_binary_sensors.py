@@ -6,7 +6,7 @@ import datetime
 from conftest import wire_entry_to_registry
 
 from custom_components.nestquest import async_setup_entry
-from custom_components.nestquest.children import create_child
+from custom_components.nestquest.children import create_child, list_children
 from custom_components.nestquest.const import DOMAIN
 from custom_components.nestquest.dao_presence import PresenceSchedulesDao
 from custom_components.nestquest.materialize import materialize
@@ -128,7 +128,57 @@ async def test_binary_sensor_identity_and_attributes(hass, make_entry) -> None:
     assert present.name == "NestQuest Ada present today"
     for entity in (all_done, present):
         assert entity.device_info.name == "NestQuest Ada"
-        assert entity.extra_state_attributes == {
+        assert all_done.extra_state_attributes == {
             "child_id": ada.id,
             "child_name": "Ada",
         }
+        assert present.extra_state_attributes == {
+            "child_id": ada.id,
+            "child_name": "Ada",
+            "next_present": None,
+        }
+
+
+async def test_present_today_carries_next_present_when_away(
+    hass, make_entry
+) -> None:
+    """A child away today carries the ISO date of their next present
+    day (the panel's away plate renders ``Returns <weekday>, <Mon D>``
+    from it); an always-absent pattern carries ``None``."""
+    entry = await _setup_entry(hass, make_entry)
+    coordinator = entry.runtime_data.coordinator
+    database = entry.runtime_data.database
+    ada, _bo = await _seed_two_children(database)
+    await create_child(database, "Cory")
+    today = datetime.date.today()
+    pattern = ",".join(
+        str(day) for day in range(7) if day != today.weekday()
+    )
+    await PresenceSchedulesDao(database).upsert_by_child(
+        ada.id, 1, today.isoformat(), pattern
+    )
+    await PresenceSchedulesDao(database).upsert_by_child(
+        await _cory_id(database), 1, today.isoformat(), ""
+    )
+    await coordinator.async_refresh()
+
+    assert _binary(hass, ada.id, "present_today").is_on is False
+    assert _binary(hass, ada.id, "present_today").extra_state_attributes[
+        "next_present"
+    ] == (today + datetime.timedelta(days=1)).isoformat()
+
+    cory = [
+        child for child in coordinator.data.children
+        if child.child_name == "Cory"
+    ][0]
+    assert _binary(hass, cory.child_id, "present_today").is_on is False
+    assert _binary(hass, cory.child_id, "present_today").extra_state_attributes[
+        "next_present"
+    ] is None
+
+
+async def _cory_id(database) -> int:
+    for child in await list_children(database):
+        if child.display_name == "Cory":
+            return child.id
+    raise AssertionError("Cory was not created")
