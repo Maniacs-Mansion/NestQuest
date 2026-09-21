@@ -143,7 +143,7 @@ async def test_every_active_child_gets_five_sensors_with_documented_identity(
             assert entity.native_unit_of_measurement is None
         assert pct_entity.state_class == "measurement"
         assert pct_entity.native_unit_of_measurement == "%"
-        assert pct_entity.device_class == "percentage"
+        assert pct_entity.device_class is None
         device_info = due_entity.device_info
         assert device_info.name == f"NestQuest {name}"
         assert device_info.manufacturer == "NestQuest"
