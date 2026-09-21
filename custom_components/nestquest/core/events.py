@@ -1,0 +1,155 @@
+"""Transition-event payload construction for the NestQuest service paths (Feature 10).
+
+This module is PAYLOAD CONSTRUCTION ONLY: it builds and RETURNS the
+transition events (event type + payload dict) and never touches the
+Home Assistant event bus or config.  The caller decides how to fire
+them (the integration's re-export shim wires the returned events to
+``hass.bus.async_fire``).
+
+The four documented events (design/ENTITIES-AND-SERVICES.md §3, names
+in :mod:`~.const`): ``nestquest_quest_completed`` and
+``nestquest_quest_uncompleted`` fire from the completion service
+handlers on an actual transition (a no-op re-complete or re-uncomplete
+fires nothing), and ``nestquest_child_day_complete`` fires when a
+completion clears the child's whole day (quests were owed and none
+remain — a zero-quest day can never fire it, matching the all-done
+binary sensor's rule).  ``nestquest_quest_missed`` is the documented
+contract Feature 11's nightly sweep fires; nothing here builds it.
+
+Payload policy: one dict carrying ``child_id``, ``child_name``,
+``instance_id``, ``quest_title``, the instance's ``window``/
+``due_date``/``due_time`` so automation authors can filter without a
+database lookup, and ``occurred_at`` — the event's own strict UTC
+ISO-8601 timestamp.  Completion payloads additionally carry
+``was_on_time``.  No other personal data: names and titles are the
+household's own records, and nothing beyond them leaks.
+
+Timezone policy: the day-complete check needs the HA-local "today",
+which the caller passes in as a plain :class:`datetime.date`.  Nothing
+here reads ``hass.config.time_zone`` — the integration owns HA
+timezone, the core owns the calendar arithmetic.
+"""
+from __future__ import annotations
+
+import datetime
+
+from .completion import derive_state
+from .const import (
+    EVENT_CHILD_DAY_COMPLETE,
+    EVENT_QUEST_COMPLETED,
+    EVENT_QUEST_UNCOMPLETED,
+)
+from .dao_children import ChildrenDao
+from .dao_instances import CompletionEventsDao, QuestInstancesDao
+from .dao_rules import QuestDefinitionsDao
+from .db import NestQuestDatabase
+
+#: Strict UTC ISO-8601 timestamp (the DAO layers' policy): one shape,
+#: explicit offset, second precision.
+_UTC_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S+00:00"
+
+
+def _now_stamp() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        _UTC_TIMESTAMP_FORMAT
+    )
+
+
+async def _instance_payload(
+    database: NestQuestDatabase, instance_id: int, now_stamp: str
+) -> dict:
+    """Build the shared event payload for one quest instance."""
+    instance = await QuestInstancesDao(database).get_by_id(instance_id)
+    if instance is None:
+        raise ValueError(
+            f"instance_id: quest instance {instance_id} does not exist"
+        )
+    child = await ChildrenDao(database).get(instance.child_id)
+    definition = await QuestDefinitionsDao(database).get(
+        instance.definition_id
+    )
+    return {
+        "child_id": instance.child_id,
+        "child_name": child.display_name if child else None,
+        "instance_id": instance.id,
+        "quest_title": definition.title if definition else None,
+        "window": instance.window,
+        "due_date": instance.due_date,
+        "due_time": instance.due_time,
+        "occurred_at": now_stamp,
+    }
+
+
+async def build_quest_completed_events(
+    database: NestQuestDatabase,
+    instance_id: int,
+    *,
+    was_on_time: bool | None,
+    today: datetime.date,
+) -> list[tuple[str, dict]]:
+    """Build the transition events for an actual completion.
+
+    Called by the complete_quest service handler AFTER an actual
+    completion transition, with the completion's ``was_on_time`` —
+    computed under the completion lock and carried on the result — so
+    the payload never re-reads mutable latest state a racing reversal
+    could have replaced.  A no-op re-complete never reaches here.
+
+    Returns a list of ``(event_type, payload)`` tuples to fire, in
+    order: always ``nestquest_quest_completed`` first, and — when the
+    completion cleared the child's whole day —
+    ``nestquest_child_day_complete`` after it.  The caller fires them
+    on the bus.
+
+    ``today`` is the HA-local calendar date the day-complete rule is
+    evaluated against; the integration reads it from
+    ``hass.config.time_zone`` and passes it in, so this module never
+    touches HA config.
+    """
+    now_stamp = _now_stamp()
+    payload = await _instance_payload(database, instance_id, now_stamp)
+    payload["was_on_time"] = was_on_time
+    events: list[tuple[str, dict]] = [(EVENT_QUEST_COMPLETED, payload)]
+
+    # Day-complete: quests were owed today and none remain (the same
+    # rule as the all-done binary sensor; a zero-quest day never fires).
+    # Only a completion of TODAY'S instance evaluates it: completing a
+    # back-dated or future instance must not announce a cleared day.
+    if payload["due_date"] != today.isoformat():
+        return events
+    instances = await QuestInstancesDao(database).list_by_date_range(
+        payload["child_id"], today.isoformat(), today.isoformat()
+    )
+    completion_events = CompletionEventsDao(database)
+    remaining = 0
+    for instance in instances:
+        latest_for_instance = await completion_events.get_latest_for_instance(
+            instance.id
+        )
+        if derive_state(instance, latest_for_instance, today) != "done":
+            remaining += 1
+    if instances and remaining == 0:
+        events.append(
+            (
+                EVENT_CHILD_DAY_COMPLETE,
+                {
+                    "child_id": payload["child_id"],
+                    "child_name": payload["child_name"],
+                    "quests_due": len(instances),
+                    "quests_completed": len(instances),
+                    "occurred_at": now_stamp,
+                },
+            )
+        )
+    return events
+
+
+async def build_quest_uncompleted_events(
+    database: NestQuestDatabase, instance_id: int
+) -> list[tuple[str, dict]]:
+    """Build the ``nestquest_quest_uncompleted`` event for an actual reversal.
+
+    Returns a one-element list of ``(event_type, payload)`` to fire.
+    """
+    payload = await _instance_payload(database, instance_id, _now_stamp())
+    return [(EVENT_QUEST_UNCOMPLETED, payload)]
