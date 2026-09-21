@@ -24,8 +24,6 @@ from . import children as children_layer
 from . import completion as completion_layer
 from . import quest_definitions as quest_definitions_layer
 from .const import (
-    CONF_HORIZON_DAYS,
-    DEFAULT_HORIZON_DAYS,
     DOMAIN,
     DOMAIN_SERVICES,
     QUEST_WINDOWS,
@@ -258,12 +256,7 @@ async def _refresh_entities(runtime: Any) -> None:
 def _generation_kwargs(hass: HomeAssistant, runtime: Any) -> dict[str, Any]:
     time_zone = ZoneInfo(hass.config.time_zone)
     today = datetime.datetime.now(time_zone).date()
-    value = runtime.options.get(CONF_HORIZON_DAYS, DEFAULT_HORIZON_DAYS)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        horizon_days = DEFAULT_HORIZON_DAYS
-    else:
-        horizon_days = value
-    return {"today": today, "horizon_days": horizon_days}
+    return {"today": today, "horizon_days": runtime.settings.horizon_days}
 
 
 def _actor_kwargs(call: Any) -> dict[str, Any]:

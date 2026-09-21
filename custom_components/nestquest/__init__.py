@@ -18,19 +18,16 @@ from homeassistant.helpers.event import async_track_time_change
 
 from .const import (
     CONF_ADMIN_USER_IDS,
-    CONF_DAY_ROLLOVER_TIME,
-    CONF_HORIZON_DAYS,
     CONF_UPDATE_INTERVAL,
-    DEFAULT_DAY_ROLLOVER_TIME,
-    DEFAULT_HORIZON_DAYS,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     LOGGER,
     PLATFORMS,
 )
+from .core.settings import NestQuestSettings
 from .frontend import async_register_frontend
 from .coordinator import NestQuestCoordinator
-from .db import NestQuestDatabase
+from .db import NestQuestDatabase, make_database
 from .materialize import materialize as _materialize_run
 from .migrations import apply_migrations
 from .services import async_deregister_services, async_register_services
@@ -174,7 +171,7 @@ async def _async_open_database(
     """
     try:
         await _preflight_existing_file(hass, db_path)
-        database = await NestQuestDatabase(hass).open(db_path)
+        database = await make_database(hass).open(db_path)
     except asyncio.CancelledError:
         raise
     except sqlite3.DatabaseError as err:
@@ -240,7 +237,7 @@ class NestQuestRuntimeData:
     """Runtime data stored on a NestQuest config entry."""
 
     entry_id: str
-    options: dict[str, Any]
+    settings: NestQuestSettings
     database: NestQuestDatabase
     remove_update_listener: Callable[[], Any]
     remove_time_change_listener: Callable[[], Any]
@@ -269,38 +266,10 @@ async def _async_owner_user_ids(hass: HomeAssistant) -> list[str]:
     return owners
 
 
-def _day_rollover_hour_minute(options: dict[str, Any]) -> tuple[int, int]:
-    """Return the (hour, minute) the daily rollover fires at from ``options``.
-
-    The options flow validates ``day_rollover_time`` as a strict ``HH:MM``
-    string, so a stored value never needs re-validation here; a missing key
-    falls back to :data:`~.const.DEFAULT_DAY_ROLLOVER_TIME`.
-    """
-    rollover = options.get(CONF_DAY_ROLLOVER_TIME, DEFAULT_DAY_ROLLOVER_TIME)
-    hour, _, minute = rollover.partition(":")
-    return int(hour), int(minute)
-
-
-def _configured_horizon_days(options: dict[str, Any]) -> int:
-    """Return the configured generation horizon, validated, else the default.
-
-    The options flow already validates ``horizon_days`` as an integer >= 1,
-    but a stored ``entry.options`` dict could still carry a partial or
-    hand-edited value.  Re-checking here — and falling back to
-    :data:`~.const.DEFAULT_HORIZON_DAYS` on a missing, non-int or sub-1 value
-    — keeps a malformed option from shrinking or exploding the materialized
-    horizon.
-    """
-    value = options.get(CONF_HORIZON_DAYS, DEFAULT_HORIZON_DAYS)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        return DEFAULT_HORIZON_DAYS
-    return value
-
-
 async def _run_horizon_materialization(
     hass: HomeAssistant,
     database: NestQuestDatabase,
-    horizon_days: int = DEFAULT_HORIZON_DAYS,
+    settings: NestQuestSettings,
 ) -> None:
     """Materialize the rolling horizon ``[today, today + horizon_days]``.
 
@@ -311,23 +280,22 @@ async def _run_horizon_materialization(
 
     This is the ONE generation path: the startup backfill, the daily rollover
     listener and the ``regenerate`` service all funnel through it, so there is
-    no duplicated materialization logic.  ``horizon_days`` sizes the window
-    and defaults to :data:`~.const.DEFAULT_HORIZON_DAYS`; callers thread the
-    entry's validated option value through.
+    no duplicated materialization logic.  ``settings`` (REQUIRED — there is no
+    silent default; every caller already passes the entry's validated
+    :class:`NestQuestSettings`) carries the configured ``horizon_days``.  The
+    window itself comes from :meth:`settings.horizon_window` so the helper is
+    real and shared (not recomputed inline here).
     """
     time_zone = ZoneInfo(hass.config.time_zone)
     today = datetime.datetime.now(time_zone).date()
-    start_date = today.isoformat()
-    end_date = (
-        today + datetime.timedelta(days=horizon_days)
-    ).isoformat()
-    await _materialize_run(database, start_date, end_date, today=today)
+    start, end = settings.horizon_window(today)
+    await _materialize_run(database, start.isoformat(), end.isoformat(), today=today)
 
 
 def _register_day_rollover_listener(
     hass: HomeAssistant,
     database: NestQuestDatabase,
-    options: dict[str, Any],
+    settings: NestQuestSettings,
 ) -> Callable[[], Any]:
     """Register the daily rollover listener and return its remover.
 
@@ -335,16 +303,15 @@ def _register_day_rollover_listener(
     first re-materializes the rolling horizon
     ``[today, today + horizon_days]`` through the shared
     :func:`_run_horizon_materialization` path (the entry's configured,
-    validated ``horizon_days``), then runs the Feature 11 missed sweep
-    — announcing yesterday's still-open quests as missed AFTER today's
-    instances exist, watermark-guarded so a re-fire of the listener the
-    same night announces nothing twice.
+    validated ``horizon_days`` carried on ``settings``), then runs the
+    Feature 11 missed sweep — announcing yesterday's still-open quests
+    as missed AFTER today's instances exist, watermark-guarded so a
+    re-fire of the listener the same night announces nothing twice.
     """
-    hour, minute = _day_rollover_hour_minute(options)
-    horizon_days = _configured_horizon_days(options)
+    hour, minute = settings.day_rollover_hour_minute
 
     async def _run_materialization(_now: datetime.datetime) -> None:
-        await _run_horizon_materialization(hass, database, horizon_days)
+        await _run_horizon_materialization(hass, database, settings)
         await run_missed_sweep(hass, database)
 
     return async_track_time_change(
@@ -359,7 +326,9 @@ def _find_live_runtime_data(hass: HomeAssistant) -> NestQuestRuntimeData | None:
     their own; they resolve whichever config entry's runtime data is
     currently live at call time, so none of them can hold a stale handle
     to a closed connection after another entry unloads.  The record also
-    carries that entry's options (e.g. the configured horizon).
+    carries that entry's validated ``settings`` (e.g. the configured
+    horizon) so service handlers read horizon days off it rather than
+    re-reading HA config.
     """
     for runtime_data in hass.data.get(DOMAIN, {}).values():
         database = getattr(runtime_data, "database", None)
@@ -379,9 +348,8 @@ def _make_regenerate_handler(hass: HomeAssistant):
                 "live database; ignoring"
             )
             return
-        horizon_days = _configured_horizon_days(runtime_data.options)
         await _run_horizon_materialization(
-            hass, runtime_data.database, horizon_days
+            hass, runtime_data.database, runtime_data.settings
         )
 
     return _regenerate
@@ -495,18 +463,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             context_user_id=context_user_id,
             owner_ids=owner_ids,
         )
+        # Build the explicit settings object from entry.options ONCE: the
+        # horizon materialization and the daily-rollover listener both
+        # consume it, so core never reads HA config itself.  A malformed
+        # stored option falls back PER FIELD (via from_options_resilient)
+        # so a single bad sibling option cannot reset the user's
+        # horizon_days or day_rollover_time — the two fields core
+        # consumes — to their defaults.
+        settings = NestQuestSettings.from_options_resilient(entry.options)
         remove_update_listener = entry.add_update_listener(_async_update_listener)
         remove_time_change_listener = _register_day_rollover_listener(
-            hass, database, dict(entry.options)
+            hass, database, settings
         )
         # Backfill any days the daily listener missed while the integration
         # was off (or freshly installed): run the one idempotent walk over
         # [today, today + horizon_days] once at setup, using the entry's
         # configured horizon.  This runs through the SAME path as the daily
         # listener and regenerate service.
-        await _run_horizon_materialization(
-            hass, database, _configured_horizon_days(dict(entry.options))
-        )
+        await _run_horizon_materialization(hass, database, settings)
         # The missed sweep runs at startup too (Feature 11): if HA was
         # down at the rollover time, the previous night's still-open
         # quests are announced as missed now instead of waiting for
@@ -529,7 +503,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_config_entry_first_refresh()
         runtime_data = NestQuestRuntimeData(
             entry_id=entry.entry_id,
-            options=dict(entry.options),
+            settings=settings,
             database=database,
             remove_update_listener=remove_update_listener,
             remove_time_change_listener=remove_time_change_listener,

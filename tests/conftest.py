@@ -22,6 +22,7 @@ pytest -q``); it is never meant to run against a real HA install.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import importlib.util
 import inspect
 import sys
@@ -829,6 +830,24 @@ def make_hass() -> tuple:
     return hass, registry
 
 
+def executor_for(hass):
+    """Return a dynamic executor callable backed by ``hass.async_add_executor_job``.
+
+    The wrapper resolves ``hass.async_add_executor_job`` on every call, so a
+    test that swaps it after constructing the database (to gate or fail
+    specific jobs) is observed without rebuilding the wrapper — mirroring
+    the pre-extraction db.py, which read the attribute dynamically off
+    ``hass``.  Use this for cancellation/gating tests that reassign
+    ``hass.async_add_executor_job``; plain call sites can pass
+    ``hass.async_add_executor_job`` directly.
+    """
+
+    async def _executor(fn, *args, **kwargs):
+        return await hass.async_add_executor_job(fn, *args, **kwargs)
+
+    return _executor
+
+
 @pytest.fixture
 async def hass():
     """Provide a standard-shaped hass fixture bound to the running test loop.
@@ -899,3 +918,39 @@ def make_config_flow_entry():
         return SimpleNamespace(domain=domain, entry_id=entry_id)
 
     return _factory
+
+
+def freeze_nestquest_clock(
+    monkeypatch, instant: datetime.datetime
+) -> tuple[datetime.datetime, list]:
+    """Freeze the integration's ``datetime`` clock to a fixed aware instant.
+
+    Only ``custom_components.nestquest``'s ``datetime`` binding is patched,
+    so the generation path's ``datetime.datetime.now`` reads this instant
+    (localized to whatever time zone it asks for) while every other module
+    and the test harness keep the real clock.  Returns ``(frozen, requested)``
+    where ``frozen`` is the instant normalized to UTC and ``requested`` is
+    the list of ``tzinfo`` objects the code under test passed to ``now`` —
+    so a caller can prove the generation path actually requested the
+    configured HA time zone rather than silently reading UTC.
+    """
+    import custom_components.nestquest as nestquest
+
+    frozen = instant.astimezone(datetime.timezone.utc)
+    requested: list = []
+
+    class _FrozenDatetime(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            requested.append(tz)
+            if tz is None:
+                return frozen.replace(tzinfo=None)
+            return frozen.astimezone(tz)
+
+    fake_module = SimpleNamespace(
+        datetime=_FrozenDatetime,
+        timedelta=datetime.timedelta,
+        date=datetime.date,
+    )
+    monkeypatch.setattr(nestquest, "datetime", fake_module)
+    return frozen, requested

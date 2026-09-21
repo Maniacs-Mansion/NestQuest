@@ -30,7 +30,7 @@ def _make_hass_mock():
 
 
 def _open_db(path) -> NestQuestDatabase:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     _run(database.open(path))
     _run(apply_migrations(database))
     return database
@@ -319,7 +319,7 @@ def test_reorder_concurrent_calls_serialize(tmp_path) -> None:
     RuntimeError.
     """
     async def _main() -> None:
-        database = NestQuestDatabase(_make_hass_mock())
+        database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
         await database.open(tmp_path / "reorder-concurrent.db")
         try:
             await apply_migrations(database)
@@ -377,7 +377,7 @@ def test_admin_add_concurrent_calls_are_idempotent(tmp_path) -> None:
     'see no row' and one of them raise IntegrityError.
     """
     async def _main() -> None:
-        database = NestQuestDatabase(_make_hass_mock())
+        database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
         await database.open(tmp_path / "admin-race.db")
         try:
             await apply_migrations(database)
@@ -487,17 +487,17 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
     scan_roots = [package, repo_root / "tests"]
 
     allowed = {
-        "custom_components/nestquest/dao_children.py",  # the DAO itself
-        "custom_components/nestquest/dao_rules.py",  # validates child
+        "custom_components/nestquest/core/dao_children.py",  # the DAO itself
+        "custom_components/nestquest/core/dao_rules.py",  # validates child
         # activeness on assignment (FK to children, done-condition
         # 'validates that the assigned child is active')
-        "custom_components/nestquest/dao_presence.py",  # validates the
+        "custom_components/nestquest/core/dao_presence.py",  # validates the
         # schedule/override child exists before writing (same FK shape
         # as dao_rules: one existence SELECT per write)
-        "custom_components/nestquest/dao_instances.py",  # validates the
+        "custom_components/nestquest/core/dao_instances.py",  # validates the
         # instance/event child exists before writing (same FK shape)
-        "custom_components/nestquest/schema.py",  # declares the DDL
-        "custom_components/nestquest/migrations.py",  # applies the DDL
+        "custom_components/nestquest/core/schema.py",  # declares the DDL
+        "custom_components/nestquest/core/migrations.py",  # applies the DDL
         "tests/test_schema.py",  # tests the DDL
         "tests/test_migrations.py",  # tests migration application
         "tests/test_dao_children.py",  # this file, scanned separately

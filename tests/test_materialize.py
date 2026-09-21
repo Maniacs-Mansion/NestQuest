@@ -51,7 +51,7 @@ NOW = "2026-09-14T12:00:00+00:00"
 
 
 async def _prepare(path):
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     await database.open(path)
     await apply_migrations(database)
     return database
@@ -1039,7 +1039,7 @@ def test_regenerate_for_child_uses_single_anchor_across_midnight(
         clock["reads"] += 1
         return day0 if clock["reads"] == 1 else day1
 
-    import custom_components.nestquest.dao_instances as dao_instances_module
+    import custom_components.nestquest.core.dao_instances as dao_instances_module
 
     monkeypatch.setattr(dao_instances_module, "_today", _fake_today)
 
@@ -1475,7 +1475,7 @@ async def _collect_records(database, child_ids, start, end) -> set:
 
 
 def test_materialize_end_to_end_six_rule_types(tmp_path, monkeypatch) -> None:
-    import custom_components.nestquest.materialize as materialize_module
+    import custom_components.nestquest.core.materialize as materialize_module
 
     # Give each materialize run a DISTINCT batch stamp: production upserts
     # rewrite generated_at on every re-run, so a shared pinned stamp would
@@ -1487,6 +1487,9 @@ def test_materialize_end_to_end_six_rule_types(tmp_path, monkeypatch) -> None:
         stamps["n"] += 1
         return f"2026-06-01T00:00:{stamps['n']:02d}+00:00"
 
+    # The materialize() walk reads ``_now_stamp`` from its OWN module
+    # globals (now the HA-free core package), so the patch must target
+    # the core module, not the re-export shim the integration imports.
     monkeypatch.setattr(materialize_module, "_now_stamp", _distinct_stamp)
 
     async def _body(database):
