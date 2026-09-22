@@ -54,8 +54,8 @@ def interactive_nestquest_session(
     """Avoid racing a user-owned OpenCode TUI for the same repository."""
     try:
         db = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
-    except sqlite3.Error:
-        return False
+    except sqlite3.Error as error:
+        raise RuntimeError("OpenCode session database is unavailable") from error
     try:
         for entry in proc_root.iterdir():
             if not entry.name.isdecimal() or int(entry.name) == os.getpid():
@@ -65,7 +65,7 @@ def interactive_nestquest_session(
                 args = [a.decode(errors="replace") for a in args if a]
                 if not args or Path(args[0]).name != "opencode":
                     continue
-                if any(a in ("run", "debug", "serve", "web") for a in args[1:]):
+                if len(args) > 1 and args[1] in ("run", "debug", "serve", "web"):
                     continue
                 session = None
                 for flag in ("-s", "--session"):
@@ -81,6 +81,10 @@ def interactive_nestquest_session(
                         return True
                 elif (entry / "cwd").resolve() == project.resolve():
                     return True
+            except sqlite3.Error as error:
+                raise RuntimeError("OpenCode session lookup failed") from error
+            except TypeError as error:
+                raise RuntimeError("OpenCode session directory is invalid") from error
             except (OSError, PermissionError):
                 continue
     finally:
@@ -92,6 +96,8 @@ def parse_event(raw: str) -> tuple[str | None, str | None]:
     try:
         event = json.loads(raw)
     except json.JSONDecodeError:
+        return None, None
+    if not isinstance(event, dict):
         return None, None
     kind = event.get("type")
     part = event.get("part") or {}
@@ -192,11 +198,16 @@ def main() -> int:
             ctxd_version = check_ctxd()
         except (OSError, KeyError, ValueError, RuntimeError) as error:
             print(f"CTXD preflight failed: {type(error).__name__}", file=sys.stderr)
-            return 77
+            return 1
         print(f"ready: project={project} configuration={config_dir} binary={binary} ctxd_prompt_version={ctxd_version}")
         return 0
     if args.check_interactive:
-        print("interactive NestQuest session open" if interactive_nestquest_session(project) else "no interactive NestQuest session")
+        try:
+            active = interactive_nestquest_session(project)
+        except RuntimeError:
+            print("OpenCode session state unavailable", file=sys.stderr)
+            return 77
+        print("interactive NestQuest session open" if active else "no interactive NestQuest session")
         return 0
 
     args.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -213,7 +224,15 @@ def main() -> int:
         env["NESTQUEST_CONTROL_HOME"] = str(control_home)
         failures = 0
         while True:
-            if interactive_nestquest_session(project):
+            try:
+                interactive = interactive_nestquest_session(project)
+            except RuntimeError:
+                print("OpenCode session state unavailable; waiting", file=sys.stderr, flush=True)
+                if args.once:
+                    return 77
+                time.sleep(60)
+                continue
+            if interactive:
                 print("interactive NestQuest session still open; waiting", flush=True)
                 if args.once:
                     return 75

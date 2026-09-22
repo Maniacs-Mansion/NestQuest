@@ -8,11 +8,6 @@ permission:
   task: deny
   bash:
     "*": deny
-    "git status*": allow
-    "git diff*": allow
-    "git log*": allow
-    "git show*": allow
-    "git rev-parse*": allow
     "/home/overseer/.local/share/nestquest-controller/scripts/nq-approve-merge *": allow
   external_directory:
     "*": ask

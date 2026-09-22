@@ -25,7 +25,7 @@ def token_from_file() -> str:
     raise RuntimeError("GITEA_APPROVER_AGENT_TOKEN is unavailable")
 
 
-def request(path: str, token: str, payload: dict | None = None) -> dict:
+def request(path: str, token: str, payload: dict | None = None) -> dict | list:
     body = None if payload is None else json.dumps(payload).encode()
     headers = {"Authorization": "token " + token, "Accept": "application/json"}
     if body is not None:
@@ -68,6 +68,22 @@ def validate_review(path: Path, head: str) -> None:
         raise RuntimeError("independent review does not approve this exact head")
 
 
+def has_platform_review(pr_number: int, head: str, token: str) -> bool:
+    reviews = request(f"/pulls/{pr_number}/reviews", token)
+    if not isinstance(reviews, list):
+        raise RuntimeError("Gitea returned invalid review records")
+    by_reviewer = [
+        review for review in reviews
+        if isinstance(review, dict)
+        and (review.get("user") or {}).get("login") == "review_agent"
+        and review.get("commit_id") == head
+    ]
+    if not by_reviewer:
+        return False
+    latest = max(by_reviewer, key=lambda review: int(review.get("id") or 0))
+    return latest.get("state") == "APPROVED"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("inspect", "merge"))
@@ -87,6 +103,8 @@ def main() -> int:
     if not FULL_SHA.fullmatch(args.reviewed_head):
         parser.error("reviewed head must be a full SHA")
     validate_review(args.review_file, args.reviewed_head)
+    if not has_platform_review(args.pr, args.reviewed_head, token):
+        raise RuntimeError("Gitea lacks an exact-head approval by review_agent")
     if before["base"] != "dev" or before["head"] != args.reviewed_head:
         raise RuntimeError("PR target or current head differs from the approved review")
     if before["state"] != "open" or before["merged"] or before["mergeable"] is not True:

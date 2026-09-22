@@ -19,6 +19,8 @@ class ControllerProtocolTests(unittest.TestCase):
     def test_error_event_does_not_publish_provider_message(self):
         event = {"type": "error", "error": {"name": "APIError", "data": {"message": "secret provider response"}}}
         self.assertEqual(CONTROL["parse_event"](json.dumps(event)), (None, "APIError"))
+        self.assertEqual(CONTROL["parse_event"]("null"), (None, None))
+        self.assertEqual(CONTROL["parse_event"]("[]"), (None, None))
 
     def test_tick_uses_final_text(self):
         event = json.dumps({"type": "text", "part": {"type": "text", "text": "ORCHESTRATOR_STATE: QUIESCENT\n"}})
@@ -53,6 +55,11 @@ class ControllerProtocolTests(unittest.TestCase):
             self.assertTrue(CONTROL["interactive_nestquest_session"](project, proc, database))
             (entry / "cmdline").write_bytes(b"opencode\0--dir\0" + str(root).encode() + b"\0")
             self.assertFalse(CONTROL["interactive_nestquest_session"](project, proc, database))
+            with sqlite3.connect(database) as db:
+                db.execute("DROP TABLE session")
+            (entry / "cmdline").write_bytes(b"opencode\0-s\0ses_test\0")
+            with self.assertRaisesRegex(RuntimeError, "lookup failed"):
+                CONTROL["interactive_nestquest_session"](project, proc, database)
 
 
 if __name__ == "__main__":

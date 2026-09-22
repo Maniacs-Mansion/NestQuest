@@ -12,11 +12,13 @@ open for the NestQuest checkout.
 `scripts/nq-agent` launches developer and approver sessions with fixed agent
 definitions and no `--auto` flag. Headless OpenCode runs use `--pure` so the
 global idle-notification plugin does not notify on every controller tick.
-The approver's shell permission permits read-only Git commands and only the
-installed `nq-approve-merge` broker for Gitea. That broker requires exact-head
-Claude approval evidence, the `dev` target, a mergeable PR, and passing
-configured checks before it requests a squash merge. `scripts/nq-review` launches the independent
-Claude review in the task worktree and checks the exact head before review.
+The approver's shell permission permits only the installed
+`nq-approve-merge` broker for Gitea. That broker requires exact-head
+Claude approval evidence, an exact-head Gitea approval by `review_agent`,
+the `dev` target, a mergeable PR, and passing configured checks before it
+requests a squash merge. `scripts/nq-review` launches the independent
+Claude review in the task worktree, checks the head again afterward, saves
+the output under `/tmp/opencode`, and posts the Gitea approval.
 The approver verifies the reviewed head again before a merge.
 
 The production service uses a stable copy of this configuration and scripts
@@ -25,12 +27,19 @@ which task branch is checked out in the primary NestQuest directory. Install
 that copy, run `scripts/nq-controller --check`, and verify all three agents
 with `opencode debug agent <name>` while `OPENCODE_CONFIG_DIR` points at the
 installed `.opencode` directory. Install `deploy/nestquest-controller.service`
-under `/etc/systemd/system/`, then enable it. The service waits for an open
+under `~/.config/systemd/user/`, then enable it with `systemctl --user`.
+The host has lingering enabled for the `overseer` user. The service waits for an open
 interactive NestQuest session to close before starting work.
 
 The CTXD preflight reads the configured HTTP/MCP server's NestQuest prompt.
 It deliberately does not inspect `/home/overseer/.ctx/ctxd.db`, which belongs
 to a different local store and lacks this project.
+
+All four agent credentials are currently readable by the same Unix account.
+The Gitea review and merge gates enforce normal workflow sequencing, but
+they are not a hard isolation boundary against a process running as that
+account. Strong isolation requires separate OS identities and protected
+credentials for the controller, reviewer, and approver.
 
 A tick has an explicit six-hour timeout. On timeout or an OpenCode error, the
 next tick must reconcile external state before acting. Three consecutive

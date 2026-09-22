@@ -30,8 +30,10 @@ The NESTQUEST_CONTROL_HOME environment variable names the installed launchers
 (normally /home/overseer/.local/share/nestquest-controller).
 For implementation, run "$NESTQUEST_CONTROL_HOME/scripts/nq-agent" with role
 developer, a task worktree, title, and task prompt file. For independent
-review, run "$NESTQUEST_CONTROL_HOME/scripts/nq-review" in that task worktree,
-against the feature branch and the exact current head. The developer may merge
+review, run "$NESTQUEST_CONTROL_HOME/scripts/nq-review" with the worktree,
+feature base ref, exact head ref, review prompt file, PR number, and an output
+file under /tmp/opencode. It publishes an exact-head Gitea approval only after
+Claude approves. The developer may merge
 a task PR into its feature branch only after independent approval of the exact
 head and verification of every task gate. For feature-to-dev approval and
 merge, run "$NESTQUEST_CONTROL_HOME/scripts/nq-agent" with role approver in

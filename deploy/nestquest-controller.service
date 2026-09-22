@@ -1,13 +1,8 @@
 [Unit]
 Description=NestQuest OpenCode controller
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=600
-StartLimitBurst=5
 
 [Service]
 Type=simple
-User=overseer
 WorkingDirectory=/mnt/ai-storage/projects/NestQuest
 ExecStartPre=/home/overseer/.local/share/nestquest-controller/scripts/nq-controller --check
 ExecStart=/home/overseer/.local/share/nestquest-controller/scripts/nq-controller
@@ -19,4 +14,4 @@ KillMode=control-group
 Environment=PYTHONUNBUFFERED=1
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
