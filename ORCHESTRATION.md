@@ -26,12 +26,32 @@ The approver verifies the reviewed head again before a merge.
 The production service uses a stable copy of this configuration and scripts
 at `/home/overseer/.local/share/nestquest-controller`; it does not depend on
 which task branch is checked out in the primary NestQuest directory. Install
-that copy, run `scripts/nq-controller --check`, and verify all three agents
+that copy, run `scripts/nq-controller --check`, and verify all four OpenCode
+agents (orchestrator, developer, approver, cycle-control)
 with `opencode debug agent <name>` while `OPENCODE_CONFIG_DIR` points at the
 installed `.opencode` directory. Install `deploy/nestquest-controller.service`
-under `~/.config/systemd/user/`, then enable it with `systemctl --user`.
-The host has lingering enabled for the `overseer` user. The service waits for an open
-interactive NestQuest session to close before starting work.
+under `~/.config/systemd/user/` and reload the user manager. Its lack of an
+`[Install]` section makes it a manual-only unit; development starts only
+when requested. Copy `deploy/opencode-global-commands/*.md` into
+`~/.config/opencode/commands/` and `.opencode/agents/cycle-control.md` into
+`~/.config/opencode/agents/` for the commands to work from older branches.
+The host has lingering
+enabled for the `overseer` user. The service waits for an open interactive
+NestQuest session to close before starting work.
+
+In NestQuest's OpenCode session, use `/start-development`,
+`/stop-development`, or `/development-status`. The matching global
+`/start-nestquest-development`, `/stop-nestquest-development`, and
+`/nestquest-development-status` commands work even while an older branch is
+checked out. Starting the unit in an interactive NestQuest session puts it
+in a waiting state; close that session to let the first controller tick run.
+The commands call `scripts/nq-cycle`; they do not run a developer inside
+the interactive chat.
+
+`templates/ORCHESTRATOR-PROMPT.template.md` and
+`templates/nestquest.profile.json` make the current CTXD cycle prompt
+adaptable to another project. See `templates/README.md` before publishing a
+rendered prompt for a new project.
 
 The CTXD preflight reads the configured HTTP/MCP server's NestQuest prompt.
 It deliberately does not inspect `/home/overseer/.ctx/ctxd.db`, which belongs
