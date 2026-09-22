@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Inspect or merge a reviewed NestQuest feature PR into dev only."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import urllib.error
+import urllib.request
+
+
+API = "https://code.cubecraftlabs.com/api/v1/repos/Maniacs_Mansion/NestQuest"
+CREDENTIALS = Path("/home/overseer/.llms/credentials.env")
+FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def token_from_file() -> str:
+    for line in CREDENTIALS.read_text().splitlines():
+        if line.startswith("GITEA_APPROVER_AGENT_TOKEN="):
+            return line.split("=", 1)[1].strip().strip("\"'")
+    raise RuntimeError("GITEA_APPROVER_AGENT_TOKEN is unavailable")
+
+
+def request(path: str, token: str, payload: dict | None = None) -> dict | list:
+    body = None if payload is None else json.dumps(payload).encode()
+    headers = {"Authorization": "token " + token, "Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    call = urllib.request.Request(API + path, data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(call, timeout=20) as response:
+            raw = response.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"Gitea returned HTTP {error.code}") from None
+
+
+def inspect(pr_number: int, token: str) -> dict:
+    pr = request(f"/pulls/{pr_number}", token)
+    head = (pr.get("head") or {}).get("sha")
+    base = (pr.get("base") or {}).get("ref")
+    if not isinstance(head, str) or not FULL_SHA.fullmatch(head):
+        raise RuntimeError("Gitea returned an invalid PR head")
+    status = request(f"/commits/{head}/status", token)
+    return {
+        "number": pr.get("number"),
+        "base": base,
+        "head": head,
+        "state": pr.get("state"),
+        "merged": pr.get("merged"),
+        "mergeable": pr.get("mergeable"),
+        "check_count": status.get("total_count") or 0,
+        "check_state": status.get("state"),
+    }
+
+
+def validate_review(path: Path, head: str) -> None:
+    if not path.is_file() or not path.resolve().is_relative_to(Path("/tmp/opencode").resolve()):
+        raise RuntimeError("review evidence must be a file under /tmp/opencode")
+    text = path.read_text(errors="replace")
+    reviewed = re.findall(r"(?m)^REVIEWED_HEAD:\s*([0-9a-f]{40})\s*$", text)
+    verdicts = re.findall(r"(?m)^REVIEW_VERDICT:\s*(APPROVED|CHANGES_REQUIRED)\s*$", text)
+    if len(reviewed) != 1 or len(verdicts) != 1 or reviewed[0] != head or verdicts[0] != "APPROVED":
+        raise RuntimeError("independent review does not approve this exact head")
+
+
+def has_platform_review(pr_number: int, head: str, token: str) -> bool:
+    reviews = request(f"/pulls/{pr_number}/reviews", token)
+    if not isinstance(reviews, list):
+        raise RuntimeError("Gitea returned invalid review records")
+    by_reviewer = [
+        review for review in reviews
+        if isinstance(review, dict)
+        and (review.get("user") or {}).get("login") == "review_agent"
+        and review.get("commit_id") == head
+    ]
+    if not by_reviewer:
+        return False
+    latest = max(by_reviewer, key=lambda review: int(review.get("id") or 0))
+    return latest.get("state") == "APPROVED"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("operation", choices=("inspect", "merge"))
+    parser.add_argument("pr", type=int)
+    parser.add_argument("reviewed_head", nargs="?")
+    parser.add_argument("review_file", nargs="?", type=Path)
+    args = parser.parse_args()
+    if args.pr < 1:
+        parser.error("PR number must be positive")
+    if args.operation == "merge" and (not args.reviewed_head or not args.review_file):
+        parser.error("merge requires reviewed_head and review_file")
+    token = token_from_file()
+    before = inspect(args.pr, token)
+    if args.operation == "inspect":
+        print(json.dumps(before, sort_keys=True))
+        return 0
+    if not FULL_SHA.fullmatch(args.reviewed_head):
+        parser.error("reviewed head must be a full SHA")
+    validate_review(args.review_file, args.reviewed_head)
+    if not has_platform_review(args.pr, args.reviewed_head, token):
+        raise RuntimeError("Gitea lacks an exact-head approval by review_agent")
+    if before["base"] != "dev" or before["head"] != args.reviewed_head:
+        raise RuntimeError("PR target or current head differs from the approved review")
+    if before["state"] != "open" or before["merged"] or before["mergeable"] is not True:
+        raise RuntimeError("PR is closed, merged, or not mergeable")
+    if before["check_count"] and before["check_state"] != "success":
+        raise RuntimeError("a configured commit check has not passed")
+    # Gitea rechecks branch protection at the merge endpoint. The caller must
+    # independently verify Maestro and task-level evidence before invoking us.
+    # Gitea checks head_commit_id atomically while processing the merge.
+    request(f"/pulls/{args.pr}/merge", token,
+            {"do": "squash", "head_commit_id": args.reviewed_head})
+    after = inspect(args.pr, token)
+    if after["merged"] is not True or after["head"] != args.reviewed_head:
+        raise RuntimeError("merge result is missing or differs from the reviewed head")
+    print(json.dumps(after, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"approval gate failed: {error}", file=sys.stderr)
+        raise SystemExit(1)

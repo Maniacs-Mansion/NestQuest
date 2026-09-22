@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Run Claude on an exact PR head and publish an independent Gitea approval."""
+from __future__ import annotations
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+API = "https://code.cubecraftlabs.com/api/v1"
+REPO = "/repos/Maniacs_Mansion/NestQuest"
+CREDENTIALS = Path("/home/overseer/.llms/credentials.env")
+CLAUDE = "/home/overseer/.local/bin/claude"
+SHA = re.compile(r"^[0-9a-f]{40}$")
+
+def git(worktree: Path, *args: str) -> str:
+    return subprocess.check_output(["git", "-C", str(worktree), *args], text=True).strip()
+
+def token() -> str:
+    for line in CREDENTIALS.read_text().splitlines():
+        if line.startswith("GITEA_REVIEW_AGENT_TOKEN="):
+            return line.split("=", 1)[1].strip().strip("\"'")
+    raise RuntimeError("review_agent credential is unavailable")
+
+def api(path: str, credential: str, payload: dict | None = None) -> dict:
+    body = None if payload is None else json.dumps(payload).encode()
+    headers = {"Authorization": "token " + credential, "Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    call = urllib.request.Request(API + path, data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(call, timeout=20) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"Gitea returned HTTP {error.code}") from None
+
+def verdict(output: str, head: str) -> str:
+    reviewed = re.findall(r"(?m)^REVIEWED_HEAD:\s*([0-9a-f]{40})\s*$", output)
+    decisions = re.findall(r"(?m)^REVIEW_VERDICT:\s*(APPROVED|CHANGES_REQUIRED)\s*$", output)
+    if reviewed != [head] or len(decisions) != 1:
+        raise RuntimeError("Claude did not return one verdict for the exact reviewed head")
+    return decisions[0]
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("worktree", type=Path)
+    parser.add_argument("base_ref")
+    parser.add_argument("head_ref")
+    parser.add_argument("prompt_file", type=Path)
+    parser.add_argument("pr", type=int)
+    parser.add_argument("output_file", type=Path)
+    args = parser.parse_args()
+    if not args.worktree.is_dir() or not args.prompt_file.is_file() or args.pr < 1:
+        parser.error("valid worktree, prompt file, and PR number required")
+    if not args.output_file.resolve().is_relative_to(Path("/tmp/opencode").resolve()):
+        parser.error("review output must be under /tmp/opencode")
+    base = git(args.worktree, "rev-parse", "--verify", args.base_ref + "^{commit}")
+    head = git(args.worktree, "rev-parse", "--verify", args.head_ref + "^{commit}")
+    if not SHA.fullmatch(head) or git(args.worktree, "rev-parse", "HEAD") != head:
+        raise RuntimeError("worktree HEAD differs from requested head")
+    subprocess.run(["git", "-C", str(args.worktree), "merge-base", "--is-ancestor", base, head], check=True)
+    prompt = args.prompt_file.read_text() + (
+        f"\n\nReview only the delta from base {base} to exact head {head}. "
+        "Verify current HEAD before issuing a verdict. Read only; do not modify files. "
+        "End with two plain lines: REVIEWED_HEAD: <full 40-character SHA> "
+        "and REVIEW_VERDICT: APPROVED or REVIEW_VERDICT: CHANGES_REQUIRED."
+    )
+    result = subprocess.run(
+        [CLAUDE, "-p", prompt, "--model", "claude-sonnet-5", "--effort", "high",
+         "--permission-mode", "dontAsk", "--disallowedTools", "Edit", "Write",
+         "NotebookEdit", "--allowedTools", "Read", "Grep", "Glob",
+         "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)"],
+        cwd=args.worktree, text=True, capture_output=True, timeout=1200,
+    )
+    args.output_file.parent.mkdir(parents=True, exist_ok=True)
+    args.output_file.write_text(result.stdout)
+    os.chmod(args.output_file, 0o600)
+    if result.returncode:
+        raise RuntimeError(f"Claude exited {result.returncode}: {result.stderr[-300:]}")
+    decision = verdict(result.stdout, head)
+    if git(args.worktree, "rev-parse", "HEAD") != head:
+        raise RuntimeError("worktree HEAD changed during review")
+    print(result.stdout, end="")
+    if decision != "APPROVED":
+        return 2
+    credential = token()
+    if api("/user", credential).get("login") != "review_agent":
+        raise RuntimeError("review credential belongs to wrong account")
+    pr = api(f"{REPO}/pulls/{args.pr}", credential)
+    if pr.get("state") != "open" or (pr.get("head") or {}).get("sha") != head:
+        raise RuntimeError("PR head changed before review publication")
+    published = api(
+        f"{REPO}/pulls/{args.pr}/reviews", credential,
+        {"body": "Independent Claude Sonnet 5 review completed for this exact commit.",
+         "commit_id": head, "event": "APPROVED"},
+    )
+    if published.get("state") != "APPROVED" or published.get("commit_id") != head:
+        raise RuntimeError("Gitea did not confirm exact-head approval")
+    return 0
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError,
+            subprocess.TimeoutExpired) as error:
+        print(f"review gate failed: {error}", file=sys.stderr)
+        raise SystemExit(1)
