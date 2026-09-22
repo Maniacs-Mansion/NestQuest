@@ -12,6 +12,3 @@ RestartPreventExitStatus=77
 TimeoutStartSec=0
 KillMode=control-group
 Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=default.target
