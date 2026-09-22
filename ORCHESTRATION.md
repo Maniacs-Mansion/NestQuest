@@ -17,7 +17,8 @@ The approver's shell permission permits only the installed
 Claude approval evidence, an exact-head Gitea approval by `review_agent`,
 the `dev` target, a mergeable PR, and passing configured checks before it
 requests a squash merge. `scripts/nq-review` launches the independent
-Claude review in the task worktree, checks the head again afterward, saves
+Claude review in a noninteractive read-only session in the task worktree,
+checks the head again afterward, saves
 the output under `/tmp/opencode`, and posts the Gitea approval.
 The approver verifies the reviewed head again before a merge.
 

@@ -71,7 +71,8 @@ def main() -> int:
     )
     result = subprocess.run(
         [CLAUDE, "-p", prompt, "--model", "claude-sonnet-5", "--effort", "high",
-         "--permission-mode", "plan", "--allowedTools", "Read", "Grep", "Glob",
+         "--permission-mode", "dontAsk", "--disallowedTools", "Edit", "Write",
+         "NotebookEdit", "--allowedTools", "Read", "Grep", "Glob",
          "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)"],
         cwd=args.worktree, text=True, capture_output=True, timeout=1200,
     )
