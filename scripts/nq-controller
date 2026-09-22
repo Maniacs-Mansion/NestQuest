@@ -31,7 +31,10 @@ def check_ctxd() -> int:
     """Use OpenCode's configured endpoint, never an unrelated host DB."""
     config = json.loads((Path.home() / ".config/opencode/opencode.json").read_text())
     mcp = config["mcp"]["ctxd"]
-    endpoint = mcp["url"].removesuffix("/mcp")
+    configured_url = mcp["url"].rstrip("/")
+    if not configured_url.endswith("/mcp"):
+        raise RuntimeError("CTXD MCP URL must end in /mcp")
+    endpoint = configured_url.removesuffix("/mcp")
     url = f"{endpoint}/projects/{CTXD_PROJECT}/files/{CTXD_FILE}"
     with urllib.request.urlopen(
         urllib.request.Request(url, headers=mcp["headers"]), timeout=8
@@ -65,7 +68,7 @@ def interactive_nestquest_session(
                 args = [a.decode(errors="replace") for a in args if a]
                 if not args or Path(args[0]).name != "opencode":
                     continue
-                if len(args) > 1 and args[1] in ("run", "debug", "serve", "web"):
+                if len(args) > 1 and args[1] in ("run", "debug"):
                     continue
                 session = None
                 for flag in ("-s", "--session"):

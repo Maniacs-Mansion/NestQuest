@@ -113,10 +113,12 @@ def main() -> int:
         raise RuntimeError("a configured commit check has not passed")
     # Gitea rechecks branch protection at the merge endpoint. The caller must
     # independently verify Maestro and task-level evidence before invoking us.
-    request(f"/pulls/{args.pr}/merge", token, {"Do": "squash"})
+    # Gitea checks head_commit_id atomically while processing the merge.
+    request(f"/pulls/{args.pr}/merge", token,
+            {"do": "squash", "head_commit_id": args.reviewed_head})
     after = inspect(args.pr, token)
-    if after["merged"] is not True:
-        raise RuntimeError("merge request returned, but the PR is not merged")
+    if after["merged"] is not True or after["head"] != args.reviewed_head:
+        raise RuntimeError("merge result is missing or differs from the reviewed head")
     print(json.dumps(after, sort_keys=True))
     return 0
 

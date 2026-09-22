@@ -32,6 +32,18 @@ class ControllerProtocolTests(unittest.TestCase):
                 record["project_id"] = "wrong"
                 with self.assertRaisesRegex(RuntimeError, "wrong NestQuest prompt"):
                     CONTROL["check_ctxd"]()
+                record["project_id"] = CONTROL["CTXD_PROJECT"]
+                config.write_text(json.dumps({"mcp": {"ctxd": {
+                    "url": "http://localhost:9091/mcp/",
+                    "headers": {"Authorization": "Bearer test"},
+                }}}))
+                self.assertEqual(CONTROL["check_ctxd"](), 6)
+                config.write_text(json.dumps({"mcp": {"ctxd": {
+                    "url": "http://localhost:9091/invalid",
+                    "headers": {"Authorization": "Bearer test"},
+                }}}))
+                with self.assertRaisesRegex(RuntimeError, "must end in /mcp"):
+                    CONTROL["check_ctxd"]()
 
     def test_installed_opencode_text_event(self):
         event = {"type": "text", "sessionID": "ses_test", "part": {"type": "text", "text": "Next task queued.\nORCHESTRATOR_STATE: CONTINUE\n"}}
@@ -73,6 +85,14 @@ class ControllerProtocolTests(unittest.TestCase):
                 db.execute("INSERT INTO session VALUES (?, ?)", ("ses_test", str(project)))
             (entry / "cmdline").write_bytes(b"opencode\0--dir\0" + str(project).encode() + b"\0")
             self.assertTrue(CONTROL["interactive_nestquest_session"](project, proc, database))
+            (entry / "cmdline").write_bytes(b"opencode\0web\0--dir\0" + str(project).encode() + b"\0")
+            self.assertTrue(CONTROL["interactive_nestquest_session"](project, proc, database))
+            (entry / "cmdline").write_bytes(b"opencode\0serve\0")
+            (entry / "cwd").unlink()
+            (entry / "cwd").symlink_to(project)
+            self.assertTrue(CONTROL["interactive_nestquest_session"](project, proc, database))
+            (entry / "cwd").unlink()
+            (entry / "cwd").symlink_to(root)
             (entry / "cmdline").write_bytes(b"opencode\0-s\0ses_test\0")
             self.assertTrue(CONTROL["interactive_nestquest_session"](project, proc, database))
             (entry / "cmdline").write_bytes(b"opencode\0--dir\0" + str(root).encode() + b"\0")

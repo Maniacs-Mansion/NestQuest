@@ -52,6 +52,10 @@ class MergeGateTests(unittest.TestCase):
                             with self.assertRaises(RuntimeError):
                                 APPROVE["main"]()
                     self.assertEqual(merged, problem == "none")
+                    if problem == "none":
+                        merge_calls = [payload for path, payload in calls if path.endswith("/merge")]
+                        self.assertEqual(merge_calls,
+                                         [{"do": "squash", "head_commit_id": HEAD}])
 
     def test_review_evidence_must_match_exact_head_and_approval(self):
         root = Path("/tmp/opencode")

@@ -1,7 +1,7 @@
 # NestQuest controller
 
 OpenCode 1.18.31 loads the three named agents from `.opencode/agents/`. Their
-models match the current NestQuest CTXD prompt (version 6): DeepSeek V4.1
+models match the current NestQuest CTXD prompt: DeepSeek V4.1
 Flash for controller and approver, GLM 5.3 Flash for development. The
 controller runs one OpenCode turn at a time, then starts a fresh turn based on
 Maestro, CTXD, Git, and pull-request state. Its state file is
@@ -16,7 +16,8 @@ The approver's shell permission permits only the installed
 `nq-approve-merge` broker for Gitea. That broker requires exact-head
 Claude approval evidence, an exact-head Gitea approval by `review_agent`,
 the `dev` target, a mergeable PR, and passing configured checks before it
-requests a squash merge. `scripts/nq-review` launches the independent
+requests a squash merge with Gitea's atomic `head_commit_id` guard.
+`scripts/nq-review` launches the independent
 Claude review in a noninteractive read-only session in the task worktree,
 checks the head again afterward, saves
 the output under `/tmp/opencode`, and posts the Gitea approval.
