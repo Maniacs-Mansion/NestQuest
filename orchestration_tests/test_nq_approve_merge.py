@@ -1,5 +1,8 @@
 from pathlib import Path
+import contextlib
+import io
 import runpy
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -10,6 +13,46 @@ HEAD = "a" * 40
 
 
 class MergeGateTests(unittest.TestCase):
+    def test_main_rejects_moved_head_unmergeable_and_pending_checks(self):
+        root = Path("/tmp/opencode")
+        root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=root) as directory:
+            review_file = Path(directory) / "review.txt"
+            review_file.write_text(f"REVIEWED_HEAD: {HEAD}\nREVIEW_VERDICT: APPROVED\n")
+            for problem in ("moved", "unmergeable", "pending", "none"):
+                with self.subTest(problem=problem):
+                    merged = False
+                    calls = []
+                    def fake_request(path, token, payload=None):
+                        nonlocal merged
+                        calls.append((path, payload))
+                        if path.endswith("/reviews"):
+                            return [{"id": 1, "state": "APPROVED", "commit_id": HEAD,
+                                     "user": {"login": "review_agent"}}]
+                        if path.endswith("/status"):
+                            return {"total_count": 1, "state": "pending" if problem == "pending" else "success"}
+                        if path.endswith("/merge"):
+                            merged = True
+                            return {}
+                        if path.endswith("/pulls/149"):
+                            return {"number": 149, "base": {"ref": "dev"},
+                                    "head": {"sha": "b" * 40 if problem == "moved" else HEAD},
+                                    "state": "open", "merged": merged,
+                                    "mergeable": problem != "unmergeable"}
+                        raise AssertionError(path)
+                    globals_ = APPROVE["main"].__globals__
+                    with patch.dict(globals_, {"request": fake_request,
+                                               "token_from_file": lambda: "test"}), \
+                         patch.object(sys, "argv", ["nq-approve-merge", "merge", "149", HEAD,
+                                                    str(review_file)]), \
+                         contextlib.redirect_stdout(io.StringIO()):
+                        if problem == "none":
+                            self.assertEqual(APPROVE["main"](), 0)
+                        else:
+                            with self.assertRaises(RuntimeError):
+                                APPROVE["main"]()
+                    self.assertEqual(merged, problem == "none")
+
     def test_review_evidence_must_match_exact_head_and_approval(self):
         root = Path("/tmp/opencode")
         root.mkdir(exist_ok=True)

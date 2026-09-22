@@ -8,7 +8,7 @@ ExecStartPre=/home/overseer/.local/share/nestquest-controller/scripts/nq-control
 ExecStart=/home/overseer/.local/share/nestquest-controller/scripts/nq-controller
 Restart=on-failure
 RestartSec=60s
-RestartPreventExitStatus=75 77
+RestartPreventExitStatus=77
 TimeoutStartSec=0
 KillMode=control-group
 Environment=PYTHONUNBUFFERED=1

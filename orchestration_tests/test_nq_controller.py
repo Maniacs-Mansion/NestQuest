@@ -1,16 +1,38 @@
 import json
+import io
 from pathlib import Path
 import runpy
 import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 CONTROL = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts/nq-controller"))
 
 
 class ControllerProtocolTests(unittest.TestCase):
+    def test_ctxd_preflight_reads_configured_endpoint_and_checks_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / ".config/opencode/opencode.json"
+            config.parent.mkdir(parents=True)
+            config.write_text(json.dumps({"mcp": {"ctxd": {
+                "url": "http://localhost:9091/mcp",
+                "headers": {"Authorization": "Bearer test"},
+            }}}))
+            record = {"project_id": CONTROL["CTXD_PROJECT"],
+                      "file_path": CONTROL["CTXD_FILE"],
+                      "content": "# CONTROLLER_TICK", "version": 6}
+            with patch.object(Path, "home", return_value=root), \
+                 patch.dict(CONTROL["check_ctxd"].__globals__["urllib"].request.__dict__,
+                            {"urlopen": lambda request, timeout: io.BytesIO(json.dumps(record).encode())}):
+                self.assertEqual(CONTROL["check_ctxd"](), 6)
+                record["project_id"] = "wrong"
+                with self.assertRaisesRegex(RuntimeError, "wrong NestQuest prompt"):
+                    CONTROL["check_ctxd"]()
+
     def test_installed_opencode_text_event(self):
         event = {"type": "text", "sessionID": "ses_test", "part": {"type": "text", "text": "Next task queued.\nORCHESTRATOR_STATE: CONTINUE\n"}}
         self.assertEqual(CONTROL["parse_event"](json.dumps(event)), (event["part"]["text"], None))
