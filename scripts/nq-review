@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 4 ]]; then
+  echo "usage: nq-review WORKTREE BASE_REF HEAD_REF REVIEW_PROMPT_FILE" >&2
+  exit 64
+fi
+
+worktree=$1
+base_ref=$2
+head_ref=$3
+prompt_file=$4
+[[ -d "$worktree" && -f "$prompt_file" ]] || { echo "missing worktree or prompt" >&2; exit 66; }
+
+cd "$worktree"
+base_commit=$(git rev-parse --verify "$base_ref^{commit}")
+head_commit=$(git rev-parse --verify "$head_ref^{commit}")
+[[ "$(git rev-parse HEAD)" == "$head_commit" ]] || { echo "worktree HEAD differs from reviewed head" >&2; exit 65; }
+git merge-base --is-ancestor "$base_commit" "$head_commit" || { echo "base is not an ancestor of head" >&2; exit 65; }
+
+review_prompt=$(cat "$prompt_file")
+review_prompt+=$'\n\nReview only the delta from the specified base to this exact head. Base: '
+review_prompt+="$base_commit"
+review_prompt+=$'. Head: '
+review_prompt+="$head_commit"
+review_prompt+=$'. Verify the current HEAD before issuing a verdict. Read only; do not modify files. End with two plain lines, REVIEWED_HEAD: <full 40-character SHA> and REVIEW_VERDICT: APPROVED or REVIEW_VERDICT: CHANGES_REQUIRED.'
+
+claude_bin=${CLAUDE_BIN:-/home/overseer/.local/bin/claude}
+exec "$claude_bin" -p "$review_prompt" \
+  --model claude-sonnet-5 \
+  --effort high \
+  --permission-mode plan \
+  --allowedTools Read Grep Glob \
+    'Bash(git diff:*)' 'Bash(git log:*)' 'Bash(git show:*)' 'Bash(git status:*)'
