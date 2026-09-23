@@ -1,12 +1,11 @@
 ---
-description: Start the NestQuest development cycle on this host
-agent: cycle-control
+description: Run the NestQuest orchestrator now in this OpenCode terminal
+agent: terminal-orchestrator
 ---
 
-Run exactly this one shell command:
-
-`/home/overseer/.local/share/nestquest-controller/scripts/nq-cycle start`
-
-Report its status. If it says an interactive NestQuest OpenCode session is
-open, tell me to close this session; the background controller will begin
-afterward. Do not launch a developer agent or a controller tick in this chat.
+Run the NestQuest project queue now in this foreground OpenCode session.
+Read the current CTXD prompt and Maestro state, but use the FOREGROUND
+TERMINAL RUNTIME instead of the service runtime. Reconcile repository and
+pull-request state, then execute CONTROLLER_TICK repeatedly until a global
+terminal condition, explicit user stop, genuine global block, or host-forced
+yield. Do not start or wait for the systemd controller.

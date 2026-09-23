@@ -11,6 +11,7 @@ import sys
 
 
 TEMPLATE = Path(__file__).resolve().parent.parent / "templates/ORCHESTRATOR-PROMPT.template.md"
+RUNTIME_DIR = TEMPLATE.parent / "runtime"
 PLACEHOLDER = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
 
 
@@ -28,15 +29,27 @@ def render(template: str, profile: dict[str, str]) -> str:
     return result
 
 
+def select_runtime(template: str, runtime: str) -> str:
+    if runtime == "service":
+        return template
+    marker = "# 27. HOST CONTROLLER RUNTIME"
+    if template.count(marker) != 1:
+        raise ValueError("controller runtime section is missing or duplicated")
+    prefix = template.split(marker, 1)[0].rstrip()
+    overlay = (RUNTIME_DIR / f"{runtime}.md").read_text().strip()
+    return prefix + "\n\n" + overlay + "\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("profile", type=Path)
+    parser.add_argument("--runtime", choices=("service", "terminal"), default="service")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     profile = json.loads(args.profile.read_text())
     if not isinstance(profile, dict):
         parser.error("profile must be a JSON object")
-    content = render(TEMPLATE.read_text(), profile)
+    content = render(select_runtime(TEMPLATE.read_text(), args.runtime), profile)
     if args.output:
         args.output.write_text(content)
         print(args.output)
