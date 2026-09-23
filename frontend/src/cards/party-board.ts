@@ -143,6 +143,16 @@ function asNumber(value: unknown, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+/** The slug a discovered roster entry carries, or "" when the entry is
+ *  not an object with a non-empty slug string. */
+function asRosterSlug(entry: unknown): string {
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+    return "";
+  }
+  const slug = (entry as Record<string, unknown>).slug;
+  return typeof slug === "string" ? slug.trim() : "";
+}
+
 function clampPercent(value: number): number {
   if (!Number.isFinite(value)) {
     return 0;
@@ -892,15 +902,34 @@ export class NestQuestPartyBoardCard extends LitElement {
       return [];
     }
     const order = this._config.child_order;
-    if (!Array.isArray(order)) {
+    if (Array.isArray(order)) {
+      return order
+        .filter(
+          (entry): entry is string =>
+            typeof entry === "string" && entry.trim().length > 0
+        )
+        .map((entry) => entry.trim());
+    }
+    return this._discoveredChildSlugs();
+  }
+
+  /** Zero-config discovery (Feature 20): the ordered child roster the
+   *  integration publishes on the household rollup
+   *  (custom_components/nestquest/sensor.py — ``child_roster``, the
+   *  snapshot's sort_order, then id), each entry carrying the slug the
+   *  per-child entity ids are built from.  Consulted only when the
+   *  config has no child_order — explicit configuration wins. */
+  private _discoveredChildSlugs(): string[] {
+    const household = this._state(
+      "sensor.nestquest_household_quests_due_today"
+    );
+    const roster = household?.attributes?.child_roster;
+    if (!Array.isArray(roster)) {
       return [];
     }
-    return order
-      .filter(
-        (entry): entry is string =>
-          typeof entry === "string" && entry.trim().length > 0
-      )
-      .map((entry) => entry.trim());
+    return roster
+      .map((entry) => asRosterSlug(entry))
+      .filter((slug) => slug.length > 0);
   }
 
   private _plates(): ChildPlate[] {
