@@ -100,7 +100,17 @@ class _Server:
 
         def factory():
             app = create_app(
-                ApiConfig(db_path=db_path, panel_token=PANEL_TOKEN)
+                ApiConfig(
+                    db_path=db_path,
+                    panel_token=PANEL_TOKEN,
+                    oidc_issuer=(
+                        "https://authentik.example.com/application/o/nestquest/"
+                    ),
+                    oidc_audience="nestquest-api",
+                    oidc_jwks_url=(
+                        "https://authentik.example.com/application/o/nestquest/jwks/"
+                    ),
+                )
             )
             self._server_loop = asyncio.get_running_loop()
             self.app = app
