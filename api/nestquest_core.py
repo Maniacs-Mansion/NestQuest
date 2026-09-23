@@ -116,6 +116,11 @@ core_snapshot = importlib.import_module(f"{_CORE_MODULE_NAME}.snapshot")
 #: ``uncomplete_instance``) the panel's write routes call.
 core_completion = importlib.import_module(f"{_CORE_MODULE_NAME}.completion")
 
+#: The read-only history layer (``core.history.query_history``,
+#: ``export_history_csv``, ``rows_to_csv``) the admin plane's history
+#: query and CSV export routes call.
+core_history = importlib.import_module(f"{_CORE_MODULE_NAME}.history")
+
 #: The transition-event builders (``core.events.build_quest_completed_event``
 #: et al.) the panel's write routes build their SSE events with.
 core_events = importlib.import_module(f"{_CORE_MODULE_NAME}.events")
@@ -192,6 +197,7 @@ __all__ = [
     "core_dao_rules",
     "core_db",
     "core_events",
+    "core_history",
     "core_materialize",
     "core_migrations",
     "core_presence",

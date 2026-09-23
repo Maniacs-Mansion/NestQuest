@@ -92,6 +92,30 @@ pattern over :mod:`nestquest_core.completion` and
   instance.  The response carries the scope, the scoped id (if any)
   and the core's upsert ``count``.
 
+The history routes (task 2d2dda53) follow the same pattern over
+:mod:`nestquest_core.history` — the ONE read-only history layer, which
+owns every rule so the two routes cannot drift:
+
+- ``GET /history?filter=all|reversals|missed&start=YYYY-MM-DD&end=YYYY-MM-DD``
+  returns the history rows for ONE filter over the CLOSED due-date
+  range ``[start, end]``: ``all`` (every completion event — completed
+  AND uncompleted — whose instance is due in the range), ``reversals``
+  (the uncompleted events only) and ``missed`` (the DERIVED past-due
+  open instances, computed by the core's own derive-state rule —
+  ``missed`` is never a stored event_type and nothing is appended).
+  The range scopes by the instance's ``due_date`` (the Feature 13
+  rule: history asks what happened to the tasks due that day), not the
+  event's wall-clock stamp.  The filter and date-range policies live
+  in the core (strict ``YYYY-MM-DD``, ``end >= start``, a
+  ``ValueError`` naming the offending field); the handler is a thin
+  adapter that threads ONE clock read (:func:`_local_now`, the missed
+  derivation's ``today``) and serializes the core's rows.
+- ``GET /history.csv?...`` exports the SAME filtered range as CSV:
+  ONE :func:`nestquest_core.history.export_history_csv` call — the
+  same query path the JSON route uses — answered as ``text/csv`` with
+  a ``Content-Disposition`` attachment filename and the documented,
+  stable header row (Admin spec §5 event-row fields).
+
 Error mapping (every children, quest-definition and presence route,
 deliberately narrow):
 
@@ -141,6 +165,15 @@ deliberately narrow):
   stance.  Every core ``ValueError`` (a rejected horizon, a malformed
   date — unreachable from this body model, but mapped anyway) is 422;
   anything else re-raises.
+- The HISTORY routes have no path ids, so they have no 404 case: a
+  missing query parameter (the request's shape) is FastAPI's 422
+  before any handler code runs, and every core ``ValueError`` — an
+  unknown filter, a non-strict or inverted date range, each naming the
+  offending field (``filter`` / ``start`` / ``end``) — is 422
+  (:func:`_raise_history_error`): well-formed but semantically
+  invalid, the same failure class Pydantic reports.  Only
+  ``ValueError`` is caught, so an unexpected failure re-raises rather
+  than becoming a 4xx.
 
 PATCH edit semantics: the body model's fields are optional and only
 SUPPLIED fields are forwarded (``model_dump(exclude_unset=True)``), so
@@ -154,7 +187,7 @@ from __future__ import annotations
 import datetime
 from typing import Annotated, Literal, NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, field_validator, model_validator
 
 from api import transitions as api_transitions
@@ -166,6 +199,7 @@ from api.nestquest_core import (
     core_const,
     core_dao_children,
     core_dao_rules,
+    core_history,
     core_materialize,
     core_presence,
     core_presence_management,
@@ -526,6 +560,47 @@ class AdminRegenerateResponse(BaseModel):
     count: int
 
 
+class AdminHistoryRow(BaseModel):
+    """One history row as the admin plane serializes it.
+
+    Mirrors :class:`nestquest_core.history.HistoryRow` — the Admin spec
+    §5 event-row fields, the same set the CSV export's header carries.
+    A stored event carries its UTC ``occurred_at`` stamp and the
+    ``completed``/``uncompleted`` ``event_type``; a derived missed row
+    (``missed`` is NEVER a stored event_type) carries ``event_type``
+    ``'missed'``, ``occurred_at`` ``None`` (there is no event) and the
+    ``nightly sweep`` actor.
+    """
+
+    occurred_at: str | None
+    event_type: str
+    child_name: str
+    child_id: int
+    quest_title: str
+    instance_id: int
+    window: str
+    due_date: str
+    due_time: str | None
+    actor: str
+    was_on_time: bool | None
+
+
+class AdminHistoryResponse(BaseModel):
+    """The history query's answer.
+
+    ``filter``/``start``/``end`` echo the request, ``count`` is the row
+    count, and ``rows`` are the core's rows in its deterministic order
+    (``due_date``, then instance, then event id — the per-instance
+    append order, so a completion and its reversal keep their order).
+    """
+
+    filter: str
+    start: str
+    end: str
+    count: int
+    rows: list[AdminHistoryRow]
+
+
 #: 404 detail for a child id the core layer reports as non-existent.
 _CHILD_NOT_FOUND_DETAIL = "Child not found"
 
@@ -642,6 +717,21 @@ def _raise_regenerate_error(error: ValueError) -> NoReturn:
     malformed horizon or date the core refuses before any write — and
     is 422 with the core's message as the detail.  Nothing else is
     caught: an unexpected failure re-raises rather than becoming a 4xx.
+    """
+    raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+def _raise_history_error(error: ValueError) -> NoReturn:
+    """Map a core history ``ValueError`` onto 422 and raise it.
+
+    The history routes have no path ids, so they have no 404 case:
+    every ``ValueError`` that survives to here is a rejected argument —
+    an unknown filter, a non-strict date, or an inverted range, each
+    raised by the core naming the offending field (``filter`` /
+    ``start`` / ``end``) BEFORE any read — and is 422 with the core's
+    message as the detail.  Only ``ValueError`` is caught by the
+    handlers, so an unexpected failure re-raises rather than becoming a
+    4xx.
     """
     raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -1291,6 +1381,111 @@ async def admin_regenerate(
         _raise_regenerate_error(error)
     return AdminRegenerateResponse(
         scope="child", definition_id=None, child_id=child_id, count=count
+    )
+
+
+def _history_row_response(row: core_history.HistoryRow) -> AdminHistoryRow:
+    """Serialize one core HistoryRow into the documented payload."""
+    return AdminHistoryRow(
+        occurred_at=row.occurred_at,
+        event_type=row.event_type,
+        child_name=row.child_name,
+        child_id=row.child_id,
+        quest_title=row.quest_title,
+        instance_id=row.instance_id,
+        window=row.window,
+        due_date=row.due_date,
+        due_time=row.due_time,
+        actor=row.actor,
+        was_on_time=row.was_on_time,
+    )
+
+
+@router.get(
+    "/history",
+    summary="Query the completion history for one filter and range",
+    response_model=AdminHistoryResponse,
+)
+async def admin_history_query(
+    request: Request,
+    start: str,
+    end: str,
+    filter: str = "all",
+) -> AdminHistoryResponse:
+    """Return the history rows for one filter over the closed range.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: ``filter``
+    (default ``all``), ``start`` and ``end`` go straight to
+    :func:`nestquest_core.history.query_history` as STRINGS — the
+    filter policy (``all`` / ``reversals`` / ``missed``) and the
+    date-range policy (strict ``YYYY-MM-DD``, ``end >= start``) live in
+    the core, which raises a ``ValueError`` naming the offending field;
+    the handler only threads ONE clock read (:func:`_local_now`) as the
+    missed derivation's ``today`` and serializes the returned rows.
+    ``start``/``end`` are required query parameters (missing is
+    FastAPI's 422 before any handler code runs); every core
+    ``ValueError`` is 422 (:func:`_raise_history_error`).
+    """
+    state: DatabaseState = request.app.state.db
+    today = _local_now().date()
+    try:
+        rows = await core_history.query_history(
+            state.database, filter, start, end, today=today
+        )
+    except ValueError as error:
+        _raise_history_error(error)
+    return AdminHistoryResponse(
+        filter=filter,
+        start=start,
+        end=end,
+        count=len(rows),
+        rows=[_history_row_response(row) for row in rows],
+    )
+
+
+@router.get(
+    "/history.csv",
+    summary="Export the completion history as CSV",
+    response_class=Response,
+)
+async def admin_history_csv(
+    request: Request,
+    start: str,
+    end: str,
+    filter: str = "all",
+) -> Response:
+    """Export the SAME filtered history range as a CSV attachment.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter over ONE
+    :func:`nestquest_core.history.export_history_csv` call — the same
+    query path the JSON route uses, so the CSV can never drift from the
+    query's filtered range — with the core's validation policy and the
+    :mod:`csv`-based serialization (stable documented header row, RFC
+    4180 quoting) living in the core.  The answer is ``text/csv`` with
+    a ``Content-Disposition`` attachment filename naming the range;
+    the range is core-validated strict ``YYYY-MM-DD`` by the time the
+    filename is built, so it is injection-safe.  Error mapping is the
+    JSON route's (:func:`_raise_history_error`).
+    """
+    state: DatabaseState = request.app.state.db
+    today = _local_now().date()
+    try:
+        csv_text = await core_history.export_history_csv(
+            state.database, filter, start, end, today=today
+        )
+    except ValueError as error:
+        _raise_history_error(error)
+    filename = f"nestquest-history-{start}-to-{end}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
     )
 
 
