@@ -791,3 +791,31 @@ async def test_shim_day_complete_uses_ha_local_timezone(
         f"{far_today.isoformat()}, UTC today {utc_today.isoformat()}); "
         f"got {len(day_complete)} events"
     )
+
+
+async def test_build_quest_missed_event_payload_key_set(
+    hass, make_entry
+) -> None:
+    """The missed-event payload carries exactly the documented keys —
+    the same shape the nightly sweep hand-builds (§3), with no
+    ``was_on_time`` (completion-only)."""
+    from custom_components.nestquest.core.events import (
+        build_quest_missed_event,
+    )
+
+    entry, child, instances = await _setup_and_seed(hass, make_entry)
+    database = entry.runtime_data.database
+    event_type, payload = await build_quest_missed_event(
+        database, instances[0].id
+    )
+    assert event_type == EVENT_QUEST_MISSED
+    assert event_type == "nestquest_quest_missed"
+    assert set(payload) == _UNCOMPLETED_KEYS, (
+        f"missed payload keys drift: got {set(payload)} "
+        f"expected {_UNCOMPLETED_KEYS}"
+    )
+    assert payload["child_id"] == child.id
+    assert payload["child_name"] == "Ada"
+    assert payload["instance_id"] == instances[0].id
+    assert payload["quest_title"] == "Brush teeth"
+    assert _TIMESTAMP.match(payload["occurred_at"]), payload["occurred_at"]

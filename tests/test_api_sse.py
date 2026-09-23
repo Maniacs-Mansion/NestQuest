@@ -46,6 +46,9 @@ from tests.test_api_panel import PANEL_TOKEN, _seed_household
 #: The documented quest-completed event name (core const, §3).
 _core_const = importlib.import_module("nestquest_core.const")
 EVENT_QUEST_COMPLETED = _core_const.EVENT_QUEST_COMPLETED
+EVENT_QUEST_UNCOMPLETED = _core_const.EVENT_QUEST_UNCOMPLETED
+EVENT_QUEST_MISSED = _core_const.EVENT_QUEST_MISSED
+EVENT_CHILD_DAY_COMPLETE = _core_const.EVENT_CHILD_DAY_COMPLETE
 
 #: Upper bound for any single stream read; bounds the whole test so a
 #: wedged stream fails the assertion instead of hanging the suite.
@@ -70,12 +73,15 @@ class _Server:
 
     def __init__(self, db_path: str) -> None:
         self.port = _free_port()
+        self._server_loop: asyncio.AbstractEventLoop | None = None
         self._server = uvicorn.Server(
             uvicorn.Config(
-                # A closure factory: reads nothing at import time.
-                lambda: create_app(
-                    ApiConfig(db_path=db_path, panel_token=PANEL_TOKEN)
-                ),
+                # A closure factory that captures the app's event loop
+                # as it is created INSIDE the server thread: the
+                # lifespan's database and publisher belong to that
+                # thread's loop, so tests driving an API-side
+                # transition helper directly schedule it there.
+                self._make_app_factory(db_path),
                 host="127.0.0.1",
                 port=self.port,
                 log_level="warning",
@@ -84,6 +90,23 @@ class _Server:
         self._thread = threading.Thread(
             target=self._server.run, daemon=True
         )
+
+    def _make_app_factory(self, db_path: str):
+        """The uvicorn app factory, closing over ``db_path``.
+
+        Records the running loop the first time uvicorn calls it (in
+        the server thread) so :meth:`run_on_loop` can target it.
+        """
+
+        def factory():
+            app = create_app(
+                ApiConfig(db_path=db_path, panel_token=PANEL_TOKEN)
+            )
+            self._server_loop = asyncio.get_running_loop()
+            self.app = app
+            return app
+
+        return factory
 
     def __enter__(self) -> "_Server":
         self._thread.start()
@@ -101,6 +124,20 @@ class _Server:
     def url(self, path: str) -> str:
         """The full URL for ``path`` on this server."""
         return f"http://127.0.0.1:{self.port}{path}"
+
+    def run_on_loop(self, coro) -> None:
+        """Run ``coro`` on the SERVER's event loop and wait for it.
+
+        The app (its database and publisher) lives on the uvicorn
+        thread's loop, so a test that drives an API-side transition
+        helper directly must schedule it there: the helper awaits core
+        DAO calls and calls ``publisher.publish`` synchronously, and
+        both must run on the loop that owns them.  Bounded by
+        READ_TIMEOUT so a wedged schedule fails instead of hanging.
+        """
+        return asyncio.run_coroutine_threadsafe(
+            coro, self._server_loop
+        ).result(timeout=READ_TIMEOUT)
 
 
 class _EventStream:
@@ -284,6 +321,10 @@ async def test_no_op_recomplete_publishes_nothing(seeded_panel) -> None:
         assert first.status_code == 200
         event_type, _ = await stream.next_event()
         assert event_type == EVENT_QUEST_COMPLETED
+        # Ada's only quest today: the completion also clears her whole
+        # day, so the day-complete event follows (task 44c93cfd).
+        event_type, _ = await stream.next_event()
+        assert event_type == EVENT_CHILD_DAY_COMPLETE
 
         second = await seeded_panel.client.post(
             url, headers=headers, json=body
@@ -293,3 +334,123 @@ async def test_no_op_recomplete_publishes_nothing(seeded_panel) -> None:
             # Nothing arrives within the window: the no-op re-complete
             # must publish nothing.
             await asyncio.wait_for(stream.queue.get(), timeout=0.3)
+
+
+# --- the remaining documented transitions (task 44c93cfd) -----------------
+
+
+async def test_publish_quest_uncompleted_streams_event(seeded_panel) -> None:
+    """The reusable uncompleted publisher streams the documented
+    uncompleted transition with its documented payload fields.
+
+    The admin uncomplete route does not exist yet (deferred to task
+    da0226b3); the test drives the API-side helper the route will call.
+    The helper runs on the SERVER's event loop (``run_coroutine_threadsafe``
+    on the uvicorn thread's loop) against the app's own live database,
+    exactly the way the later route handler will call it.
+    """
+    from api import transitions
+
+    seed = seeded_panel.seed
+    pack_bag = seed.pack_bag_instance
+    app = seeded_panel.server.app
+    database = app.state.db.database
+    stream = _stream(seeded_panel.url("/api/v1/panel/events"))
+    async with stream:
+        seeded_panel.server.run_on_loop(
+            transitions.publish_quest_uncompleted(
+                database, pack_bag.id, app.state.publisher
+            )
+        )
+        event_type, payload = await stream.next_event()
+    assert event_type == EVENT_QUEST_UNCOMPLETED
+    assert event_type == "nestquest_quest_uncompleted"
+    assert payload["child_id"] == seed.ada.id
+    assert payload["child_name"] == "Ada"
+    assert payload["instance_id"] == pack_bag.id
+    assert payload["quest_title"] == "Pack bag"
+    assert payload["window"] == "morning"
+    assert payload["due_date"] == pack_bag.due_date
+    assert payload["due_time"] == "10:00"
+    assert payload["occurred_at"]
+    assert "was_on_time" not in payload
+
+
+async def test_last_quest_of_day_publishes_day_complete(seeded_panel) -> None:
+    """Completing the child's LAST open quest of the day emits the
+    completed event AND the child-day-complete event carrying
+    ``quests_due`` and ``quests_completed``.
+
+    Ada has exactly one instance today (Pack bag), so completing it
+    clears her whole day; a no-op re-complete afterwards publishes
+    nothing.
+    """
+    seed = seeded_panel.seed
+    pack_bag = seed.pack_bag_instance
+    stream = _stream(seeded_panel.url("/api/v1/panel/events"))
+    async with stream:
+        response = await seeded_panel.client.post(
+            f"/api/v1/panel/instances/{pack_bag.id}/complete",
+            headers={"Authorization": f"Bearer {PANEL_TOKEN}"},
+            json={"actor_child_id": seed.ada.id},
+        )
+        assert response.status_code == 200
+
+        event_type, payload = await stream.next_event()
+        assert event_type == EVENT_QUEST_COMPLETED
+        completed_occurred_at = payload["occurred_at"]
+        event_type, payload = await stream.next_event()
+        assert event_type == EVENT_CHILD_DAY_COMPLETE
+        assert event_type == "nestquest_child_day_complete"
+        assert payload["child_id"] == seed.ada.id
+        assert payload["child_name"] == "Ada"
+        assert payload["quests_due"] == 1
+        assert payload["quests_completed"] == 1
+        # One transition, one shared timestamp (the core builder
+        # reuses the completed event's stamp).
+        assert payload["occurred_at"] == completed_occurred_at
+
+        # No-op re-complete: nothing further on the stream.
+        second = await seeded_panel.client.post(
+            f"/api/v1/panel/instances/{pack_bag.id}/complete",
+            headers={"Authorization": f"Bearer {PANEL_TOKEN}"},
+            json={"actor_child_id": seed.ada.id},
+        )
+        assert second.status_code == 200
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(stream.queue.get(), timeout=0.3)
+
+
+async def test_publish_quest_missed_streams_event(seeded_panel) -> None:
+    """The reusable missed publisher streams the documented missed
+    transition with its documented payload fields (the sweep payload).
+
+    The API-side missed sweep does not exist yet at this queue
+    position; the test drives the API-side helper the sweep will call
+    against the seeded past-due open instance, on the server's own
+    event loop and database.
+    """
+    from api import transitions
+
+    seed = seeded_panel.seed
+    stale = seed.stale_instance
+    app = seeded_panel.server.app
+    database = app.state.db.database
+    stream = _stream(seeded_panel.url("/api/v1/panel/events"))
+    async with stream:
+        seeded_panel.server.run_on_loop(
+            transitions.publish_quest_missed(
+                database, stale.id, app.state.publisher
+            )
+        )
+        event_type, payload = await stream.next_event()
+    assert event_type == EVENT_QUEST_MISSED
+    assert event_type == "nestquest_quest_missed"
+    assert payload["child_id"] == seed.ada.id
+    assert payload["child_name"] == "Ada"
+    assert payload["instance_id"] == stale.id
+    assert payload["quest_title"] == "Stale chore"
+    assert payload["window"] == "morning"
+    assert payload["due_date"] == stale.due_date
+    assert payload["due_time"] == "09:00"
+    assert payload["occurred_at"]
