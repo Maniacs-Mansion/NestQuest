@@ -145,9 +145,12 @@ integration's rollover listener shares:
 
 - ``POST /missed-sweep`` runs the sweep for the API host's local
   ``today`` (ONE :func:`_local_now` clock read threaded into the core
-  call) and publishes each returned ``nestquest_quest_missed`` event
-  on the SSE stream through
-  :func:`api.transitions.publish_quest_missed`.  The watermark rule
+  call) and publishes each returned ``(event_type, payload)`` pair
+  DIRECTLY on the app's ONE transition publisher — the sweep-built
+  payload, never re-fetched (the core commits its watermark before
+  returning, so a failed re-fetch after it would lose the missed event
+  forever), the same publish-what-the-core-built shape
+  api/scheduler.py uses.  The watermark rule
   (a same-day rerun announces nothing, a post-downtime run sweeps the
   accumulated window once), the no-completion-event rule and the
   read-only-over-the-domain-tables guarantee all live in the core; the
@@ -1697,13 +1700,22 @@ async def admin_run_missed_sweep(
     once).  The route is read-only over the domain tables: it never
     mutates an instance and never writes a completion event.
 
-    Each returned event is published on the SSE stream through
-    :func:`api.transitions.publish_quest_missed` (the payload built by
-    the core builder, never hand-built here; fan-out is
-    fire-and-forget, see api/events.py).  The response reports
-    ``fired`` — the number of transitions published.  Error mapping
-    (:func:`_raise_sweep_error`): every core ``ValueError`` is 422;
-    anything else re-raises.
+    Each returned ``(event_type, payload)`` pair is published DIRECTLY
+    on the app's ONE transition publisher (``request.app.state.publisher``,
+    fan-out fire-and-forget, see api/events.py) — the exact payload the
+    sweep built, never re-fetched and never hand-built here, the same
+    publish-what-the-core-built shape api/scheduler.py uses.  This is a
+    correctness rule, not a style preference: the core commits the
+    idempotency watermark BEFORE returning, so a re-fetch-based publish
+    loop opens a loss window — a concurrent regenerate deleting the
+    instance, or a transient database error, would raise uncaught (a
+    bare 500) AFTER the watermark advanced, and no future sweep would
+    ever re-examine that instance.  Publishing the built payload leaves
+    no such window, and every event of one run keeps the ONE shared
+    ``occurred_at`` stamp the sweep computed for it.  The response
+    reports ``fired`` — the number of transitions published.  Error
+    mapping (:func:`_raise_sweep_error`): every core ``ValueError`` is
+    422; anything else re-raises.
     """
     state: DatabaseState = request.app.state.db
     database = state.database
@@ -1712,12 +1724,8 @@ async def admin_run_missed_sweep(
         events = await core_sweep.run_missed_sweep(database, today=today)
     except ValueError as error:
         _raise_sweep_error(error)
-    for _event_type, payload in events:
-        await api_transitions.publish_quest_missed(
-            database,
-            int(payload["instance_id"]),
-            request.app.state.publisher,
-        )
+    for event_type, payload in events:
+        request.app.state.publisher.publish(event_type, payload)
     return AdminMissedSweepResponse(fired=len(events))
 
 

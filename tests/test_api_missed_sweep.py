@@ -19,6 +19,14 @@ stream needs a live server), plus the API service's daily scheduler:
 - A run after downtime (``today`` advanced two days) publishes the
   accumulated window once — the instance due on day one fires on the
   catch-up run — and a further rerun is silent again.
+- Publishing is the api/scheduler.py shape — the sweep-BUILT
+  ``(event_type, payload)`` pairs go straight to the publisher, no
+  per-event re-fetch: all events of one run share the run's ONE
+  ``occurred_at`` stamp, and a deterministic concurrent-deletion case
+  (the sweep is wrapped to delete one swept instance after it built
+  its events and committed its watermark) still answers 200 and
+  streams every built event — a re-fetch there would 500 and lose the
+  missed event forever.
 - The daily scheduler (:class:`api.scheduler.MissedSweepScheduler`)
   computes the delay to the configured ``day_rollover_time``, runs the
   sweep when the (injectable) clock reaches it, publishes the built
@@ -79,6 +87,7 @@ _recurrence = importlib.import_module("nestquest_core.recurrence")
 _dao_instances = importlib.import_module("nestquest_core.dao_instances")
 _dao_meta = importlib.import_module("nestquest_core.dao_meta")
 _settings_store = importlib.import_module("nestquest_core.settings_store")
+_core_sweep = importlib.import_module("nestquest_core.sweep")
 
 #: The well-known ``nestquest_meta_state`` key holding the sweep
 #: watermark — asserted literally so the contract is pinned here.
@@ -337,6 +346,7 @@ async def test_trigger_publishes_one_missed_event_per_instance(
         assert payload["due_date"] == seed.yesterday_iso
         assert payload["due_time"] == "09:00"
         assert payload["occurred_at"]  # strict UTC ISO-8601 stamp
+        run_stamp = payload["occurred_at"]
 
         event_type, payload = await stream.next_event()
         assert event_type == EVENT_QUEST_MISSED
@@ -347,7 +357,10 @@ async def test_trigger_publishes_one_missed_event_per_instance(
         assert payload["window"] == "evening"
         assert payload["due_date"] == seed.yesterday_iso
         assert payload["due_time"] == "18:30"
-        assert payload["occurred_at"]
+        # One run, ONE stamp: the route publishes the sweep-built
+        # payloads directly, so every event of this run carries the
+        # same ``occurred_at`` the sweep computed for the whole run.
+        assert payload["occurred_at"] == run_stamp
 
         # Exactly one transition per instance: today's not-past-due
         # quest never arrives.
@@ -356,6 +369,80 @@ async def test_trigger_publishes_one_missed_event_per_instance(
 
     # The run recorded the watermark: the household-local date the
     # sweep ran for, under the well-known meta_state key.
+    assert _watermark(ns.server) == seed.today_iso
+
+
+async def test_trigger_publishes_sweep_built_payloads_without_refetch(
+    missed_app,
+) -> None:
+    """Publishing never re-fetches: a concurrently deleted instance
+    cannot fail the trigger or lose its already-built missed event.
+
+    The core sweep commits the idempotency watermark BEFORE returning,
+    so a publish loop that re-fetches each instance opens a loss
+    window: an instance deleted inside that window (e.g. a concurrent
+    regenerate) would raise ``ValueError`` uncaught — a bare 500 — and
+    the missed event would be gone forever (the watermark already
+    advanced, so no future sweep re-examines it).  The route publishes
+    the sweep-built ``(event_type, payload)`` pairs DIRECTLY (the
+    api/scheduler.py shape), which this test exercises deterministically:
+    the sweep is wrapped to delete one swept instance AFTER the sweep
+    built its events and committed its watermark but BEFORE the route
+    publishes, and the trigger must still answer 200 with ``fired: 2``
+    and stream BOTH sweep-built payloads — the deleted instance's
+    included, stamped with the run's ONE shared ``occurred_at``.
+    """
+    ns = missed_app
+    seed = ns.seed
+    database = ns.server.app.state.db.database
+    original_sweep = _core_sweep.run_missed_sweep
+
+    async def sweep_then_delete_stale(sweep_database, *, today):
+        events = await original_sweep(sweep_database, today=today)
+        # The concurrent deletion lands after the sweep built its
+        # events and committed its watermark, but before the route
+        # publishes: the row is gone while the built event survives.
+        await sweep_database.execute(
+            "DELETE FROM quest_instances WHERE id = ?",
+            (seed.stale_instance.id,),
+        )
+        return events
+
+    _core_sweep.run_missed_sweep = sweep_then_delete_stale
+    try:
+        stream = _stream(ns.server.url("/api/v1/panel/events"))
+        async with stream:
+            response = await ns.client.post(
+                "/api/v1/admin/missed-sweep", headers=_admin_headers()
+            )
+            assert response.status_code == 200
+            assert response.json() == {"fired": 2}
+
+            # The FIRST event is the deleted instance's — published
+            # from the payload built before the deletion, never
+            # re-fetched after it (a re-fetch would 500 here).
+            event_type, payload = await stream.next_event()
+            assert event_type == EVENT_QUEST_MISSED
+            assert payload["instance_id"] == seed.stale_instance.id
+            assert payload["child_name"] == "Ada"
+            assert payload["quest_title"] == "Stale chore"
+            assert payload["window"] == "morning"
+            assert payload["due_date"] == seed.yesterday_iso
+            assert payload["occurred_at"]
+            run_stamp = payload["occurred_at"]
+
+            event_type, payload = await stream.next_event()
+            assert event_type == EVENT_QUEST_MISSED
+            assert payload["instance_id"] == seed.old_instance.id
+            assert payload["occurred_at"] == run_stamp
+
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(stream.queue.get(), timeout=0.3)
+    finally:
+        _core_sweep.run_missed_sweep = original_sweep
+
+    # The watermark advanced even though one instance was deleted
+    # mid-flight — nothing was lost to the publish-time failure window.
     assert _watermark(ns.server) == seed.today_iso
 
 
