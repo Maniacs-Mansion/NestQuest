@@ -180,9 +180,12 @@ async def test_entity_and_event_matrix(hass, make_entry) -> None:
     assert _sensor(hass, ada.id, "all_done").is_on is False
     assert _sensor(hass, ada.id, "quests_remaining_today").native_value == 1
 
-    # --- The instances payload omits missed instances while
-    # admin_instances includes them (D-009): pin the derive clock
-    # forward in the TEST ONLY so today's open instances read missed.
+    # --- The instances payload omits missed instances (D-009) — and
+    # since Feature 18 the snapshot comes from the API panel route,
+    # which omits missed rows ENTIRELY, so admin_instances cannot
+    # carry them either (the admin surface for missed quests is the
+    # PWA, reading the API directly): pin the derive clock forward in
+    # the TEST ONLY so today's open instances read missed.
     original_refresh = coordinator._async_update_data
 
     async def _future_dated_refresh():
@@ -203,9 +206,9 @@ async def test_entity_and_event_matrix(hass, make_entry) -> None:
     await coordinator.async_refresh()
     attributes = _sensor(hass, bo.id, "quests_due_today").extra_state_attributes
     assert attributes["instances"] == [], "panel payload omits missed"
-    assert len(attributes["admin_instances"]) == 2
-    assert all(
-        entry["state"] == "missed" for entry in attributes["admin_instances"]
+    assert attributes["admin_instances"] == [], (
+        "the API payload omits missed rows, so the admin payload "
+        "carries none either (the PWA is the admin surface now)"
     )
     coordinator._async_update_data = original_refresh
     await coordinator.async_refresh()

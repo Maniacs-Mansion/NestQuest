@@ -123,9 +123,11 @@ async def test_build_snapshot_explicit_values(hass, make_entry, monkeypatch) -> 
     database = entry.runtime_data.database
     settings = entry.runtime_data.settings
 
-    # Single clock read for the seed/snapshot anchor (no midnight skew).
-    today = coordinator._local_now().date()
+    # Single clock read for the seed/snapshot anchor (no midnight skew);
+    # the coordinator no longer owns a clock read (the API serves the
+    # snapshot), so the test resolves the HA-local zone directly.
     time_zone = ZoneInfo(hass.config.time_zone)
+    today = datetime.datetime.now(time_zone).date()
     # Pin the build instant at 12:00 local: past Ada's 10:00 due time
     # (overdue) and before Bo's 17:00, and the completion moment for Bo.
     pinned_now = datetime.datetime(
@@ -294,13 +296,38 @@ async def test_build_snapshot_explicit_values(hass, make_entry, monkeypatch) -> 
         == "missed"
     )
 
-    # REQUIRED wrapper tie-in: the coordinator's _async_update_data is a
-    # thin WRAPPER over build_snapshot, so pinning its clock to the SAME
-    # pinned_now the builder was called with must reproduce the builder's
-    # snapshot byte-for-byte.  The dataclasses are frozen, so == is a full
-    # deep compare — a wrapper that mis-passed today vs now, or stopped
-    # calling the builder, would diverge here even though the literal
-    # assertions above still pass.
-    monkeypatch.setattr(coordinator, "_local_now", lambda: pinned_now)
+    # REQUIRED wrapper tie-in: since Feature 18 the coordinator's
+    # refresh polls the snapshot through its API client, so pinning the
+    # client to serve the payload of the SAME snapshot built with
+    # pinned_now must reproduce the builder's snapshot byte-for-byte.
+    # The dataclasses are frozen, so == is a full deep compare — a
+    # reconstruction that dropped or reshaped a field would diverge
+    # here even though the literal assertions above still pass.
+    from conftest import set_coordinator_client
+
+    class _PinnedPayloadClient:
+        async def get_snapshot(self):
+            return {
+                "today_iso": built.today_iso,
+                "cycle_day": built.cycle_day,
+                "children": [
+                    {
+                        "child_id": child.child_id,
+                        "child_name": child.child_name,
+                        "present": child.present,
+                        "next_present": child.next_present,
+                        "due_today": child.due_today,
+                        "completed_today": child.completed_today,
+                        "remaining_today": child.remaining_today,
+                        "completion_pct": child.completion_pct,
+                        "instances": instance_payload(
+                            child.instances, include_missed=False
+                        ),
+                    }
+                    for child in built.children
+                ],
+            }
+
+    set_coordinator_client(entry, _PinnedPayloadClient())
     await coordinator.async_refresh()
     assert coordinator.data == built

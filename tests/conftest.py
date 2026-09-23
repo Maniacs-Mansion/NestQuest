@@ -52,6 +52,7 @@ _HA_MODULES = (
     "homeassistant.helpers.entity",
     "homeassistant.helpers.event",
     "homeassistant.helpers.update_coordinator",
+    "homeassistant.helpers.aiohttp_client",
     "homeassistant.components",
     "homeassistant.components.sensor",
     "homeassistant.components.binary_sensor",
@@ -99,6 +100,7 @@ for _parent, _child in (
     ("homeassistant.helpers", "entity"),
     ("homeassistant.helpers", "event"),
     ("homeassistant.helpers", "update_coordinator"),
+    ("homeassistant.helpers", "aiohttp_client"),
     ("homeassistant", "components"),
     ("homeassistant.components", "sensor"),
     ("homeassistant.components", "binary_sensor"),
@@ -698,6 +700,125 @@ def wire_entry_to_registry(entry, registry: ListenerRegistry):
     """Attach an update-listener registration function to the entry."""
     entry.add_update_listener = lambda listener: registry.add(entry.entry_id, listener)
     return entry
+
+
+class LazyLocalSnapshotClient:
+    """A test client that serves the snapshot built LOCALLY.
+
+    Feature 18 moved the coordinator's refresh onto the API service's
+    panel snapshot, but most integration tests still seed the local
+    database directly (the DB removal is a later task).  This stub
+    bridges the two: ``get_snapshot`` resolves the entry's runtime
+    record (its database and settings) and runs the SAME pure core
+    builder the API route runs
+    (:func:`~custom_components.nestquest.core.snapshot.build_snapshot`),
+    shaping the payload exactly like ``api/routes_panel.py`` —
+    instances via ``instance_payload(include_missed=False)`` — so the
+    coordinator reconstructs from a byte-identical payload without any
+    network or FastAPI machinery.
+
+    The resolution is LAZY on purpose: the coordinator's factory runs
+    mid-setup, before the runtime record exists, so the first refresh
+    (and any refresh while the entry is torn down) serves an EMPTY but
+    valid snapshot; every later refresh reads the seeded database.
+    """
+
+    def __init__(self, hass, entry_id: str) -> None:
+        self._hass = hass
+        self._entry_id = entry_id
+        self.calls = 0
+
+    async def get_snapshot(self):
+        import datetime
+        import zoneinfo
+
+        from custom_components.nestquest.const import DOMAIN as NQ_DOMAIN
+        from custom_components.nestquest.core import snapshot as core_snapshot
+
+        self.calls += 1
+        runtime = self._hass.data.get(NQ_DOMAIN, {}).get(self._entry_id)
+        database = getattr(runtime, "database", None)
+        if database is None or not getattr(database, "connected", True):
+            return {
+                "today_iso": datetime.date.today().isoformat(),
+                "cycle_day": 0,
+                "children": [],
+            }
+        settings = getattr(runtime, "settings", None)
+        # The HA-LOCAL now, the same single clock read the production
+        # coordinator used to hand the builder: the hass stub's
+        # configured time zone, never the host clock.
+        now = datetime.datetime.now(
+            zoneinfo.ZoneInfo(self._hass.config.time_zone)
+        )
+        snapshot = await core_snapshot.build_snapshot(database, settings, now)
+        return {
+            "today_iso": snapshot.today_iso,
+            "cycle_day": snapshot.cycle_day,
+            "children": [
+                {
+                    "child_id": child.child_id,
+                    "child_name": child.child_name,
+                    "present": child.present,
+                    "next_present": child.next_present,
+                    "due_today": child.due_today,
+                    "completed_today": child.completed_today,
+                    "remaining_today": child.remaining_today,
+                    "completion_pct": child.completion_pct,
+                    "instances": core_snapshot.instance_payload(
+                        child.instances, include_missed=False
+                    ),
+                }
+                for child in snapshot.children
+            ],
+        }
+
+
+@pytest.fixture(autouse=True)
+def coordinator_serves_local_snapshot():
+    """Default every test entry's coordinator to the local-snapshot client.
+
+    The integration's setup builds its API client through
+    ``coordinator_client_from_entry``; the fixture swaps that factory
+    for a test one handing out :class:`LazyLocalSnapshotClient` (so
+    DB-seeded tests exercise the coordinator's API path against local
+    data).  Tests that script their own client register it with
+    :func:`set_coordinator_client`, which the factory honours first.
+    """
+    import custom_components.nestquest as nq_mod
+    import custom_components.nestquest.coordinator as coordinator_module
+    from custom_components.nestquest.coordinator import (
+        coordinator_client_from_entry as production_factory,
+    )
+
+    _COORDINATOR_CLIENT_OVERRIDES = (
+        coordinator_module._COORDINATOR_CLIENT_OVERRIDES
+    )
+
+    def _factory(hass, entry, **kwargs):
+        override = _COORDINATOR_CLIENT_OVERRIDES.get(entry.entry_id)
+        if override is not None:
+            return override
+        return LazyLocalSnapshotClient(hass, entry.entry_id)
+
+    import unittest.mock as mock
+
+    _COORDINATOR_CLIENT_OVERRIDES.clear()
+    patcher = mock.patch.object(
+        nq_mod, "coordinator_client_from_entry", _factory
+    )
+    patcher.start()
+    yield
+    patcher.stop()
+    _COORDINATOR_CLIENT_OVERRIDES.clear()
+
+
+def set_coordinator_client(entry, client):
+    """Register a scripted client for ``entry``'s coordinator factory."""
+    import custom_components.nestquest.coordinator as coordinator_module
+
+    coordinator_module._COORDINATOR_CLIENT_OVERRIDES[entry.entry_id] = client
+    return client
 
 
 class _HassNamespace(SimpleNamespace):

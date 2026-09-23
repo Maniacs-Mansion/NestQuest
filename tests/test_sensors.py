@@ -221,19 +221,23 @@ async def test_due_today_attributes_carry_the_panel_payload(
     assert bo_instance["on_time"] is None
 
 
-async def test_due_today_payload_omits_missed_for_panel_includes_for_admin(
+async def test_due_today_payload_omits_missed_admin_equals_panel(
     hass, make_entry, monkeypatch
 ) -> None:
-    """D-009: the panel payload omits missed instances, the admin one keeps them.
+    """D-009: the panel payload omits missed instances.
 
-    A missed instance is derived (``due_date`` before the snapshot's
-    "today"), never stored.  The coordinator's day listing is keyed on
-    ``_local_now``'s date, so pinning the clock forward would move the
-    listing window off today's rows entirely; the pinned FUTURE clock
-    is therefore applied at the ``derive_state`` boundary instead —
-    today's open instances then read as missed through the same
-    derivation rule, without back-dating instance rows past the DAO's
-    no-past guard or touching append-only completion events.
+    Since Feature 18 the snapshot comes from the API panel route,
+    which omits missed rows entirely (the admin surface for missed
+    quests is the PWA, reading the API directly).  The entity payload
+    therefore cannot carry missed rows any more: ``admin_instances``
+    equals ``instances`` — open and completed rows only.  A missed
+    instance is still derived locally (``due_date`` before the
+    snapshot's "today"); the pinned-FUTURE clock at the
+    ``derive_state`` boundary makes today's open instances read
+    missed through the same derivation rule, and this test pins the
+    change: neither payload carries them, and the count rollups
+    (precomputed server-side from the full day) are unaffected here
+    because the API counts arrive per the route's own build.
     """
     entry, coordinator, (ada, bo, cory) = await _setup_seeded_entry(
         hass, make_entry
@@ -256,12 +260,10 @@ async def test_due_today_payload_omits_missed_for_panel_includes_for_admin(
     assert attributes["instances"] == [], (
         "missed instances are omitted from the panel payload"
     )
-    [missed] = attributes["admin_instances"]
-    assert missed["state"] == "missed"
-    assert missed["completed_at"] is None
-    # Counts still roll the missed instance up as not-completed.
-    assert _sensor(hass, bo.id, "quests_completed_today").native_value == 0
-    assert _sensor(hass, bo.id, "quests_remaining_today").native_value == 1
+    assert attributes["admin_instances"] == [], (
+        "the API payload omits missed rows, so the admin payload "
+        "carries none either (the PWA is the admin surface now)"
+    )
 
 
 @pytest.mark.parametrize("kind", SENSOR_KINDS)

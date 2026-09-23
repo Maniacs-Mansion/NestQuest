@@ -16,6 +16,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.event import async_track_time_change
 
+from .api_client import NestQuestApiError
 from .const import (
     CONF_ADMIN_USER_IDS,
     CONF_UPDATE_INTERVAL,
@@ -26,7 +27,7 @@ from .const import (
 )
 from .core.settings import NestQuestSettings
 from .frontend import async_register_frontend
-from .coordinator import NestQuestCoordinator
+from .coordinator import NestQuestCoordinator, coordinator_client_from_entry
 from .db import NestQuestDatabase, make_database
 from .materialize import materialize as _materialize_run
 from .migrations import apply_migrations
@@ -490,18 +491,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _register_services(hass)
         # The shared Feature 10 coordinator: one refresh cycle every
         # entity reads from (CONF_UPDATE_INTERVAL seconds, default
-        # five minutes).  Created AFTER services so a failure below
-        # unwinds them through the except path's listener handling.
+        # five minutes).  Since Feature 18 it polls the API service's
+        # panel snapshot instead of reading the local database; an
+        # entry with no panel token yet gets the typed-error stub
+        # (unavailable entities, never a setup crash).  Created AFTER
+        # services so a failure below unwinds them through the except
+        # path's listener handling.
         coordinator = NestQuestCoordinator(
             hass,
             entry_id=entry.entry_id,
-            database=database,
-            settings=settings,
+            api_client=coordinator_client_from_entry(hass, entry),
             update_interval_seconds=entry.options.get(
                 CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
             ),
         )
-        await coordinator.async_config_entry_first_refresh()
         runtime_data = NestQuestRuntimeData(
             entry_id=entry.entry_id,
             settings=settings,
@@ -510,11 +513,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             remove_time_change_listener=remove_time_change_listener,
             coordinator=coordinator,
         )
-        # runtime_data is assigned BEFORE the platforms forward so each
-        # platform's async_setup_entry reads its coordinator off the
-        # entry (the HA runtime-data contract); a forward failure below
+        # The runtime record is registered BEFORE the first refresh:
+        # the refresh path (and anything it calls) resolves the entry's
+        # runtime state through hass.data, and it must find the live
+        # database there — never a half-set-up entry.  The platforms
+        # forward below reads the coordinator off the entry
+        # (the HA runtime-data contract); a forward failure below
         # unwinds it through the except path.
+        hass.data[DOMAIN][entry.entry_id] = runtime_data
         entry.runtime_data = runtime_data
+        # The first refresh polls the API snapshot; an API failure
+        # (unconfigured token, API service down) does NOT crash setup:
+        # the coordinator reports last_update_success=False, entities
+        # come up unavailable, and HA's standard retry cycle applies
+        # once the API is reachable.  Any non-API error still raises.
+        try:
+            await coordinator.async_config_entry_first_refresh()
+        except NestQuestApiError:
+            pass
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except BaseException:
         # A failure anywhere after the database is open must not leak the
@@ -552,6 +568,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise
     assert remove_update_listener is not None
     assert remove_time_change_listener is not None
+    # The runtime record was already registered before the first
+    # refresh; re-assert the (unchanged) record so the return path
+    # stays readable as one registration site.
     hass.data[DOMAIN][entry.entry_id] = runtime_data
     return True
 
