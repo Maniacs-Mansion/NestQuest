@@ -116,6 +116,10 @@ core_snapshot = importlib.import_module(f"{_CORE_MODULE_NAME}.snapshot")
 #: ``uncomplete_instance``) the panel's write routes call.
 core_completion = importlib.import_module(f"{_CORE_MODULE_NAME}.completion")
 
+#: The transition-event builders (``core.events.build_quest_completed_event``
+#: et al.) the panel's write routes build their SSE events with.
+core_events = importlib.import_module(f"{_CORE_MODULE_NAME}.events")
+
 #: The explicit settings object (``core.settings.NestQuestSettings``)
 #: the snapshot builder's ``settings`` parameter takes.
 core_settings = importlib.import_module(f"{_CORE_MODULE_NAME}.settings")
@@ -124,6 +128,7 @@ __all__ = [
     "core",
     "core_completion",
     "core_db",
+    "core_events",
     "core_migrations",
     "core_snapshot",
     "core_settings",
