@@ -31,6 +31,7 @@ from .db import NestQuestDatabase, make_database
 from .materialize import materialize as _materialize_run
 from .migrations import apply_migrations
 from .services import async_deregister_services, async_register_services
+from .sse import NestQuestEventStream
 from .store import async_get_db_path
 from .admin_allowlist import seed_setup_admin
 from .sweep import run_missed_sweep
@@ -242,6 +243,7 @@ class NestQuestRuntimeData:
     remove_update_listener: Callable[[], Any]
     remove_time_change_listener: Callable[[], Any]
     coordinator: Any = None
+    event_stream: NestQuestEventStream | None = None
 
 
 async def _async_owner_user_ids(hass: HomeAssistant) -> list[str]:
@@ -439,6 +441,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     remove_update_listener: Callable[[], Any] | None = None
     remove_time_change_listener: Callable[[], Any] | None = None
     coordinator: Any = None
+    event_stream: NestQuestEventStream | None = None
     try:
         # Seed the admin allowlist on first setup so the owner is never
         # locked out: an empty database takes the persisted admin copy
@@ -496,14 +499,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # (unavailable entities, never a setup crash).  Created AFTER
         # services so a failure below unwinds them through the except
         # path's listener handling.
+        # ONE API client for the entry, shared by the coordinator's
+        # snapshot polling and the SSE subscription below (the client
+        # is stateless — one session, one connection pool).
+        api_client = coordinator_client_from_entry(hass, entry)
+        # The shared Feature 10 coordinator: one refresh cycle every
+        # entity reads from (CONF_UPDATE_INTERVAL seconds, default
+        # five minutes).  Since Feature 18 it polls the API service's
+        # panel snapshot instead of reading the local database; an
+        # entry with no panel token yet gets the typed-error stub
+        # (unavailable entities, never a setup crash).  Created AFTER
+        # services so a failure below unwinds them through the except
+        # path's listener handling.
         coordinator = NestQuestCoordinator(
             hass,
             entry_id=entry.entry_id,
-            api_client=coordinator_client_from_entry(hass, entry),
+            api_client=api_client,
             update_interval_seconds=entry.options.get(
                 CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
             ),
         )
+        # The panel event subscription (the SSE task): a background
+        # task consumes the API service's transition-event stream and
+        # re-fires the four documented HA bus events.  It reuses the
+        # coordinator's client, so it only starts when that client
+        # actually offers a stream — an unconfigured-token stub (or a
+        # test snapshot client without ``stream_events``) leaves it
+        # unstarted, and the typed-error path already covers
+        # availability for those entries.
+        if callable(getattr(api_client, "stream_events", None)):
+            event_stream = NestQuestEventStream(hass, api_client)
+            event_stream.start()
         runtime_data = NestQuestRuntimeData(
             entry_id=entry.entry_id,
             settings=settings,
@@ -511,6 +537,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             remove_update_listener=remove_update_listener,
             remove_time_change_listener=remove_time_change_listener,
             coordinator=coordinator,
+            event_stream=event_stream,
         )
         # The runtime record is registered BEFORE the first refresh:
         # the refresh path (and anything it calls) resolves the entry's
@@ -543,6 +570,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # unwind EVERY remover we acquired before the failure, keeping the
         # original error as the one raised.  Removal is best-effort — a
         # failing remover must not mask the setup error that triggered it.
+        # The SSE subscription (started just before the runtime record)
+        # is stopped first: like the coordinator it must never outlive
+        # the database being closed below.
+        if event_stream is not None:
+            try:
+                await event_stream.stop()
+            except BaseException:
+                pass
         for remove_listener in (
             remove_time_change_listener,
             remove_update_listener,
@@ -611,6 +646,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return False
     unload_error: BaseException | None = None
     if runtime_data is not None:
+        # The SSE subscription is stopped FIRST: its task must be gone
+        # (no frame can fire) before anything else is torn down.
+        event_stream = getattr(runtime_data, "event_stream", None)
+        if event_stream is not None:
+            stop_stream = getattr(event_stream, "stop", None)
+            if stop_stream is not None:
+                await stop_stream()
         remove_update_listener = getattr(runtime_data, "remove_update_listener", None)
         remove_time_change_listener = getattr(
             runtime_data, "remove_time_change_listener", None
