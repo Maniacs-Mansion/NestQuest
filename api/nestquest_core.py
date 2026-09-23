@@ -129,6 +129,17 @@ core_events = importlib.import_module(f"{_CORE_MODULE_NAME}.events")
 #: the snapshot builder's ``settings`` parameter takes.
 core_settings = importlib.import_module(f"{_CORE_MODULE_NAME}.settings")
 
+#: The durable settings store (``core.settings_store.load_settings`` /
+#: ``update_settings``) the admin plane's settings routes read and
+#: write — the API's OWN settings source: a validated JSON document in
+#: the existing ``nestquest_meta_state`` table, resolved through the
+#: same core settings validators (the integration's HA config-entry
+#: options remain a temporary separate source until Feature 18 wires
+#: the client to the API).
+core_settings_store = importlib.import_module(
+    f"{_CORE_MODULE_NAME}.settings_store"
+)
+
 #: The children business layer (``core.children.create_child`` et al.)
 #: the admin plane's children routes call.
 core_children = importlib.import_module(f"{_CORE_MODULE_NAME}.children")
@@ -206,4 +217,5 @@ __all__ = [
     "core_recurrence",
     "core_snapshot",
     "core_settings",
+    "core_settings_store",
 ]
