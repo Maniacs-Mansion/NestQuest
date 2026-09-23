@@ -6,15 +6,15 @@ import sqlite3
 
 import pytest
 
-from custom_components.nestquest.dao_children import ChildrenDao
-from custom_components.nestquest.dao_presence import (
+from custom_components.nestquest.core.dao_children import ChildrenDao
+from custom_components.nestquest.core.dao_presence import (
     PresenceOverrideRecord,
     PresenceOverridesDao,
     PresenceScheduleRecord,
     PresenceSchedulesDao,
 )
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.migrations import apply_migrations
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.migrations import apply_migrations
 
 
 def _run(coro):
@@ -33,7 +33,7 @@ NOW = "2026-09-14T12:00:00+00:00"
 
 
 async def _prepare(path) -> tuple:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     await database.open(path)
     await apply_migrations(database)
     schedules = PresenceSchedulesDao(database)
@@ -196,7 +196,7 @@ def test_upsert_concurrent_same_child_serializes(tmp_path) -> None:
             return fn(*args)
 
         hass.async_add_executor_job = _gated_executor
-        database = NestQuestDatabase(hass)
+        database = NestQuestDatabase(hass.async_add_executor_job)
         await database.open(tmp_path / "upsert-race.db")
         try:
             await apply_migrations(database)
@@ -553,9 +553,9 @@ def test_presence_sql_lives_only_in_dao_module() -> None:
     scan_roots = [package, repo_root / "tests"]
 
     allowed = {
-        "custom_components/nestquest/dao_presence.py",  # this DAO
-        "custom_components/nestquest/schema.py",  # declares the DDL
-        "custom_components/nestquest/migrations.py",  # applies the DDL
+        "custom_components/nestquest/core/dao_presence.py",  # this DAO
+        "custom_components/nestquest/core/schema.py",  # declares the DDL
+        "custom_components/nestquest/core/migrations.py",  # applies the DDL
         "tests/test_schema.py",  # tests the DDL
         "tests/test_migrations.py",  # tests migration application
         "tests/test_dao_presence.py",  # this file, scanned separately
@@ -741,12 +741,12 @@ def test_override_create_racing_conflicts_serialize(tmp_path) -> None:
     from unittest.mock import MagicMock
 
     async def _main():
-        from custom_components.nestquest.dao_children import ChildrenDao
-        from custom_components.nestquest.dao_presence import (
+        from custom_components.nestquest.core.dao_children import ChildrenDao
+        from custom_components.nestquest.core.dao_presence import (
             PresenceOverridesDao,
         )
-        from custom_components.nestquest.db import NestQuestDatabase
-        from custom_components.nestquest.migrations import apply_migrations
+        from custom_components.nestquest.core.db import NestQuestDatabase
+        from custom_components.nestquest.core.migrations import apply_migrations
 
         armed = {"active": False, "gated": False}
         gate_open = asyncio_module.Event()
@@ -766,7 +766,7 @@ def test_override_create_racing_conflicts_serialize(tmp_path) -> None:
             return fn(*args)
 
         hass.async_add_executor_job = _gated_executor
-        database = NestQuestDatabase(hass)
+        database = NestQuestDatabase(hass.async_add_executor_job)
         await database.open(tmp_path / "override-race.db")
         try:
             await apply_migrations(database)

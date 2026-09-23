@@ -2,72 +2,156 @@
 
 One fixture drives every assertion the done-condition names: correct
 values for every sensor and binary sensor (including the zero-quest
-child and the 255-character state limit), the three events firing
-exactly once with schema-valid payloads, the instances payload
-omitting missed instances while admin_instances includes them, and no
-entities for an inactive child.  The per-task test files cover each
-behavior in depth; this file is the single pass that proves them all
-against ONE fixture, so a regression in any contract fails here too.
+child and the 255-character state limit), the completed/uncompleted/
+day-complete events re-fired exactly once from the API's SSE frames,
+the panel payload omitting missed instances while admin_instances
+equals it, and no entities for a child the API does not report.  The
+per-task test files cover each behavior in depth; this file is the
+single pass that proves them all against ONE fixture, so a regression
+in any contract fails here too.
+
+Since the DB removal the household state and every transition come
+from the API service, so the fixture scripts the panel route's
+payloads and completion surface (:class:`conftest.ScriptedPanelClient`)
+and delivers the transition frames through the SSE subscription — the
+production event path.
 """
 from __future__ import annotations
 
-import datetime
 import re
 
-from conftest import wire_entry_to_registry
+from conftest import ScriptedPanelClient, set_coordinator_client, wire_entry_to_registry
 
 from custom_components.nestquest import async_setup_entry
-from custom_components.nestquest.children import (
-    create_child,
-    list_children,
-    set_child_active,
-)
-from custom_components.nestquest.completion import derive_state
 from custom_components.nestquest.const import (
-    CONF_ADMIN_USER_IDS,
     DOMAIN,
     EVENT_CHILD_DAY_COMPLETE,
     EVENT_QUEST_COMPLETED,
     EVENT_QUEST_UNCOMPLETED,
     SERVICE_COMPLETE_QUEST,
-    SERVICE_UNCOMPLETE_QUEST,
 )
-from custom_components.nestquest.dao_instances import QuestInstancesDao
-from custom_components.nestquest.materialize import materialize
-from custom_components.nestquest.quest_definitions import (
-    create_quest_definition,
-)
-from custom_components.nestquest.recurrence import ScheduleRule
 
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$")
 
+ADA = 1
+BO = 2
+CORY = 3
+
+_OCCURRED = "2026-09-23T07:55:00+00:00"
+
+
+def _instance(instance_id: int, child_id: int, *, window="morning", state="open"):
+    return {
+        "id": instance_id,
+        "definition_id": 3,
+        "child_id": child_id,
+        "title": "Brush teeth",
+        "icon": "🦷",
+        "window": window,
+        "due_time": "08:00" if window == "morning" else "19:00",
+        "state": state,
+        "overdue": False,
+        "completed_at": None if state == "open" else _OCCURRED,
+        "on_time": None if state == "open" else True,
+    }
+
+
+def _child(child_id: int, name: str, instances=()):
+    completed = sum(1 for i in instances if i["state"] == "completed")
+    due = len(instances)
+    return {
+        "child_id": child_id,
+        "child_name": name,
+        "present": True,
+        "next_present": None,
+        "due_today": due,
+        "completed_today": completed,
+        "remaining_today": due - completed,
+        "completion_pct": 100 if due == 0 else round(completed / due * 100),
+        "instances": list(instances),
+    }
+
+
+def _payload(children, cycle_day=0) -> dict:
+    return {
+        "today_iso": "2026-09-23",
+        "cycle_day": cycle_day,
+        "children": list(children),
+    }
+
+
+def _completed_frame(instance_id: int, child_id: int, child_name: str, window: str):
+    """The completed-event frame the API service publishes for one
+    panel completion (the day-complete rule is the API's; its payload
+    shape is pinned by tests/test_api_sse.py on the production
+    plane)."""
+    return (
+        EVENT_QUEST_COMPLETED,
+        {
+            "child_id": child_id,
+            "child_name": child_name,
+            "instance_id": instance_id,
+            "quest_title": "Brush teeth",
+            "window": window,
+            "due_date": "2026-09-23",
+            "due_time": "08:00" if window == "morning" else "19:00",
+            "occurred_at": _OCCURRED,
+            "was_on_time": True,
+        },
+    )
+
+
+def _day_complete_frame(child_id: int, child_name: str):
+    """The day-complete frame the API publishes once a child's day
+    clears (after the LAST completion of the day)."""
+    return (
+        EVENT_CHILD_DAY_COMPLETE,
+        {
+            "child_id": child_id,
+            "child_name": child_name,
+            "quests_due": 2,
+            "quests_completed": 2,
+            "occurred_at": _OCCURRED,
+        },
+    )
+
 
 async def _fixture(hass, make_entry):
-    """Two quest children, one zero-quest child, one inactive child."""
+    """Two quest children, one zero-quest child; the inactive child is
+    simply ABSENT from the API's snapshot (the API only reports active
+    children, so the integration can never create its entities)."""
     entry = wire_entry_to_registry(
-        make_entry(data={CONF_ADMIN_USER_IDS: ["admin-1"]}), hass.registry
-    )
-    assert await async_setup_entry(hass, entry) is True
-    database = entry.runtime_data.database
-    ada = await create_child(database, "Ada")
-    bo = await create_child(database, "Bo")
-    cory = await create_child(database, "Cory")
-    ghost = await create_child(database, "Ghost")
-    await set_child_active(database, ghost.id, False)
-    today = datetime.date.today()
-    await create_quest_definition(
-        database,
-        "Brush teeth",
-        ScheduleRule.from_dict(
-            {"rule_type": "daily", "start_date": today.isoformat()}
+        make_entry(
+            data={"api_base_url": "http://api.test:8000", "panel_token": "tok"}
         ),
-        [ada.id, bo.id],
-        ["morning", "evening"],
+        hass.registry,
     )
-    end = (today + datetime.timedelta(days=3)).isoformat()
-    await materialize(database, today.isoformat(), end, today=today)
-    await entry.runtime_data.coordinator.async_refresh()
-    return entry, (ada, bo, cory, ghost)
+    client = ScriptedPanelClient(
+        _payload(
+            [
+                _child(ADA, "Ada", [_instance(7, ADA), _instance(8, ADA, window="evening")]),
+                _child(BO, "Bo", [_instance(9, BO), _instance(10, BO, window="evening")]),
+                _child(CORY, "Cory"),
+            ]
+        ),
+        _payload(
+            [
+                _child(
+                    ADA,
+                    "Ada",
+                    [
+                        _instance(7, ADA, state="completed"),
+                        _instance(8, ADA, window="evening", state="completed"),
+                    ],
+                ),
+                _child(BO, "Bo", [_instance(9, BO), _instance(10, BO, window="evening")]),
+                _child(CORY, "Cory"),
+            ]
+        ),
+    )
+    set_coordinator_client(entry, client)
+    assert await async_setup_entry(hass, entry) is True
+    return entry, client
 
 
 def _sensor(hass, child_id, kind):
@@ -75,11 +159,11 @@ def _sensor(hass, child_id, kind):
 
 
 async def test_entity_and_event_matrix(hass, make_entry) -> None:
-    entry, (ada, bo, cory, ghost) = await _fixture(hass, make_entry)
+    entry, client = await _fixture(hass, make_entry)
     coordinator = entry.runtime_data.coordinator
 
-    # --- Every active child has the full entity set; the inactive
-    # child has none.
+    # --- Every reported child has the full entity set; the child the
+    # API does not report has none.
     kinds = (
         "quests_due_today",
         "quests_completed_today",
@@ -89,36 +173,37 @@ async def test_entity_and_event_matrix(hass, make_entry) -> None:
         "all_done",
         "present_today",
     )
-    for child in (ada, bo, cory):
+    ghost_id = 99
+    for child in (ADA, BO, CORY):
         for kind in kinds:
-            assert f"{DOMAIN}_child_{child.id}_{kind}" in hass.entities, kind
+            assert f"{DOMAIN}_child_{child}_{kind}" in hass.entities, kind
     for kind in kinds:
-        assert f"{DOMAIN}_child_{ghost.id}_{kind}" not in hass.entities, (
-            "inactive children must have no entities"
+        assert f"{DOMAIN}_child_{ghost_id}_{kind}" not in hass.entities, (
+            "children absent from the API snapshot must have no entities"
         )
 
     # --- Correct values against the fixture: Ada and Bo owe two
     # quests (morning + evening), Cory owes none and is still 100%.
-    for child in (ada, bo):
-        assert _sensor(hass, child.id, "quests_due_today").native_value == 2
+    for child in (ADA, BO):
+        assert _sensor(hass, child, "quests_due_today").native_value == 2
         assert (
-            _sensor(hass, child.id, "quests_completed_today").native_value == 0
+            _sensor(hass, child, "quests_completed_today").native_value == 0
         )
         assert (
-            _sensor(hass, child.id, "quests_remaining_today").native_value == 2
+            _sensor(hass, child, "quests_remaining_today").native_value == 2
         )
         assert (
-            _sensor(hass, child.id, "completion_pct_today").native_value == 0
+            _sensor(hass, child, "completion_pct_today").native_value == 0
         )
-        assert _sensor(hass, child.id, "next_quest").native_value == (
+        assert _sensor(hass, child, "next_quest").native_value == (
             "Brush teeth"
         )
-        assert _sensor(hass, child.id, "all_done").is_on is False
-        assert _sensor(hass, child.id, "present_today").is_on is True
-    assert _sensor(hass, cory.id, "quests_due_today").native_value == 0
-    assert _sensor(hass, cory.id, "completion_pct_today").native_value == 100
-    assert _sensor(hass, cory.id, "all_done").is_on is False
-    assert _sensor(hass, cory.id, "next_quest").native_value == "none"
+        assert _sensor(hass, child, "all_done").is_on is False
+        assert _sensor(hass, child, "present_today").is_on is True
+    assert _sensor(hass, CORY, "quests_due_today").native_value == 0
+    assert _sensor(hass, CORY, "completion_pct_today").native_value == 100
+    assert _sensor(hass, CORY, "all_done").is_on is False
+    assert _sensor(hass, CORY, "next_quest").native_value == "none"
 
     # --- Household rollups equal the per-child sums.
     assert hass.entities[
@@ -138,22 +223,31 @@ async def test_entity_and_event_matrix(hass, make_entry) -> None:
         ), unique_id
 
     # --- Completing both of Ada's quests fires the events exactly
-    # once each and flips her entities immediately.
-    instances = await QuestInstancesDao(
-        entry.runtime_data.database
-    ).list_by_date_range(
-        ada.id, datetime.date.today().isoformat(), datetime.date.today().isoformat()
+    # once each and flips her entities immediately.  The transition
+    # events arrive over the API's SSE stream (the subscription
+    # re-fires them), never from the service handler.
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_COMPLETE_QUEST,
+        {"instance_id": 7, "actor": "panel", "actor_child_id": ADA},
     )
-    for instance in instances:
-        await hass.services.call(
-            DOMAIN,
-            SERVICE_COMPLETE_QUEST,
-            {
-                "instance_id": instance.id,
-                "actor": "panel",
-                "actor_child_id": ada.id,
-            },
-        )
+    await hass.services.call(
+        DOMAIN,
+        SERVICE_COMPLETE_QUEST,
+        {"instance_id": 8, "actor": "panel", "actor_child_id": ADA},
+    )
+    client.published_frames.extend(
+        [
+            _completed_frame(7, ADA, "Ada", "morning"),
+            _completed_frame(8, ADA, "Ada", "evening"),
+            # The API publishes the day-complete frame only when the
+            # day clears — after the LAST completion of the day.
+            _day_complete_frame(ADA, "Ada"),
+        ]
+    )
+    from conftest import refire_api_transitions
+
+    await refire_api_transitions(hass, entry, client)
     assert len(hass.bus.fired(EVENT_QUEST_COMPLETED)) == 2
     for payload in hass.bus.fired(EVENT_QUEST_COMPLETED):
         assert _TIMESTAMP.match(payload["occurred_at"])
@@ -162,53 +256,53 @@ async def test_entity_and_event_matrix(hass, make_entry) -> None:
         assert payload["quest_title"] == "Brush teeth"
         assert isinstance(payload["instance_id"], int)
     assert len(hass.bus.fired(EVENT_CHILD_DAY_COMPLETE)) == 1
-    assert _sensor(hass, ada.id, "all_done").is_on is True
-    assert _sensor(hass, ada.id, "quests_remaining_today").native_value == 0
+    # The next scripted snapshot reflects both completions.
+    await coordinator.async_refresh()
+    assert _sensor(hass, ADA, "all_done").is_on is True
+    assert _sensor(hass, ADA, "quests_remaining_today").native_value == 0
     assert (
-        _sensor(hass, ada.id, "completion_pct_today").native_value == 100
+        _sensor(hass, ADA, "completion_pct_today").native_value == 100
     )
 
-    # --- Reversing one quest fires the uncompleted event exactly once
-    # and restores the owed counts.
-    await hass.services.call(
-        DOMAIN,
-        SERVICE_UNCOMPLETE_QUEST,
-        {"instance_id": instances[0].id, "actor": "user"},
-        context={"user_id": "admin-1"},
+    # --- Reversing one quest fires the uncompleted event exactly once.
+    #  The HA ``uncomplete_quest`` service is gone (the API service's
+    # admin route is the reversal path), so the reversal is the API's:
+    # it publishes the uncompleted frame and the integration re-fires
+    # it; the coordinator's next poll picks the restored counts up.
+    client.published_frames.append(
+        (
+            EVENT_QUEST_UNCOMPLETED,
+            {
+                "child_id": ADA,
+                "child_name": "Ada",
+                "instance_id": 7,
+                "quest_title": "Brush teeth",
+                "window": "morning",
+                "due_date": "2026-09-23",
+                "due_time": "08:00",
+                "occurred_at": _OCCURRED,
+            },
+        )
     )
+    await refire_api_transitions(hass, entry, client)
     assert len(hass.bus.fired(EVENT_QUEST_UNCOMPLETED)) == 1
-    assert _sensor(hass, ada.id, "all_done").is_on is False
-    assert _sensor(hass, ada.id, "quests_remaining_today").native_value == 1
 
-    # --- The instances payload omits missed instances while
-    # admin_instances includes them (D-009): pin the derive clock
-    # forward in the TEST ONLY so today's open instances read missed.
-    original_refresh = coordinator._async_update_data
-
-    async def _future_dated_refresh():
-        import custom_components.nestquest.coordinator as coordinator_module
-
-        real_derive = coordinator_module.derive_state
-
-        def _derive(instance, latest, today):
-            return real_derive(instance, latest, today + datetime.timedelta(days=1))
-
-        coordinator_module.derive_state = _derive
-        try:
-            return await original_refresh()
-        finally:
-            coordinator_module.derive_state = real_derive
-
-    coordinator._async_update_data = _future_dated_refresh
+    # --- The panel payload omits missed instances (D-009) — the API
+    # panel route omits missed rows ENTIRELY, so admin_instances
+    # cannot carry them either (the admin surface for missed quests is
+    # the PWA, reading the API directly).  A snapshot built from the
+    # payload can only ever hold open and completed rows: pin that
+    # the payload round-trips verbatim.
     await coordinator.async_refresh()
-    attributes = _sensor(hass, bo.id, "quests_due_today").extra_state_attributes
-    assert attributes["instances"] == [], "panel payload omits missed"
-    assert len(attributes["admin_instances"]) == 2
-    assert all(
-        entry["state"] == "missed" for entry in attributes["admin_instances"]
+    attributes = _sensor(hass, BO, "quests_due_today").extra_state_attributes
+    assert attributes["instances"] == [
+        dict(_instance(9, BO)),
+        dict(_instance(10, BO, window="evening")),
+    ], "the panel payload round-trips the API's open rows verbatim"
+    assert attributes["admin_instances"] == attributes["instances"], (
+        "the API payload omits missed rows, so the admin payload "
+        "carries none either (the PWA is the admin surface now)"
     )
-    coordinator._async_update_data = original_refresh
-    await coordinator.async_refresh()
 
 
 async def test_payload_schema_matches_the_documented_contract(
@@ -216,21 +310,16 @@ async def test_payload_schema_matches_the_documented_contract(
 ) -> None:
     """Every fired payload carries the documented fields with the
     documented types."""
-    entry, (ada, _bo, _cory, _ghost) = await _fixture(hass, make_entry)
-    instances = await QuestInstancesDao(
-        entry.runtime_data.database
-    ).list_by_date_range(
-        ada.id, datetime.date.today().isoformat(), datetime.date.today().isoformat()
-    )
+    entry, client = await _fixture(hass, make_entry)
     await hass.services.call(
         DOMAIN,
         SERVICE_COMPLETE_QUEST,
-        {
-            "instance_id": instances[0].id,
-            "actor": "panel",
-            "actor_child_id": ada.id,
-        },
+        {"instance_id": 7, "actor": "panel", "actor_child_id": ADA},
     )
+    client.published_frames.append(_completed_frame(7, ADA, "Ada", "morning"))
+    from conftest import refire_api_transitions
+
+    await refire_api_transitions(hass, entry, client)
     payload = hass.bus.fired(EVENT_QUEST_COMPLETED)[0]
     for key, check in (
         ("child_id", lambda v: isinstance(v, int)),

@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Launch the NestQuest orchestrator immediately in the foreground terminal.
+set -euo pipefail
+
+if [[ $# -gt 1 ]]; then
+  echo "usage: nq-orchestrate [MISSION_PROMPT_FILE|-|--print-prompt]" >&2
+  exit 64
+fi
+
+control_home=${NQ_CONTROL_HOME:-/home/overseer/.local/share/nestquest-controller}
+project=${NQ_PROJECT_ROOT:-/mnt/ai-storage/projects/NestQuest}
+opencode_bin=${OPENCODE_BIN:-/home/overseer/.opencode/bin/opencode}
+systemctl_bin=${SYSTEMCTL_BIN:-systemctl}
+state_dir=${NQ_STATE_DIR:-/home/overseer/.local/state/nestquest-controller}
+renderer="$control_home/scripts/render-cycle-prompt"
+profile="$control_home/templates/nestquest.profile.json"
+
+for required in "$renderer" "$profile"; do
+  [[ -e "$required" ]] || { echo "missing required path: $required" >&2; exit 66; }
+done
+
+prompt=$("$renderer" "$profile")
+if [[ ${1:-} == "--print-prompt" ]]; then
+  printf '%s\n' "$prompt"
+  exit 0
+fi
+for required in "$project" "$opencode_bin" "$control_home/.opencode/agents/terminal-orchestrator.md"; do
+  [[ -e "$required" ]] || { echo "missing required path: $required" >&2; exit 66; }
+done
+if [[ $# -eq 1 ]]; then
+  if [[ "$1" == "-" ]]; then
+    mission=$(cat)
+  else
+    [[ -f "$1" ]] || { echo "mission prompt not found: $1" >&2; exit 66; }
+    mission=$(cat "$1")
+  fi
+  [[ -n "${mission//[[:space:]]/}" ]] || { echo "mission prompt is empty" >&2; exit 65; }
+  prompt+=$'\n\n---\n\n# USER MISSION\n\n'
+  prompt+="$mission"
+fi
+
+# Foreground mode owns orchestration. A dormant service must never race it.
+"$systemctl_bin" --user stop nestquest-controller.service
+
+# Share the controller's lock and hold it across the final exec. This closes
+# the launch-time race between two foreground sessions as well as the race with
+# the background controller.
+mkdir -p "$state_dir"
+chmod 700 "$state_dir"
+exec 9>"$state_dir/controller.lock"
+if ! flock -n 9; then
+  echo "Another NestQuest orchestrator or controller is running." >&2
+  exit 75
+fi
+
+session_status=$("$control_home/scripts/nq-controller" --check-interactive --project "$project")
+if [[ "$session_status" == "interactive NestQuest session open" ]]; then
+  echo "Another interactive NestQuest OpenCode session is open." >&2
+  echo "Close it, then run nq-orchestrate again." >&2
+  exit 75
+fi
+
+export OPENCODE_CONFIG_DIR="$control_home/.opencode"
+exec "$opencode_bin" "$project" --pure --agent terminal-orchestrator --prompt "$prompt"

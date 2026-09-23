@@ -6,29 +6,29 @@ import datetime
 
 import pytest
 
-from custom_components.nestquest.dao_children import ChildrenDao
+from custom_components.nestquest.core.dao_children import ChildrenDao
 from custom_components.nestquest.const import DEFAULT_HORIZON_DAYS
-from custom_components.nestquest.dao_instances import (
+from custom_components.nestquest.core.dao_instances import (
     CompletionEventsDao,
     QuestInstancesDao,
 )
-from custom_components.nestquest.dao_presence import PresenceSchedulesDao
-from custom_components.nestquest.dao_rules import (
+from custom_components.nestquest.core.dao_presence import PresenceSchedulesDao
+from custom_components.nestquest.core.dao_rules import (
     QuestDefinitionsDao,
     schedule_rule_to_storage,
 )
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.materialize import (
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.materialize import (
     materialize,
     regenerate_for_child,
     regenerate_for_definition,
 )
-from custom_components.nestquest.migrations import apply_migrations
-from custom_components.nestquest.quest_definitions import (
+from custom_components.nestquest.core.migrations import apply_migrations
+from custom_components.nestquest.core.quest_definitions import (
     create_quest_definition,
     edit_quest_definition,
 )
-from custom_components.nestquest.recurrence import (
+from custom_components.nestquest.core.recurrence import (
     RuleType,
     ScheduleRule,
     occurs_on,
@@ -51,7 +51,7 @@ NOW = "2026-09-14T12:00:00+00:00"
 
 
 async def _prepare(path):
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     await database.open(path)
     await apply_migrations(database)
     return database
@@ -505,7 +505,7 @@ def test_materialize_skips_deactivated_child_mid_walk(tmp_path) -> None:
 
 def test_materialize_uses_single_presence_snapshot_mid_walk(tmp_path) -> None:
     async def _body(database):
-        from custom_components.nestquest.dao_presence import (
+        from custom_components.nestquest.core.dao_presence import (
             PresenceOverridesDao,
         )
 
@@ -628,7 +628,7 @@ def test_materialize_does_not_overwrite_regenerated_due_time(tmp_path) -> None:
 
 def test_materialize_honours_overrides(tmp_path) -> None:
     async def _body(database):
-        from custom_components.nestquest.dao_presence import (
+        from custom_components.nestquest.core.dao_presence import (
             PresenceOverridesDao,
         )
 
@@ -758,7 +758,7 @@ def test_materialize_clamps_past_start_to_today(tmp_path) -> None:
 
 def test_materialize_skips_inactive_definitions(tmp_path) -> None:
     async def _body(database):
-        from custom_components.nestquest.quest_definitions import (
+        from custom_components.nestquest.core.quest_definitions import (
             set_quest_definition_active,
         )
 
@@ -906,7 +906,7 @@ def test_regenerate_for_child_rebuilds_horizon_preserves_history(
     tmp_path,
 ) -> None:
     async def _body(database):
-        from custom_components.nestquest.dao_presence import (
+        from custom_components.nestquest.core.dao_presence import (
             PresenceOverridesDao,
         )
 
@@ -1039,7 +1039,7 @@ def test_regenerate_for_child_uses_single_anchor_across_midnight(
         clock["reads"] += 1
         return day0 if clock["reads"] == 1 else day1
 
-    import custom_components.nestquest.dao_instances as dao_instances_module
+    import custom_components.nestquest.core.dao_instances as dao_instances_module
 
     monkeypatch.setattr(dao_instances_module, "_today", _fake_today)
 
@@ -1091,7 +1091,7 @@ def test_regenerate_for_child_uses_single_anchor_across_midnight(
 def test_regenerate_for_child_is_child_scoped(tmp_path) -> None:
     """Regenerating one child must never touch another child's rows."""
     async def _body(database):
-        from custom_components.nestquest.dao_presence import (
+        from custom_components.nestquest.core.dao_presence import (
             PresenceOverridesDao,
         )
 
@@ -1475,7 +1475,7 @@ async def _collect_records(database, child_ids, start, end) -> set:
 
 
 def test_materialize_end_to_end_six_rule_types(tmp_path, monkeypatch) -> None:
-    import custom_components.nestquest.materialize as materialize_module
+    import custom_components.nestquest.core.materialize as materialize_module
 
     # Give each materialize run a DISTINCT batch stamp: production upserts
     # rewrite generated_at on every re-run, so a shared pinned stamp would
@@ -1487,13 +1487,16 @@ def test_materialize_end_to_end_six_rule_types(tmp_path, monkeypatch) -> None:
         stamps["n"] += 1
         return f"2026-06-01T00:00:{stamps['n']:02d}+00:00"
 
+    # The materialize() walk reads ``_now_stamp`` from its OWN module
+    # globals (now the HA-free core package), so the patch must target
+    # the core module, not the re-export shim the integration imports.
     monkeypatch.setattr(materialize_module, "_now_stamp", _distinct_stamp)
 
     async def _body(database):
-        from custom_components.nestquest.dao_presence import (
+        from custom_components.nestquest.core.dao_presence import (
             PresenceOverridesDao,
         )
-        from custom_components.nestquest.presence import PresenceSchedule
+        from custom_components.nestquest.core.presence import PresenceSchedule
 
         children = ChildrenDao(database)
         schedules = PresenceSchedulesDao(database)

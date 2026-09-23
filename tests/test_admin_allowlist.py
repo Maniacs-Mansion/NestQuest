@@ -1,21 +1,18 @@
-"""Tests for admin_allowlist.py: the Feature 03 allowlist business layer."""
+"""Tests for the Feature 03 admin allowlist business layer (core.admin_allowlist)."""
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from custom_components.nestquest import async_setup_entry, async_unload_entry
-from custom_components.nestquest.admin_allowlist import (
+from custom_components.nestquest.core.admin_allowlist import (
     list_admin_ids,
     seed_setup_admin,
     set_admin_ids,
 )
-from custom_components.nestquest.dao_children import AdminUsersDao
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.migrations import apply_migrations
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.migrations import apply_migrations
 
 
 def _run(coro):
@@ -31,7 +28,7 @@ def _make_hass_mock():
 def _with_db(tmp_path, name):
     def _run_test(body):
         async def _main():
-            database = NestQuestDatabase(_make_hass_mock())
+            database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
             await database.open(tmp_path / name)
             try:
                 await apply_migrations(database)
@@ -193,165 +190,6 @@ def test_seed_rejects_malformed_candidates(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Setup wiring: async_setup_entry seeds automatically
-# ---------------------------------------------------------------------------
-
-
-async def _setup_entry(hass, entry, registry):
-    from tests.test_lifecycle import _wire
-
-    entry = _wire(entry, registry)
-    await async_setup_entry(hass, entry)
-    return entry
-
-
-async def test_setup_seeds_allowlist_from_entry_context(
-    hass, make_entry
-) -> None:
-    entry = await _setup_entry(
-        hass,
-        make_entry(context={"user_id": "ha-owner"}),
-        hass.registry,
-    )
-    database = entry.runtime_data.database
-    try:
-        assert await list_admin_ids(database) == ["ha-owner"]
-    finally:
-        await database.close()
-    assert await async_unload_entry(hass, entry) is True
-
-
-async def test_setup_seeds_allowlist_from_stored_entry_data(
-    hass, make_entry
-) -> None:
-    """A lost database re-seeded from the entry's stored admin copy."""
-    from custom_components.nestquest.const import CONF_ADMIN_USER_IDS
-
-    entry = await _setup_entry(
-        hass,
-        make_entry(data={CONF_ADMIN_USER_IDS: ["user-a", "user-b"]}),
-        hass.registry,
-    )
-    database = entry.runtime_data.database
-    try:
-        assert await list_admin_ids(database) == ["user-a", "user-b"]
-    finally:
-        await database.close()
-    assert await async_unload_entry(hass, entry) is True
-
-
-async def test_setup_without_context_leaves_allowlist_empty(
-    hass, make_entry
-) -> None:
-    """Fail closed: no context user and no stored copy means an empty
-    allowlist — nobody is admin until the owner configures it."""
-    entry = await _setup_entry(hass, make_entry(), hass.registry)
-    database = entry.runtime_data.database
-    try:
-        assert await list_admin_ids(database) == []
-    finally:
-        await database.close()
-    assert await async_unload_entry(hass, entry) is True
-
-
-async def test_setup_does_not_reseed_narrowed_allowlist(
-    hass, make_entry
-) -> None:
-    from custom_components.nestquest import async_unload_entry
-    from custom_components.nestquest.const import CONF_ADMIN_USER_IDS
-
-    entry = await _setup_entry(
-        hass, make_entry(context={"user_id": "ha-owner"}), hass.registry
-    )
-    database = entry.runtime_data.database
-    await set_admin_ids(database, ["user-parent"])
-    await database.close()
-    assert await async_unload_entry(hass, entry) is True
-
-    # Reload with the SAME context: the narrowed list survives.
-    entry_reloaded = await _setup_entry(
-        hass, make_entry(context={"user_id": "ha-owner"}), hass.registry
-    )
-    database_b = entry_reloaded.runtime_data.database
-    try:
-        assert await list_admin_ids(database_b) == ["user-parent"]
-    finally:
-        await database.close()
-    assert await async_unload_entry(hass, entry_reloaded) is True
-
-
-async def test_setup_seed_prefers_options_over_entry_data(
-    hass, make_entry
-) -> None:
-    """Seed precedence on a fresh database: the options flow's saved
-    list (the current one) beats the config flow's original copy."""
-    from custom_components.nestquest.const import CONF_ADMIN_USER_IDS
-
-    entry = await _setup_entry(
-        hass,
-        make_entry(
-            options={CONF_ADMIN_USER_IDS: ["user-current"]},
-            data={CONF_ADMIN_USER_IDS: ["ha-owner"]},
-            context={"user_id": "ha-owner"},
-        ),
-        hass.registry,
-    )
-    database = entry.runtime_data.database
-    try:
-        assert await list_admin_ids(database) == ["user-current"]
-    finally:
-        await database.close()
-    assert await async_unload_entry(hass, entry) is True
-
-
-async def test_setup_owner_fallback_seeds_owner_accounts(
-    hass, make_entry
-) -> None:
-    """Last-resort seed: with no persisted copy and no flow-context
-    user, HA owner accounts are seeded so first setup is never
-    ownerless (the real flow may lose the context; owners can already
-    do everything in HA)."""
-    from unittest.mock import AsyncMock
-
-    hass.auth.async_get_users = AsyncMock(
-        return_value=[
-            SimpleNamespace(id="owner-1", is_owner=True),
-            SimpleNamespace(id="member-1", is_owner=False),
-            SimpleNamespace(id="owner-2", is_owner=True),
-        ]
-    )
-    entry = await _setup_entry(hass, make_entry(), hass.registry)
-    database = entry.runtime_data.database
-    try:
-        assert sorted(await list_admin_ids(database)) == ["owner-1", "owner-2"]
-    finally:
-        await database.close()
-    assert await async_unload_entry(hass, entry) is True
-
-
-async def test_setup_owner_fallback_not_used_when_context_present(
-    hass, make_entry
-) -> None:
-    """The context user (flow caller) wins over the owner fallback:
-    a non-owner parent configuring the integration becomes the admin."""
-    from unittest.mock import AsyncMock
-
-    hass.auth.async_get_users = AsyncMock(
-        return_value=[SimpleNamespace(id="owner-1", is_owner=True)]
-    )
-    entry = await _setup_entry(
-        hass,
-        make_entry(context={"user_id": "parent-configured"}),
-        hass.registry,
-    )
-    database = entry.runtime_data.database
-    try:
-        assert await list_admin_ids(database) == ["parent-configured"]
-    finally:
-        await database.close()
-    assert await async_unload_entry(hass, entry) is True
-
-
 def test_seed_owner_ids_argument(tmp_path) -> None:
     async def _body(database):
         # Malformed owner lists are rejected like any other candidate —
@@ -377,54 +215,13 @@ def test_seed_owner_ids_argument(tmp_path) -> None:
     _with_db(tmp_path, "seed-owner-arg.db")(_body)
 
 
-async def test_reopened_setup_failure_closes_database(
-    hass, make_entry, monkeypatch
-) -> None:
-    """A seeding failure on the reopened-record path closes the just-
-    opened connection before re-raising (no leaked handles across HA's
-    setup retries)."""
-    import pytest as pytest_module
-    from unittest.mock import AsyncMock
-
-    import custom_components.nestquest as nestquest_module
-    from custom_components.nestquest.db import NestQuestDatabase
-
-    # First: a successful setup to create the runtime record and file.
-    entry = await _setup_entry(hass, make_entry(), hass.registry)
-    await async_unload_entry(hass, entry)
-
-    # Now a re-setup whose seeding fails after the reopen.
-    async def _failing_seed(database, **kwargs):
-        raise RuntimeError("seed boom")
-
-    monkeypatch.setattr(
-        nestquest_module, "seed_setup_admin", _failing_seed, raising=True
-    )
-
-    close_calls: list[bool] = []
-    original_close = NestQuestDatabase.close
-
-    async def _spy_close(self):
-        close_calls.append(True)
-        return await original_close(self)
-
-    monkeypatch.setattr(NestQuestDatabase, "close", _spy_close)
-
-    with pytest_module.raises(RuntimeError, match="seed boom"):
-        await _setup_entry(hass, entry, hass.registry)
-    # The reopen path opened AND closed a connection; the failure is
-    # the last thing observed.
-    assert close_calls[-1] is True
-
-
-# ---------------------------------------------------------------------------
 # is_admin: the fail-closed resolver (Feature 09's verdict function)
 # ---------------------------------------------------------------------------
 
 
 def test_is_admin_verdict_matrix(tmp_path) -> None:
     async def _body(database):
-        from custom_components.nestquest.admin_allowlist import is_admin
+        from custom_components.nestquest.core.admin_allowlist import is_admin
 
         await set_admin_ids(database, ["user-owner"])
         assert await is_admin(database, "user-owner") is True
@@ -447,7 +244,7 @@ def test_is_admin_verdict_matrix(tmp_path) -> None:
 def test_is_admin_empty_allowlist_fails_closed(tmp_path) -> None:
     """An empty allowlist returns False for EVERYONE, not True."""
     async def _body(database):
-        from custom_components.nestquest.admin_allowlist import is_admin
+        from custom_components.nestquest.core.admin_allowlist import is_admin
 
         for candidate in ("user-owner", "", None, 1):
             assert await is_admin(database, candidate) is False
@@ -460,7 +257,7 @@ def test_is_admin_false_after_last_admin_removal_attempt(tmp_path) -> None:
     """The refusal keeps the verdict sound: a refused removal leaves
     the admin in place, so is_admin still resolves True."""
     async def _body(database):
-        from custom_components.nestquest.admin_allowlist import is_admin
+        from custom_components.nestquest.core.admin_allowlist import is_admin
 
         await set_admin_ids(database, ["user-owner"])
         with pytest.raises(ValueError, match="at least one admin"):

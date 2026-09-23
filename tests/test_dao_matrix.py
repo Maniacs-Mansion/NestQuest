@@ -21,24 +21,24 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from custom_components.nestquest.dao_children import (
+from custom_components.nestquest.core.dao_children import (
     AdminUsersDao,
     ChildrenDao,
 )
-from custom_components.nestquest.dao_instances import (
+from custom_components.nestquest.core.dao_instances import (
     CompletionEventsDao,
     QuestInstancesDao,
 )
-from custom_components.nestquest.dao_presence import (
+from custom_components.nestquest.core.dao_presence import (
     PresenceOverridesDao,
     PresenceSchedulesDao,
 )
-from custom_components.nestquest.dao_rules import (
+from custom_components.nestquest.core.dao_rules import (
     ScheduleRulesDao,
     QuestDefinitionsDao,
 )
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.migrations import apply_migrations
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.migrations import apply_migrations
 
 
 def _run(coro):
@@ -118,7 +118,7 @@ class World:
 
 
 async def _world(path) -> World:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     await database.open(path)
     await apply_migrations(database)
     world = World(database)
@@ -441,7 +441,7 @@ def test_completion_events_absolutely_no_mutation_path() -> None:
     )
     offenders = [
         py.name
-        for py in sorted(package.glob("*.py"))
+        for py in sorted(package.rglob("*.py"))
         if py.name != "__pycache__" and mutation.search(py.read_text())
     ]
     assert offenders == []

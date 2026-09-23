@@ -5,7 +5,7 @@ import datetime
 
 import pytest
 
-from custom_components.nestquest.recurrence import (
+from custom_components.nestquest.core.recurrence import (
     RuleType,
     RuleValidationError,
     ScheduleRule,
@@ -219,7 +219,7 @@ def test_occurs_on_rejects_unknown_shapes_loudly() -> None:
     than a silent wrong answer.  Forged via a private enum extension
     because ScheduleRule validation rejects unknown names."""
     import enum as enum_module
-    from custom_components.nestquest import recurrence as mod
+    from custom_components.nestquest.core import recurrence as mod
 
     ForgedType = enum_module.Enum(
         "ForgedType", {"UNKNOWN_SHAPE": "unknown_shape"}

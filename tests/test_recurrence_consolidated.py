@@ -15,7 +15,7 @@ import datetime
 
 import pytest
 
-from custom_components.nestquest.recurrence import (
+from custom_components.nestquest.core.recurrence import (
     ScheduleRule,
     RuleType,
     occurs_on,
@@ -395,7 +395,7 @@ def test_recurrence_engine_imports_nothing_forbidden() -> None:
 
     module_file = Path(
         importlib.util.find_spec(
-            "custom_components.nestquest.recurrence"
+            "custom_components.nestquest.core.recurrence"
         ).origin
     )
     tree = ast.parse(module_file.read_text())

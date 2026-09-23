@@ -6,15 +6,15 @@ import sqlite3
 
 import pytest
 
-from custom_components.nestquest.dao_children import (
+from custom_components.nestquest.core.dao_children import (
     AdminUserRecord,
     AdminUsersDao,
     ChildRecord,
     ChildrenDao,
 )
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.schema import SCHEMA_V1_STATEMENTS
-from custom_components.nestquest.migrations import apply_migrations
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.schema import SCHEMA_V1_STATEMENTS
+from custom_components.nestquest.core.migrations import apply_migrations
 
 
 def _run(coro):
@@ -30,7 +30,7 @@ def _make_hass_mock():
 
 
 def _open_db(path) -> NestQuestDatabase:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     _run(database.open(path))
     _run(apply_migrations(database))
     return database
@@ -319,7 +319,7 @@ def test_reorder_concurrent_calls_serialize(tmp_path) -> None:
     RuntimeError.
     """
     async def _main() -> None:
-        database = NestQuestDatabase(_make_hass_mock())
+        database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
         await database.open(tmp_path / "reorder-concurrent.db")
         try:
             await apply_migrations(database)
@@ -377,7 +377,7 @@ def test_admin_add_concurrent_calls_are_idempotent(tmp_path) -> None:
     'see no row' and one of them raise IntegrityError.
     """
     async def _main() -> None:
-        database = NestQuestDatabase(_make_hass_mock())
+        database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
         await database.open(tmp_path / "admin-race.db")
         try:
             await apply_migrations(database)
@@ -487,26 +487,23 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
     scan_roots = [package, repo_root / "tests"]
 
     allowed = {
-        "custom_components/nestquest/dao_children.py",  # the DAO itself
-        "custom_components/nestquest/dao_rules.py",  # validates child
+        "custom_components/nestquest/core/dao_children.py",  # the DAO itself
+        "custom_components/nestquest/core/dao_rules.py",  # validates child
         # activeness on assignment (FK to children, done-condition
         # 'validates that the assigned child is active')
-        "custom_components/nestquest/dao_presence.py",  # validates the
+        "custom_components/nestquest/core/dao_presence.py",  # validates the
         # schedule/override child exists before writing (same FK shape
         # as dao_rules: one existence SELECT per write)
-        "custom_components/nestquest/dao_instances.py",  # validates the
+        "custom_components/nestquest/core/dao_instances.py",  # validates the
         # instance/event child exists before writing (same FK shape)
-        "custom_components/nestquest/schema.py",  # declares the DDL
-        "custom_components/nestquest/migrations.py",  # applies the DDL
+        "custom_components/nestquest/core/schema.py",  # declares the DDL
+        "custom_components/nestquest/core/migrations.py",  # applies the DDL
         "tests/test_schema.py",  # tests the DDL
         "tests/test_migrations.py",  # tests migration application
         "tests/test_dao_children.py",  # this file, scanned separately
         "tests/test_dao_rules.py",  # rules/definitions guard, own scope
         "tests/test_dao_presence.py",  # presence guard, own scope
         "tests/test_dao_instances.py",  # instances guard, own scope
-        "tests/test_startup_db.py",  # row-count probe of the children
-        # table only (proving a fresh setup loads); guard below covers
-        # everything else
     }
     sql_pattern = re.compile(
         r"(FROM|INTO|UPDATE|DELETE\s+FROM|JOIN)\s+"
@@ -558,32 +555,6 @@ def _strip_function_spans(text: str, names: set[str]) -> str:
         for number, line in enumerate(lines, start=1)
         if number not in excluded
     )
-
-
-def test_startup_db_test_file_uses_dao_elsewhere() -> None:
-    """Compensating self-scan for the startup-test exemption: outside
-    the single sanctioned COUNT(*) probe, test_startup_db.py must go
-    through the DAO for children/admin_users data access.
-    """
-    import re
-    from pathlib import Path
-
-    startup_test = Path(__file__).parent / "test_startup_db.py"
-    stripped = _strip_function_spans(
-        startup_test.read_text(),
-        {"test_setup_with_valid_file_preserves_rows"},
-    )
-    sql_pattern = re.compile(
-        r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM|"
-        r"FROM|JOIN)\s+[`'\"]*(\[)?(children|admin_users)\b",
-        re.IGNORECASE,
-    )
-    assert sql_pattern.search(stripped) is None, (
-        "test_startup_db.py must go through the DAO for these tables "
-        "outside its sanctioned row-count probe"
-    )
-
-
 def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
     """Compensating self-scan for the matrix-file exemption, structurally
     exact: parse the two sanctioned functions' ASTs and require that

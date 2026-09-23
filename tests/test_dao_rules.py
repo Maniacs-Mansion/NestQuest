@@ -6,8 +6,8 @@ import sqlite3
 
 import pytest
 
-from custom_components.nestquest.dao_children import ChildrenDao
-from custom_components.nestquest.dao_rules import (
+from custom_components.nestquest.core.dao_children import ChildrenDao
+from custom_components.nestquest.core.dao_rules import (
     ScheduleRuleRecord,
     ScheduleRuleStorage,
     ScheduleRulesDao,
@@ -17,9 +17,9 @@ from custom_components.nestquest.dao_rules import (
     schedule_rule_from_storage,
     schedule_rule_to_storage,
 )
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.migrations import apply_migrations
-from custom_components.nestquest.recurrence import (
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.migrations import apply_migrations
+from custom_components.nestquest.core.recurrence import (
     RuleType,
     RuleValidationError,
     ScheduleRule,
@@ -42,7 +42,7 @@ NOW = "2026-09-14T12:00:00+00:00"
 
 
 async def _prepare(path) -> tuple:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     await database.open(path)
     await apply_migrations(database)
     rules = ScheduleRulesDao(database)
@@ -325,7 +325,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
     create's validation pauses mid-flight before the delete starts.
     """
     async def _main(order: str):
-        database = NestQuestDatabase(_make_hass_mock())
+        database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
         await database.open(tmp_path / f"rule-delete-race-{order}.db")
         try:
             await apply_migrations(database)
@@ -341,7 +341,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
                 # delete task has been scheduled, so the create holds
                 # the connection lock while the delete queues behind
                 # it — then the create proceeds and wins.
-                import custom_components.nestquest.dao_rules as dao_rules
+                import custom_components.nestquest.core.dao_rules as dao_rules
 
                 original_validate = (
                     dao_rules.QuestDefinitionsDao._validate_rule_exists
@@ -1218,12 +1218,12 @@ def test_rules_and_definitions_sql_lives_only_in_dao_module() -> None:
     scan_roots = [package, repo_root / "tests"]
 
     allowed = {
-        "custom_components/nestquest/dao_rules.py",  # this DAO
-        "custom_components/nestquest/dao_instances.py",  # validates the
+        "custom_components/nestquest/core/dao_rules.py",  # this DAO
+        "custom_components/nestquest/core/dao_instances.py",  # validates the
         # definition exists + fetches its assignee before generating an
         # instance (the instance must snapshot the definition's child)
-        "custom_components/nestquest/schema.py",  # declares the DDL
-        "custom_components/nestquest/migrations.py",  # applies the DDL
+        "custom_components/nestquest/core/schema.py",  # declares the DDL
+        "custom_components/nestquest/core/migrations.py",  # applies the DDL
         "tests/test_schema.py",  # tests the DDL
         "tests/test_migrations.py",  # tests migration application
         "tests/test_dao_rules.py",  # this file, scanned separately

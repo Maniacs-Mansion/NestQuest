@@ -1,17 +1,28 @@
 [project]
 name = "nestquest"
-version = "0.5.0"
+version = "0.6.0"
 description = "NestQuest Home Assistant Integration"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
 [dependency-groups]
+# fastapi and uvicorn live in the DEV group only so the monorepo's test
+# venv can exercise the API app (tests under tests/test_api_health.py).
+# They are NOT runtime dependencies of the NestQuest HA integration.
+# When the API deployable is packaged (Feature 17), its runtime
+# dependencies — fastapi, uvicorn, and any others — MUST be declared in
+# that deployable's own dependency manifest, not here.
 dev = [
+    "fastapi>=0.115",
+    "httpx>=0.28",
     "jinja2>=3",
+    "pyjwt[crypto]>=2.9",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24",
     "pyyaml>=6",
+    "unidecode>=1.4.0",
+    "uvicorn>=0.30",
     "voluptuous>=0.14",
 ]
 

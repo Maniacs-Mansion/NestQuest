@@ -1,0 +1,228 @@
+"""Transitional coupling: import ``core`` without importing Home Assistant.
+
+The NestQuest domain ``core`` package (Feature 15) is bundled INSIDE the
+Home Assistant integration at ``custom_components/nestquest/core/``.
+Importing it the obvious way — ``import custom_components.nestquest.core``
+— would execute ``custom_components/nestquest/__init__.py``, which
+imports ``homeassistant``.  Home Assistant is NOT installed in the API
+service's runtime, so that import raises ``ModuleNotFoundError`` and the
+API cannot start.
+
+``core`` itself is a clean, Home-Assistant-free package: its
+``__init__.py`` is a bare docstring and every internal import is
+relative (``from .db import ...``).  It can therefore be imported by
+file location as a standalone package.
+
+This module loads ``core`` with :func:`importlib.util.spec_from_file_location`
+— registering it under the distinct top-level name ``nestquest_core``
+with ``submodule_search_locations`` set to the bundled ``core``
+directory — so its relative imports resolve against that directory
+without touching ``sys.path``.  No generic top-level name (``db``,
+``const``, ``schema``, ...) is published, so nothing here can silently
+shadow a future dependency, and the integration's HA-coupled
+``__init__.py`` is never executed: ``custom_components.nestquest`` is
+never imported.
+
+Usage::
+
+    from api.nestquest_core import core_db, core_migrations
+    # core_db.NestQuestDatabase, core_migrations.apply_migrations, ...
+
+This is a TRANSITIONAL coupling.  Feature 18 (task 430f7f98) converts
+the integration into a thin API client and moves ``core`` out of the
+integration bundle; once that lands, this bootstrap helper goes away and
+the API imports ``core`` as an ordinary installed dependency.
+
+NOTE on the pytest process: the suite's ``conftest.py`` stubs the
+parent integration package and imports ``custom_components.nestquest.core.*``
+BEFORE any API test runs, so two copies of the core package coexist in
+the pytest process — the one registered here as ``nestquest_core.*``
+(loaded by file location) and the conftest-stubbed
+``custom_components.nestquest.core.*``.  Later tasks must NOT compare
+class or exception identity across these two copies: a
+``nestquest_core.db.NestQuestDatabase`` is a DIFFERENT class object from
+``custom_components.nestquest.core.db.NestQuestDatabase`` even though
+they share source.  Operate on a single copy within any one code path.
+"""
+from __future__ import annotations
+
+import importlib
+import importlib.util
+import sys
+from pathlib import Path
+from types import ModuleType
+
+#: The repository root (this file is ``<root>/api/nestquest_core.py``).
+_REPO_ROOT: Path = Path(__file__).resolve().parent.parent
+
+#: The bundled ``core`` package directory, inside the HA integration.
+_CORE_DIR: Path = _REPO_ROOT / "custom_components" / "nestquest" / "core"
+
+#: The ``core`` package's ``__init__.py`` — a bare docstring, so loading
+#: it by file location executes no imports of its own.
+_CORE_INIT: Path = _CORE_DIR / "__init__.py"
+
+#: The distinct top-level name under which the bundled ``core`` package
+#: is registered in ``sys.modules``.  A distinctive name (rather than the
+#: generic ``core``) avoids publishing shadow-able top-level names and
+#: keeps the bundled copy separate from the conftest-stubbed
+#: ``custom_components.nestquest.core`` present in the pytest process.
+_CORE_MODULE_NAME = "nestquest_core"
+
+
+def _load_core() -> ModuleType:
+    """Load the bundled ``core`` package by file location and return it.
+
+    Registers the package under :data:`_CORE_MODULE_NAME` in
+    ``sys.modules`` with ``submodule_search_locations`` pointing at the
+    bundled directory, so its relative imports (``from .db import ...``)
+    resolve to ``nestquest_core.<submodule>`` against that directory
+    without mutating ``sys.path``.  Idempotent: a second call returns
+    the already-registered module.
+    """
+    existing = sys.modules.get(_CORE_MODULE_NAME)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        _CORE_MODULE_NAME,
+        _CORE_INIT,
+        submodule_search_locations=[str(_CORE_DIR)],
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load core from {_CORE_INIT}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[_CORE_MODULE_NAME] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+#: The bundled core package, loaded by file location and registered as
+#: ``nestquest_core`` in ``sys.modules``.  Held here so callers import the
+#: submodules through it (``nestquest_core.db``, ``nestquest_core.migrations``)
+#: the same relative way the integration does.
+core: ModuleType = _load_core()
+
+#: Re-exported for convenience; route handlers import these names from
+#: here rather than reaching into the core package directly.
+core_db = importlib.import_module(f"{_CORE_MODULE_NAME}.db")
+core_migrations = importlib.import_module(f"{_CORE_MODULE_NAME}.migrations")
+
+#: The panel snapshot builder and its payload shaper
+#: (``core.snapshot.build_snapshot`` / ``instance_payload``) — the pure
+#: assembly the panel routes call.
+core_snapshot = importlib.import_module(f"{_CORE_MODULE_NAME}.snapshot")
+
+#: The completion service (``core.completion.complete_instance`` /
+#: ``uncomplete_instance``) the panel's write routes call.
+core_completion = importlib.import_module(f"{_CORE_MODULE_NAME}.completion")
+
+#: The read-only history layer (``core.history.query_history``,
+#: ``export_history_csv``, ``rows_to_csv``) the admin plane's history
+#: query and CSV export routes call.
+core_history = importlib.import_module(f"{_CORE_MODULE_NAME}.history")
+
+#: The transition-event builders (``core.events.build_quest_completed_event``
+#: et al.) the panel's write routes build their SSE events with.
+core_events = importlib.import_module(f"{_CORE_MODULE_NAME}.events")
+
+#: The explicit settings object (``core.settings.NestQuestSettings``)
+#: the snapshot builder's ``settings`` parameter takes.
+core_settings = importlib.import_module(f"{_CORE_MODULE_NAME}.settings")
+
+#: The durable settings store (``core.settings_store.load_settings`` /
+#: ``update_settings``) the admin plane's settings routes read and
+#: write — the API's OWN settings source: a validated JSON document in
+#: the existing ``nestquest_meta_state`` table, resolved through the
+#: same core settings validators (the integration's HA config-entry
+#: options remain a temporary separate source until Feature 18 wires
+#: the client to the API).
+core_settings_store = importlib.import_module(
+    f"{_CORE_MODULE_NAME}.settings_store"
+)
+
+#: The children business layer (``core.children.create_child`` et al.)
+#: the admin plane's children routes call.
+core_children = importlib.import_module(f"{_CORE_MODULE_NAME}.children")
+
+#: The quest-definition business layer (``core.quest_definitions`` —
+#: ``create_quest_definition``, ``edit_quest_definition``,
+#: ``set_quest_definition_active``) the admin plane's quest-definition
+#: routes call.
+core_quest_definitions = importlib.import_module(
+    f"{_CORE_MODULE_NAME}.quest_definitions"
+)
+
+#: The recurrence model (``core.recurrence.ScheduleRule`` and
+#: ``RuleValidationError``) the quest-definition routes build request
+#: rules with — the model validates at construction, the routes never
+#: re-implement rule validation.
+core_recurrence = importlib.import_module(f"{_CORE_MODULE_NAME}.recurrence")
+
+#: The presence model (``core.presence.PresenceEngine``,
+#: ``PresenceSchedule``, ``PresenceOverride``) the admin plane's
+#: presence routes serialize and the tests resolve presence with.
+core_presence = importlib.import_module(f"{_CORE_MODULE_NAME}.presence")
+
+#: The presence-write business layer
+#: (``core.presence_management.set_presence_schedule`` et al.) the
+#: admin plane's presence routes call — the ONE implementation the HA
+#: services share.
+core_presence_management = importlib.import_module(
+    f"{_CORE_MODULE_NAME}.presence_management"
+)
+
+#: The typed presence DAOs (``core.dao_presence``) the admin-plane tests
+#: read stored schedules and overrides back through.
+core_dao_presence = importlib.import_module(
+    f"{_CORE_MODULE_NAME}.dao_presence"
+)
+
+#: The materialization walk (``core.materialize.materialize``,
+#: ``regenerate_for_definition``, ``regenerate_for_child``) the admin
+#: plane's regenerate route calls — the same walk the integration's
+#: config/presence changes trigger.
+core_materialize = importlib.import_module(f"{_CORE_MODULE_NAME}.materialize")
+
+#: The core constants module (``core.const.DEFAULT_HORIZON_DAYS``) the
+#: regenerate route sizes the household rolling horizon with.
+core_const = importlib.import_module(f"{_CORE_MODULE_NAME}.const")
+
+#: The typed child DAO (``core.dao_children.ChildrenDao.get``) the
+#: regenerate route reads a child's existence with before delegating.
+core_dao_children = importlib.import_module(
+    f"{_CORE_MODULE_NAME}.dao_children"
+)
+
+#: The typed definition DAO (``core.dao_rules.QuestDefinitionsDao.get``)
+#: the regenerate route reads a definition's existence with before
+#: delegating.
+core_dao_rules = importlib.import_module(f"{_CORE_MODULE_NAME}.dao_rules")
+
+#: The HA-free missed sweep (``core.sweep.run_missed_sweep`` +
+#: ``SWEEP_WATERMARK_KEY``) the admin plane's trigger route calls and
+#: the daily scheduler runs — the ONE sweep policy the integration's
+#: bus shim shares.
+core_sweep = importlib.import_module(f"{_CORE_MODULE_NAME}.sweep")
+
+__all__ = [
+    "core",
+    "core_children",
+    "core_completion",
+    "core_const",
+    "core_dao_children",
+    "core_dao_presence",
+    "core_dao_rules",
+    "core_db",
+    "core_events",
+    "core_history",
+    "core_materialize",
+    "core_migrations",
+    "core_presence",
+    "core_presence_management",
+    "core_quest_definitions",
+    "core_recurrence",
+    "core_snapshot",
+    "core_settings",
+    "core_settings_store",
+    "core_sweep",
+]

@@ -159,9 +159,50 @@ Sensors the automations read: `sensor.nestquest_<child>_quests_due_today`
 
 Run these steps in order to display the NestQuest panel on a TouchHub
 wall device. The panel is an HA Lovelace dashboard, so the kiosk browser
-is simply a Home Assistant client.
+is simply a Home Assistant client. The path below is zero-config: the
+integration registers its panel dashboard itself on setup, so no YAML
+and no hand-built views are involved.
 
-1. **Create a dedicated kiosk user.** In *Settings → People → Users*, add
+1. **Install the integration and add the config entry.** Install
+   NestQuest via HACS or manually (see Installation above) and restart
+   Home Assistant. Then, in *Settings → Devices & Services*, click
+   **Add Integration**, search for **NestQuest**, and submit the flow —
+   it has no fields; it just creates the single config entry. Then open
+   the entry, click **Configure**, and fill the panel-plane API
+   connection in the options flow:
+
+   - **NestQuest API base URL** — the full `http://host:port` URL of
+     your NestQuest API service (default `http://127.0.0.1:8000`).
+   - **Panel service token** — the token the panel presents to the API
+     service as its Bearer credential. It may stay empty until you have
+     one; a pasted token must be unpadded.
+
+   The form's remaining fields (panel idle timeout, coordinator update
+   interval, last-good snapshot staleness) have defaults that serve the
+   panel and need no change here.
+
+2. **The panel dashboard appears automatically.** On setup the
+   integration registers one storage-mode Lovelace dashboard: a sidebar
+   entry titled **NestQuest** at the URL path `/nestquest`, whose stored
+   config is nothing but the **`custom:nestquest-party` strategy**
+   (`strategy: { type: custom:nestquest-party }`). The strategy
+   generates the views at render time from the household roster:
+
+   - **The Party** — the party-board view at `/nestquest/party`; the
+     dashboard root `/nestquest` shows it as the first view.
+   - one quest-log view per child at `/nestquest/<child-slug>`
+     ("Ada's Quest Log", …), in roster order.
+
+   Nothing is hand-configured: no YAML, no manual views, no
+   `child_order`, no `quest_log_path`/`board_path` — the board and the
+   quest logs compute their navigation paths from the dashboard's own
+   URL — and every generated view is already in **Panel** layout (see
+   the two constraints below). If the Lovelace surfaces are unavailable
+   (for example when Lovelace runs in YAML mode), setup logs a warning
+   and skips the registration; create the dashboard manually with the
+   same strategy as described in the manual alternative below.
+
+3. **Create a dedicated kiosk user.** In *Settings → People → Users*, add
    a new user for the wall device. Make it **non-admin**, and ensure it is
    not in the NestQuest admin allowlist. The allowlist blocks the NestQuest
    **admin** operations — `uncomplete_quest`, `create_quest_definition`,
@@ -174,65 +215,100 @@ is simply a Home Assistant client.
    Assistant user it may also reach other permitted Home Assistant entities
    and services.
 
-2. **Build a dashboard with only the NestQuest panel cards.** Create a
-   Lovelace dashboard whose **URL slug is `nestquest`** (Settings →
-   Dashboards → Edit → URL slug). A functional panel needs **two** views
-   in that dashboard, each with its own card config from
-   `design/ENTITIES-AND-SERVICES.md` §4. Give the views these exact URL
-   paths (the path segment after the dashboard slug):
+4. **Open the dashboard and point TouchHub at it.** Open
+   `http://<home-assistant>/nestquest` in a browser first and check the
+   party board renders with your children's crests. Then, in the
+   TouchHub launcher, add the **Home Assistant Lovelace** app to the
+   dock and paste the dashboard URL from step 2 — the dashboard root,
+   `/nestquest` (TouchHub loads that URL directly as the kiosk landing
+   page). Set TouchHub **Auto-Return** to a value GREATER than the
+   quest log's `idle_return_seconds` (default 40s) — recommend **60s or
+   higher**. If Auto-Return is at or below 40s, TouchHub returns to its
+   launcher before the quest log's idle return can navigate back to the
+   party board.
 
-   - **View 1 path `board`** (URL `/nestquest/board`) — party board
-     (`type: custom:nestquest-party-board-card`): the household quest
-     board. Set `weather_entity` (optional; the dock falls back to
-     date/time), `quest_log_path: /nestquest/log` (the view the crest tap
-     navigates to), and `child_order: [slug1, slug2, slug3]` listing each
-     child's slug in display order.
-
-   - **View 2 path `log`** (URL `/nestquest/log`) — quest log
-     (`type: custom:nestquest-quest-log-card`): the per-child quest screen
-     the party board hops to. Set `board_path: /nestquest/board` (the
-     party-board view to return to), `weather_entity`,
-     `idle_return_seconds` (must be shorter than TouchHub Auto-Return),
-     `confirm_timeout_seconds`, and `complete_screen_seconds`. The quest
-     log reads the selected child's slug from the view's URL path, so the
-     board → log hop is a plain Lovelace navigation.
-
-    Each view's layout MUST be set to **Panel** (Edit Dashboard → pencil on the
-    view → View type: Panel). Home Assistant's default Masonry layout constrains
-    the 1080px-tall NestQuest card to a narrow column; Panel (single-card)
-    layout is what renders the card full-screen at 1920×1080.
-
-    The dashboard contains only the NestQuest panel card for each view —
-    no other cards, no admin controls.
-
-   The `quest_log_path` and `board_path` values must match the dashboard
-   slug and view paths above: `/<slug>/<view>`. If you chose `nestquest`
-   as the dashboard slug with view paths `board` and `log`, the card
-   configs are already correct. If you pick different names, substitute
-   your actual paths in **both** card configs — e.g. a dashboard slug
-   `chores` with view paths `main` and `history` needs
-   `quest_log_path: /chores/history` and `board_path: /chores/main`.
-   Navigation between the two views fails (the crest tap or back button
-   lands on a 404) if the card config paths do not match the dashboard
-   slug and view paths exactly.
-
-   See `design/ENTITIES-AND-SERVICES.md` §4 for the full card YAML.
-
-3. **Point TouchHub at it.** In the TouchHub launcher, add the **Home
-   Assistant Lovelace** app to the dock and paste the dashboard URL from
-   step 2 — the party-board view URL, e.g. `/nestquest/board` (TouchHub
-   loads that URL directly as the kiosk landing page). Set TouchHub
-   **Auto-Return** to a value GREATER than the quest log's
-   `idle_return_seconds` (default 40s) — recommend **60s or higher**. If
-   Auto-Return is at or below 40s, TouchHub returns to its launcher before
-   the quest log's idle return can navigate back to the party board.
-
-4. **Log the kiosk session in.** Sign in on the device as the dedicated
-   kiosk user from step 1, and leave that session logged in.
+5. **Log the kiosk session in.** Sign in on the device as the dedicated
+   kiosk user from step 3, and leave that session logged in.
 
 TouchHub loads the dashboard URL directly. The NestQuest cards are normal
 Lovelace cards, not an iframe, so no Home Assistant framing setting is
 needed.
+
+### The two constraints
+
+- **Panel layout.** Every view must be in **Panel** (single-card)
+  layout: Home Assistant's default Masonry layout constrains the
+  1080px-tall NestQuest card to a narrow column, while Panel renders the
+  card full-screen at 1920×1080. The zero-config path already satisfies
+  the requirement — the strategy generates every view as
+  `type: panel` — while the manual alternative below requires setting
+  the layout by hand on each view (Edit Dashboard → pencil on the view
+  → View type: Panel).
+
+- **TouchHub Auto-Return.** TouchHub's **Auto-Return** must be greater
+  than the quest log's `idle_return_seconds` (default 40s) — recommend
+  **60s or higher** — so the launcher does not reclaim the wall device
+  before the quest log's own idle return navigates back to the party
+  board.
+
+### Manual alternative: build the dashboard by hand
+
+If you prefer not to use the zero-config dashboard above — or its
+registration was skipped — configure a Lovelace dashboard whose **URL
+slug is `nestquest`** (Settings → Dashboards → Edit → URL slug)
+yourself. Two options, in decreasing order of convenience:
+
+- **Use the strategy.** Give the dashboard
+
+  ```yaml
+  strategy:
+    type: custom:nestquest-party
+  ```
+
+  and no views of your own — the strategy generates the party-board and
+  quest-log views (each already in Panel layout) from the household
+  roster at render time. Optional `url_path` and `weather_entity` keys
+  may sit beside `strategy:`.
+
+- **Build the two views by hand.** A functional panel needs **two**
+  views in that dashboard, each with its own card config from
+  `design/ENTITIES-AND-SERVICES.md` §4. Give the views these exact URL
+  paths (the path segment after the dashboard slug):
+
+  - **View 1 path `board`** (URL `/nestquest/board`) — party board
+    (`type: custom:nestquest-party-board-card`): the household quest
+    board. Set `weather_entity` (optional; the dock falls back to
+    date/time), `quest_log_path: /nestquest/log` (the view the crest tap
+    navigates to), and `child_order: [slug1, slug2, slug3]` listing each
+    child's slug in display order.
+
+  - **View 2 path `log`** (URL `/nestquest/log`) — quest log
+    (`type: custom:nestquest-quest-log-card`): the per-child quest screen
+    the party board hops to. Set `board_path: /nestquest/board` (the
+    party-board view to return to), `weather_entity`,
+    `idle_return_seconds` (must be shorter than TouchHub Auto-Return —
+    see the two constraints above), `confirm_timeout_seconds`, and
+    `complete_screen_seconds`. The quest log reads the selected child's
+    slug from the view's URL path, so the board → log hop is a plain
+    Lovelace navigation.
+
+  The dashboard contains only the NestQuest panel card for each view —
+  no other cards, no admin controls. Each view's layout MUST be set to
+  **Panel** — see the two constraints above for why; the strategy
+  generates it for you, hand-built views do not get it for free.
+
+  The `quest_log_path` and `board_path` values must match the dashboard
+  slug and view paths above: `/<slug>/<view>`. If you chose `nestquest`
+  as the dashboard slug with view paths `board` and `log`, the card
+  configs are already correct. If you pick different names, substitute
+  your actual paths in **both** card configs — e.g. a dashboard slug
+  `chores` with view paths `main` and `history` needs
+  `quest_log_path: /chores/history` and `board_path: /chores/main`.
+  Navigation between the two views fails (the crest tap or back button
+  lands on a 404) if the card config paths do not match the dashboard
+  slug and view paths exactly.
+
+  See `design/ENTITIES-AND-SERVICES.md` §4 for the full card YAML.
 
 ## Developer Setup and Testing
 

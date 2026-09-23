@@ -24,15 +24,22 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import re
 import sys
 import tempfile
+import unicodedata
 import weakref
 from dataclasses import dataclass
+from html.entities import name2codepoint
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from unidecode import unidecode as _unidecode
+
+from tests.admin_jwt_harness import ADMIN_KEY, KID, AdminRunner, jwks_for
 
 # ---------------------------------------------------------------------------
 # Homeassistant module provisioning (explicitly mock-only).
@@ -43,11 +50,13 @@ _HA_MODULES = (
     "homeassistant.config_entries",
     "homeassistant.data_entry_flow",
     "homeassistant.exceptions",
+    "homeassistant.util",
     "homeassistant.helpers",
     "homeassistant.helpers.config_validation",
     "homeassistant.helpers.entity",
     "homeassistant.helpers.event",
     "homeassistant.helpers.update_coordinator",
+    "homeassistant.helpers.aiohttp_client",
     "homeassistant.components",
     "homeassistant.components.sensor",
     "homeassistant.components.binary_sensor",
@@ -90,11 +99,13 @@ for _parent, _child in (
     ("homeassistant", "data_entry_flow"),
     ("homeassistant", "core"),
     ("homeassistant", "exceptions"),
+    ("homeassistant", "util"),
     ("homeassistant", "helpers"),
     ("homeassistant.helpers", "config_validation"),
     ("homeassistant.helpers", "entity"),
     ("homeassistant.helpers", "event"),
     ("homeassistant.helpers", "update_coordinator"),
+    ("homeassistant.helpers", "aiohttp_client"),
     ("homeassistant", "components"),
     ("homeassistant.components", "sensor"),
     ("homeassistant.components", "binary_sensor"),
@@ -211,6 +222,68 @@ class Unauthorized(HomeAssistantError):
 _exceptions_mock.HomeAssistantError = HomeAssistantError
 _exceptions_mock.ConfigEntryNotReady = ConfigEntryNotReady
 _exceptions_mock.Unauthorized = Unauthorized
+
+
+# ---------------------------------------------------------------------------
+# homeassistant.util.slugify: a faithful stand-in for the real slugifier.
+#
+# Real HA (2024.6) wraps python-slugify's frozen legacy pipeline and answers
+# its "unknown" sentinel when a non-empty name slugs to nothing.  The stub
+# mirrors that pipeline step for step — quotes to dashes, NFKD-normalize,
+# TRANSLITERATE through unidecode (the backend python-slugify's "auto" mode
+# prefers, and a dev dependency here), decode HTML entities, NFKD again,
+# lowercase, drop quotes, fold runs of non-[a-z0-9-] to one dash, collapse
+# and strip dashes, then map dashes to the requested separator — and was
+# verified byte-for-byte against real python-slugify across Latin, Cyrillic,
+# CJK and Greek household-name shapes.  Transliteration is the point: HA
+# derives the per-child entity ids from a name like "京子" as
+# "nestquest_jing_zi_…", so the roster's slugs must transliterate too,
+# never dropping characters into "unknown".  Deliberately NOT truncating:
+# real slugify caps nothing; the entity registry truncates the full
+# entity_id instead.
+# ---------------------------------------------------------------------------
+_HA_QUOTE_PATTERN = re.compile(r"[']+")
+_HA_CHAR_ENTITY_PATTERN = re.compile(r"&(%s);" % "|".join(name2codepoint))
+_HA_DECIMAL_PATTERN = re.compile(r"&#(\d+);")
+_HA_HEX_PATTERN = re.compile(r"&#x([\da-fA-F]+);")
+_HA_NUMBERS_PATTERN = re.compile(r"(?<=\d),(?=\d)")
+_HA_DISALLOWED_CHARS_PATTERN = re.compile(r"[^-a-zA-Z0-9]+")
+_HA_DUPLICATE_DASH_PATTERN = re.compile(r"-{2,}")
+
+
+def _ha_slugify(text: str | None, *, separator: str = "_") -> str:
+    """Faithful homeassistant.util.slugify stand-in (see section above)."""
+    if text == "" or text is None:
+        return ""
+    text = str(text)
+    text = _HA_QUOTE_PATTERN.sub("-", text)
+    text = unicodedata.normalize("NFKD", text)
+    text = _unidecode(text)
+    text = _HA_CHAR_ENTITY_PATTERN.sub(
+        lambda match: chr(name2codepoint[match.group(1)]), text
+    )
+    try:
+        text = _HA_DECIMAL_PATTERN.sub(
+            lambda match: chr(int(match.group(1))), text
+        )
+    except (ValueError, OverflowError):
+        pass
+    try:
+        text = _HA_HEX_PATTERN.sub(
+            lambda match: chr(int(match.group(1), 16)), text
+        )
+    except (ValueError, OverflowError):
+        pass
+    text = unicodedata.normalize("NFKD", text)
+    text = text.lower()
+    text = _HA_QUOTE_PATTERN.sub("", text)
+    text = _HA_NUMBERS_PATTERN.sub("", text)
+    text = _HA_DISALLOWED_CHARS_PATTERN.sub("-", text)
+    text = _HA_DUPLICATE_DASH_PATTERN.sub("-", text).strip("-")
+    return "unknown" if text == "" else text.replace("-", separator)
+
+
+_ha_mock("homeassistant.util").slugify = _ha_slugify
 
 
 @dataclass
@@ -361,6 +434,15 @@ class BinarySensorEntity(Entity):
         return self._attr_device_class
 
 
+class UpdateFailed(HomeAssistantError):
+    """Stand-in mirroring homeassistant.helpers.update_coordinator.UpdateFailed.
+
+    The exception an update pass raises to report a failed fetch: the
+    coordinator records ``last_update_success = False`` instead of
+    propagating it out of the refresh.
+    """
+
+
 class DataUpdateCoordinator:
     """Functional stand-in for HA's DataUpdateCoordinator.
 
@@ -369,8 +451,20 @@ class DataUpdateCoordinator:
     ``async_add_listener``/``async_update_listeners`` for entity
     subscription, ``async_refresh``/``async_config_entry_first_refresh``
     driving the subclass's ``_async_update_data``, ``last_update_success``,
-    and ``data``.  Interval scheduling is NOT simulated (no real clock
-    ticks in tests) — tests drive refreshes directly.
+    ``last_exception``, and ``data``.  Interval scheduling is NOT
+    simulated (no real clock ticks in tests) — tests drive refreshes
+    directly.
+
+    The failure contract mirrors real HA exactly (it is the trap this
+    harness once hid): an update failure NEVER propagates out of
+    ``async_refresh`` — the coordinator records
+    ``last_update_success = False``, keeps its last good ``data``, and
+    still notifies listeners so entities re-render unavailable — and
+    ``async_config_entry_first_refresh`` wraps ANY failed pass in
+    :class:`ConfigEntryNotReady`, with the original error only
+    surviving as ``__cause__``.  A stand-in that re-raised the raw
+    update error would let setup code key on the original exception
+    type — a clause real HA can never reach.
     """
 
     def __init__(self, hass, logger, *, name=None, update_interval=None):
@@ -380,6 +474,7 @@ class DataUpdateCoordinator:
         self.update_interval = update_interval
         self.data = None
         self.last_update_success = False
+        self.last_exception = None
         self._listeners = []
 
     def async_add_listener(self, update_callback, context=None):
@@ -399,18 +494,35 @@ class DataUpdateCoordinator:
             callback()
 
     async def async_refresh(self):
-        """Run one update pass and notify listeners."""
+        """Run one update pass and notify listeners.
+
+        Mirrors HA: a failed update pass is RECORDED, never raised —
+        ``last_update_success`` goes False, the exception lands on
+        ``last_exception``, and listeners still fire; only cancellation
+        propagates.
+        """
         try:
             self.data = await self._async_update_data()
             self.last_update_success = True
-        except BaseException:
+        except Exception as err:
             self.last_update_success = False
-            raise
+            self.last_exception = err
         self.async_update_listeners()
 
     async def async_config_entry_first_refresh(self):
-        """First refresh at config-entry setup (alias of refresh)."""
+        """First refresh at config-entry setup, per HA's real contract.
+
+        HA's real ``async_config_entry_first_refresh`` wraps ANY failed
+        update pass in ``ConfigEntryNotReady`` — the original error
+        survives only as ``__cause__`` — so setup code that must
+        tolerate a failed first refresh keys on ConfigEntryNotReady,
+        never on the original exception type.
+        """
         await self.async_refresh()
+        if not self.last_update_success:
+            raise ConfigEntryNotReady(
+                f"error fetching {self.name} data: {self.last_exception}"
+            ) from self.last_exception
 
     async def async_shutdown(self):
         """Release listeners on teardown."""
@@ -420,6 +532,7 @@ class DataUpdateCoordinator:
 _update_coordinator_mock = _ha_mock("homeassistant.helpers.update_coordinator")
 _update_coordinator_mock.DataUpdateCoordinator = DataUpdateCoordinator
 _update_coordinator_mock.CoordinatorEntity = CoordinatorEntity
+_update_coordinator_mock.UpdateFailed = UpdateFailed
 
 _entity_mock = _ha_mock("homeassistant.helpers.entity")
 _entity_mock.DeviceInfo = DeviceInfo
@@ -696,6 +809,174 @@ def wire_entry_to_registry(entry, registry: ListenerRegistry):
     return entry
 
 
+class StubSnapshotClient:
+    """A no-network stand-in for the API client's snapshot surface.
+
+    Answers ``get_snapshot()`` from a scripted queue of outcomes — a
+    payload dict or an exception per call, consumed in order — and
+    records every call.  When the queue is exhausted it re-serves the
+    last outcome, so setup's first refresh and a test's explicit
+    refreshes poll the same scripted state.  Register it (or any
+    scripted client) with :func:`set_coordinator_client` BEFORE setup.
+    """
+
+    def __init__(self, *outcomes) -> None:
+        self.calls = 0
+        self._outcomes = list(outcomes)
+        self._last = outcomes[-1] if outcomes else None
+        #: The SSE frames the stand-in "published" (the API service's
+        # stream content), drained by :func:`refire_api_transitions`.
+        self.published_frames = []
+
+    async def get_snapshot(self):
+        self.calls += 1
+        if not self._outcomes:
+            # Re-serve the last outcome: setup's first refresh and the
+            # test's explicit pass both poll the same scripted state.
+            outcome = self._last
+        else:
+            outcome = self._outcomes.pop(0)
+            self._last = outcome
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+class ScriptedPanelClient(StubSnapshotClient):
+    """Snapshot + completion stand-in for the API service's panel plane.
+
+    Serves the scripted snapshot outcomes (like
+    :class:`StubSnapshotClient`), records ``complete_instance`` calls
+    the way the panel route receives them, optionally fails them the
+    way the client types the failure, and carries the SSE frames the
+    API "published" in ``published_frames`` for
+    :func:`refire_api_transitions` to deliver.  Everything the
+    integration reads over the wire, no network.
+    """
+
+    def __init__(self, *outcomes) -> None:
+        super().__init__(*outcomes)
+        self.complete_calls: list[tuple[int, int]] = []
+        self.published_frames: list[tuple[str, dict]] = []
+        #: When set, the next ``complete_instance`` raises this instead
+        # of succeeding (a typed NestQuestApiError in production).
+        self.fail_complete_with: BaseException | None = None
+
+    async def complete_instance(
+        self, instance_id: int, actor_child_id: int
+    ) -> dict:
+        self.complete_calls.append((instance_id, actor_child_id))
+        if self.fail_complete_with is not None:
+            raise self.fail_complete_with
+        return {"status": "done"}
+
+
+def set_coordinator_client(entry, client):
+    """Register a scripted client for ``entry``'s coordinator factory."""
+    import custom_components.nestquest.coordinator as coordinator_module
+
+    coordinator_module._COORDINATOR_CLIENT_OVERRIDES[entry.entry_id] = client
+    return client
+
+
+@pytest.fixture(autouse=True)
+def coordinator_client_from_test_override():
+    """Resolve every entry's coordinator client through the test seam.
+
+    The integration's setup builds its API client through
+    ``coordinator_client_from_entry``; this fixture swaps that factory
+    for a test one handing out the client registered with
+    :func:`set_coordinator_client`, or — for an entry with no scripted
+    client — a stub serving an EMPTY but valid household snapshot (the
+    shape the API's panel route returns before any child exists; the
+    real client would need aiohttp, which this mock-only harness does
+    not provide).
+    """
+    import datetime
+    import unittest.mock as mock
+
+    import custom_components.nestquest as nq_mod
+    import custom_components.nestquest.coordinator as coordinator_module
+
+    _COORDINATOR_CLIENT_OVERRIDES = (
+        coordinator_module._COORDINATOR_CLIENT_OVERRIDES
+    )
+
+    def _factory(hass, entry, **kwargs):
+        override = _COORDINATOR_CLIENT_OVERRIDES.get(entry.entry_id)
+        if override is not None:
+            return override
+        return StubSnapshotClient(
+            {
+                "today_iso": datetime.date.today().isoformat(),
+                "cycle_day": 0,
+                "children": [],
+            }
+        )
+
+    _COORDINATOR_CLIENT_OVERRIDES.clear()
+    patcher = mock.patch.object(
+        nq_mod, "coordinator_client_from_entry", _factory
+    )
+    patcher.start()
+    yield
+    patcher.stop()
+    _COORDINATOR_CLIENT_OVERRIDES.clear()
+
+
+async def refire_api_transitions(hass, entry, client):
+    """Deliver the SSE frames the stand-in client has published so far
+    through the integration's SSE subscription — the production event
+    path.
+
+    Since Feature 18 the ``complete_quest`` service fires no local
+    bus event: the API service builds and publishes the transition
+    frames on its SSE stream, and the integration's subscription
+    (:mod:`custom_components.nestquest.sse`) re-fires each frame on
+    the bus.  This helper streams the frames the stand-in client
+    published (``client.published_frames``) through a real
+    :class:`~custom_components.nestquest.sse.NestQuestEventStream`
+    and waits (bounded) until the bus has re-fired every one of them.
+    """
+    import asyncio
+
+    from custom_components.nestquest.sse import NestQuestEventStream
+
+    frames, client.published_frames = client.published_frames, []
+
+    class _ScriptedStream:
+        """A healthy stream: the frames, then it stays open."""
+
+        def __init__(self, frames) -> None:
+            self._frames = frames
+
+        def stream_events(self):
+            async def _gen():
+                for frame in self._frames:
+                    yield frame
+                await asyncio.Event().wait()
+
+            return _gen()
+
+    before = {etype: len(hass.bus.fired(etype)) for etype, _ in frames}
+    expected = len(frames)
+    manager = NestQuestEventStream(hass, _ScriptedStream(frames))
+    manager.start()
+    try:
+        async with asyncio.timeout(2):
+            while True:
+                delivered = sum(
+                    len(hass.bus.fired(etype)) - before[etype]
+                    for etype, _ in frames
+                )
+                if delivered >= expected:
+                    break
+                await asyncio.sleep(0.01)
+    finally:
+        await manager.stop()
+    return frames
+
+
 class _HassNamespace(SimpleNamespace):
     """SimpleNamespace subclass so the hass stub can hold weak references."""
 
@@ -829,6 +1110,24 @@ def make_hass() -> tuple:
     return hass, registry
 
 
+def executor_for(hass):
+    """Return a dynamic executor callable backed by ``hass.async_add_executor_job``.
+
+    The wrapper resolves ``hass.async_add_executor_job`` on every call, so a
+    test that swaps it after constructing the database (to gate or fail
+    specific jobs) is observed without rebuilding the wrapper — mirroring
+    the pre-extraction db.py, which read the attribute dynamically off
+    ``hass``.  Use this for cancellation/gating tests that reassign
+    ``hass.async_add_executor_job``; plain call sites can pass
+    ``hass.async_add_executor_job`` directly.
+    """
+
+    async def _executor(fn, *args, **kwargs):
+        return await hass.async_add_executor_job(fn, *args, **kwargs)
+
+    return _executor
+
+
 @pytest.fixture
 async def hass():
     """Provide a standard-shaped hass fixture bound to the running test loop.
@@ -899,3 +1198,24 @@ def make_config_flow_entry():
         return SimpleNamespace(domain=domain, entry_id=entry_id)
 
     return _factory
+
+
+# ---------------------------------------------------------------------------
+# Admin-plane API fixtures (shared by the admin-plane test modules).
+#
+# The local-key/stubbed-JWKS harness itself lives in
+# :mod:`tests.admin_jwt_harness` (imported by name, the same pattern as
+# tests.blueprint_helpers); these fixtures hand its runner to every test
+# module in tests/ without re-declaring it.
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def temp_db_path(tmp_path: Path) -> str:
+    """A fresh per-test SQLite path under pytest's tmp_path."""
+    return str(tmp_path / "nestquest.db")
+
+
+@pytest.fixture
+async def admin_client(temp_db_path: str) -> httpx.AsyncClient:
+    """An app client whose provider publishes the admin test key."""
+    async with AdminRunner(temp_db_path, jwks_for(ADMIN_KEY, KID)) as client:
+        yield client

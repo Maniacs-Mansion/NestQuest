@@ -1,5 +1,136 @@
 # NestQuest Release Notes
 
+## Version 0.6.0 — 2026-09-23
+
+### Scope
+
+Sixth release of NestQuest, promoting the re-imagined architecture
+(Features 15, 16, 18 and 20) and the foreground development-orchestration
+tooling from `dev` onto 0.5.0. This is a major architectural change: the
+Home Assistant integration becomes a thin client of a standalone NestQuest
+API service that owns the database.
+
+- **Feature 15 — Domain Core Extraction:** all domain code (schema,
+  migrations, database access, the DAOs, the pure recurrence/presence
+  engines, materialization, completion, the SSE-free event payload
+  builders, the panel snapshot builder, the children/definitions/allowlist
+  business layers, and an explicit settings object) now lives in a
+  Home-Assistant-free package bundled inside the integration at
+  `custom_components/nestquest/core/`. The SQLite schema and migration
+  versions are unchanged, so an existing `nestquest.db` opens without
+  migration. Covered by a no-Home-Assistant end-to-end smoke test.
+  (Tasks d0b691d8, 510c1f78, 4dd8f870, 628473ad.)
+- **Feature 16 — NestQuest API Service:** a standalone FastAPI service
+  (`api/`) that imports `core/` and is the only writer of the database.
+  Panel plane (`/api/v1/panel/*`) is authenticated by a static service
+  token: household snapshot and an idempotent complete route. Admin plane
+  (`/api/v1/admin/*`): children, quest definitions, presence
+  schedule/override, uncomplete, regenerate, history query + CSV export,
+  and settings — authenticated by an Authentik OIDC JWT (issuer, audience,
+  JWKS signature and expiry) plus membership in `nestquest-admins`, with
+  the panel service token rejected outright. A server-sent-events stream
+  publishes the quest-completed, quest-uncompleted, quest-missed and
+  child-day-complete transitions; the missed sweep runs in the API with a
+  cross-process-safe watermark. `/health` and the OpenAPI document are
+  served. (Tasks 042dfc5c, ae7e90ae, 1860ef76, 4d7bae00, 44c93cfd,
+  e70e6bfb, 0f2afb29, e4845baa, b586a2f1, e4a9d31b, da0226b3, 2d2dda53,
+  2b3de7e5, 9047a97b, 9a118da9, 058c7b69, a232c4f5.)
+- **Feature 18 — HA Integration as API Client:** the integration no longer
+  owns a database. It polls `GET /api/v1/panel/snapshot` and builds the
+  existing sensors (entity ids and per-child instance payload shape
+  unchanged), subscribes to the SSE stream and re-fires the four HA bus
+  events, proxies `nestquest.complete_quest` to the panel complete route,
+  and caches the last-good snapshot so a brief API outage does not blank
+  the panel. The HA admin services and the service permission gate are
+  removed; only the panel completion path remains. (Tasks 37d5e806,
+  6e70d166, b1ed9c45, 47c7c90e, d25b875f, d04f5bf3, ad67fc44.)
+- **Feature 20 — Zero-Config Panel Dashboard:** the panel installs with no
+  hand-written card YAML and no manual dashboard creation. The cards
+  auto-discover children from a household entity attribute (ordered by the
+  API's `sort_order`), a Lovelace dashboard strategy generates the
+  party-board view and one quest-log view per child at render time with
+  computed navigation paths, and the integration registers the dashboard
+  on first setup. Navigation and the panel transitions match the design
+  mockups. (Tasks 1b6d91d2, c859af23, c2d4dd8e, 107b8fbe, 50067c1f,
+  fc69c940, 67775be9.)
+- **Development orchestration tooling:** durable OpenCode controller and
+  role launchers, the foreground terminal orchestrator, the independent
+  review/approval gates, and the automatic release-preparation policy.
+
+### Requirements
+
+- Minimum Home Assistant version: **2024.6.0**.
+- A running NestQuest API service, reachable at the base URL and panel
+  service token configured in the integration options. The API service
+  source ships in `api/`; there is no container image, compose file or
+  deployment runbook in this release, and Feature 17 — the deployment
+  (TLS reverse proxy, Authentik, network separation, backups) — is **not**
+  part of this release and must be completed before the integration is
+  functional. See `docs/ARCHITECTURE.md` for the target design.
+
+### Breaking changes
+
+- **The HA integration no longer owns a database.** It reads exclusively
+  from the NestQuest API. The local `nestquest.db` is no longer opened,
+  migrated or written by the integration (the file is left untouched on
+  disk). Without a reachable API the entities become unavailable after the
+  configured staleness threshold; the panel serves the last-good snapshot
+  in the meantime.
+- **HA admin services are removed** (`uncomplete`, quest-definition
+  create/update/set-active, presence pattern/override, CSV export,
+  `manage_child`, `regenerate`) and the HA-side permission gate is gone.
+  Admin operations move to the API, and — once Feature 19 lands — the
+  admin PWA. Any automation that called an admin service must be
+  repointed at the API.
+- **Logger namespaces moved** under `custom_components.nestquest.core.*`:
+  the migrations runner now logs under
+  `custom_components.nestquest.core.migrations` (previously
+  `custom_components.nestquest.migrations`), and the children registry and
+  admin allowlist log under `custom_components.nestquest.core.children` and
+  `custom_components.nestquest.core.admin_allowlist`. The parent
+  `custom_components.nestquest` logger still catches all three; only users
+  who pinned a leaf logger name by its old spelling must update.
+- **The panel installs with no configuration.** `child_order`,
+  `quest_log_path` and `board_path` are no longer required (an explicit
+  value still wins). The integration registers a `custom:nestquest-party`
+  dashboard on setup; point TouchHub at it.
+- **Schema is unchanged at version 7** — no migration runs on upgrade.
+
+### Known Limitations
+
+- **Feature 17 (API deployment and identity) is not in this release.** The
+  API service source ships in `api/`, but no container image, compose
+  file, TLS reverse proxy, Authentik application/provider/`nestquest-admins`
+  group, proven network separation of the panel routes, or backup/restore
+  is included. Feature 17's containerization groundwork was completed on
+  its own feature branch, which is **not** merged into `dev` and therefore
+  is not part of this release. Until that deployment is completed the
+  integration has nothing to talk to.
+- **Feature 19 (admin PWA) is not in this release.** There is no admin UI
+  in 0.6.0; admin operations are reachable only through the API directly.
+- Moving the household database from Home Assistant to the API box is a
+  manual file copy (the schema is unchanged).
+- Single household; single API service.
+
+### Rollback
+
+Schema version is unchanged (7), so no migration is involved in either
+direction. Nevertheless **back up `nestquest.db` (plus `-wal`/`-shm`)
+before upgrading**: 0.6.0 never touches it, and a downgrade to 0.5.0
+resumes using exactly that file.
+
+**HACS installs:**
+
+1. Downgrade via HACS (HACS > Integrations > NestQuest > Redownload > 0.5.0).
+2. Restart Home Assistant.
+
+**Manual installs:**
+
+1. Replace `custom_components/nestquest/` with the 0.5.0 tree.
+2. Restart Home Assistant.
+
+**Repository operators:** git-revert the 0.6.0 release merge on `main`.
+
 ## Version 0.5.0 — 2026-09-18
 
 ### Scope

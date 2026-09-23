@@ -7,20 +7,20 @@ import re
 
 import pytest
 
-from custom_components.nestquest.dao_children import ChildrenDao
+from custom_components.nestquest.core.dao_children import ChildrenDao
 from custom_components.nestquest.const import DEFAULT_HORIZON_DAYS
-from custom_components.nestquest.dao_instances import (
+from custom_components.nestquest.core.dao_instances import (
     CompletionEventsDao,
     QuestInstancesDao,
 )
-from custom_components.nestquest.dao_rules import (
+from custom_components.nestquest.core.dao_rules import (
     QuestDefinitionsDao,
     ScheduleRulesDao,
     schedule_rule_to_storage,
 )
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.migrations import apply_migrations
-from custom_components.nestquest.quest_definitions import (
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.migrations import apply_migrations
+from custom_components.nestquest.core.quest_definitions import (
     CreatedQuestDefinition,
     assign_child,
     create_quest_definition,
@@ -31,7 +31,7 @@ from custom_components.nestquest.quest_definitions import (
     set_quest_definition_active,
     unassign_child,
 )
-from custom_components.nestquest.recurrence import RuleType, ScheduleRule
+from custom_components.nestquest.core.recurrence import RuleType, ScheduleRule
 
 
 def _run(coro):
@@ -50,7 +50,7 @@ NOW = "2026-09-14T12:00:00+00:00"
 
 
 async def _prepare(path) -> tuple:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     await database.open(path)
     await apply_migrations(database)
     children = ChildrenDao(database)
@@ -1150,7 +1150,7 @@ def test_concurrent_assign_unassign_returns_consistent_roster(
         )
         bo = await children.create("Bo", NOW)
 
-        import custom_components.nestquest.dao_rules as dao_rules
+        import custom_components.nestquest.core.dao_rules as dao_rules
 
         original_list = dao_rules.QuestDefinitionsDao.list_assignees
         started = asyncio.Event()
@@ -1396,7 +1396,7 @@ def test_set_quest_definition_active_concurrent_opposite_transitions_return_own(
         gate_open = asyncio.Event()
         a_started = asyncio.Event()
         hass = _gated_hass(armed, gate_open, a_started)
-        database = NestQuestDatabase(hass)
+        database = NestQuestDatabase(hass.async_add_executor_job)
         await database.open(tmp_path / "active-race.db")
         try:
             await apply_migrations(database)
@@ -1666,7 +1666,7 @@ def test_list_query_snapshot_coherent_under_racing_edit(tmp_path) -> None:
             start_date="2026-09-14",
         )
 
-        import custom_components.nestquest.dao_rules as dao_rules
+        import custom_components.nestquest.core.dao_rules as dao_rules
 
         original_list = dao_rules.QuestDefinitionsDao.list_windows
         started = asyncio.Event()
@@ -1732,7 +1732,7 @@ def test_list_definitions_for_child_snapshot_coherent_under_racing_unassign(
             database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
         )
 
-        import custom_components.nestquest.dao_rules as dao_rules
+        import custom_components.nestquest.core.dao_rules as dao_rules
 
         original_list = dao_rules.QuestDefinitionsDao.list_assignees
         started = asyncio.Event()
@@ -1795,7 +1795,7 @@ def test_list_active_definitions_snapshot_coherent_under_racing_edit(
             start_date="2026-09-14",
         )
 
-        import custom_components.nestquest.dao_rules as dao_rules
+        import custom_components.nestquest.core.dao_rules as dao_rules
 
         original_list = dao_rules.QuestDefinitionsDao.list_windows
         started = asyncio.Event()

@@ -18,7 +18,7 @@ import random
 
 import pytest
 
-from custom_components.nestquest.recurrence import (
+from custom_components.nestquest.core.recurrence import (
     RuleType,
     RuleValidationError,
     ScheduleRule,

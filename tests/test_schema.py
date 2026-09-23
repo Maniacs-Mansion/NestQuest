@@ -6,8 +6,8 @@ import sqlite3
 
 import pytest
 
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.schema import (
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.schema import (
     SCHEMA_V1_ADMIN_USERS_DDL,
     SCHEMA_V1_CHILDREN_DDL,
     SCHEMA_V1_COMPLETION_EVENTS_DDL,
@@ -37,7 +37,7 @@ def _make_hass_mock():
 
 
 def _open_db(path) -> NestQuestDatabase:
-    database = NestQuestDatabase(_make_hass_mock())
+    database = NestQuestDatabase(_make_hass_mock().async_add_executor_job)
     _run(database.open(path))
     return database
 
