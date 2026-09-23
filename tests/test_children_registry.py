@@ -8,16 +8,16 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from custom_components.nestquest.children import (
+from custom_components.nestquest.core.children import (
     create_child,
     edit_child,
     list_children,
     reorder_children,
     set_child_active,
 )
-from custom_components.nestquest.dao_children import ChildRecord, ChildrenDao
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.migrations import apply_migrations
+from custom_components.nestquest.core.dao_children import ChildRecord, ChildrenDao
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.migrations import apply_migrations
 
 
 def _run(coro):
@@ -739,12 +739,12 @@ def test_deactivating_child_preserves_definitions_instances_events(
     async def _body(database):
         from datetime import date, timedelta
 
-        from custom_components.nestquest.dao_children import ChildrenDao
-        from custom_components.nestquest.dao_instances import (
+        from custom_components.nestquest.core.dao_children import ChildrenDao
+        from custom_components.nestquest.core.dao_instances import (
             CompletionEventsDao,
             QuestInstancesDao,
         )
-        from custom_components.nestquest.dao_rules import (
+        from custom_components.nestquest.core.dao_rules import (
             QuestDefinitionsDao,
             ScheduleRulesDao,
         )
@@ -831,7 +831,7 @@ def test_no_code_path_deletes_a_child_row() -> None:
 
     import inspect
 
-    from custom_components.nestquest.dao_children import ChildrenDao
+    from custom_components.nestquest.core.dao_children import ChildrenDao
 
     methods = {
         name

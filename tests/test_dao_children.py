@@ -6,15 +6,15 @@ import sqlite3
 
 import pytest
 
-from custom_components.nestquest.dao_children import (
+from custom_components.nestquest.core.dao_children import (
     AdminUserRecord,
     AdminUsersDao,
     ChildRecord,
     ChildrenDao,
 )
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.schema import SCHEMA_V1_STATEMENTS
-from custom_components.nestquest.migrations import apply_migrations
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.schema import SCHEMA_V1_STATEMENTS
+from custom_components.nestquest.core.migrations import apply_migrations
 
 
 def _run(coro):
@@ -504,9 +504,6 @@ def test_children_and_admin_sql_lives_only_in_dao_module() -> None:
         "tests/test_dao_rules.py",  # rules/definitions guard, own scope
         "tests/test_dao_presence.py",  # presence guard, own scope
         "tests/test_dao_instances.py",  # instances guard, own scope
-        "tests/test_startup_db.py",  # row-count probe of the children
-        # table only (proving a fresh setup loads); guard below covers
-        # everything else
     }
     sql_pattern = re.compile(
         r"(FROM|INTO|UPDATE|DELETE\s+FROM|JOIN)\s+"
@@ -558,32 +555,6 @@ def _strip_function_spans(text: str, names: set[str]) -> str:
         for number, line in enumerate(lines, start=1)
         if number not in excluded
     )
-
-
-def test_startup_db_test_file_uses_dao_elsewhere() -> None:
-    """Compensating self-scan for the startup-test exemption: outside
-    the single sanctioned COUNT(*) probe, test_startup_db.py must go
-    through the DAO for children/admin_users data access.
-    """
-    import re
-    from pathlib import Path
-
-    startup_test = Path(__file__).parent / "test_startup_db.py"
-    stripped = _strip_function_spans(
-        startup_test.read_text(),
-        {"test_setup_with_valid_file_preserves_rows"},
-    )
-    sql_pattern = re.compile(
-        r"(SELECT\s[^\"']*?FROM|INSERT\s+INTO|UPDATE|DELETE\s+FROM|"
-        r"FROM|JOIN)\s+[`'\"]*(\[)?(children|admin_users)\b",
-        re.IGNORECASE,
-    )
-    assert sql_pattern.search(stripped) is None, (
-        "test_startup_db.py must go through the DAO for these tables "
-        "outside its sanctioned row-count probe"
-    )
-
-
 def test_dao_matrix_test_file_raw_probes_are_only_constraint_probes() -> None:
     """Compensating self-scan for the matrix-file exemption, structurally
     exact: parse the two sanctioned functions' ASTs and require that

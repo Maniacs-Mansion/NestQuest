@@ -5,7 +5,7 @@ import datetime
 
 import pytest
 
-from custom_components.nestquest.recurrence import (
+from custom_components.nestquest.core.recurrence import (
     RuleType,
     RuleValidationError,
     ScheduleRule,
@@ -344,12 +344,12 @@ def test_purity_guard_logic_catches_probe_statements(tmp_path) -> None:
         "from homeassistant.core import HomeAssistant",
         "import sqlite3",
         "from .db import NestQuestDatabase",
-        "from custom_components.nestquest.db import NestQuestDatabase",
+        "from custom_components.nestquest.core.db import NestQuestDatabase",
         "from custom_components.nestquest import db",
-        "import custom_components.nestquest.dao_rules",
+        "import custom_components.nestquest.core.dao_rules",
         "from . import db",
         "from . import schema",
-        "from custom_components.nestquest.migrations import apply_migrations",
+        "from custom_components.nestquest.core.migrations import apply_migrations",
     ]
     for probe in probes:
         offenders = _scan_forbidden_imports(probe)

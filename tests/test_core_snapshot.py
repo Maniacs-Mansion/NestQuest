@@ -10,17 +10,22 @@ child's ``next_present``, a due-timed quest's ``overdue`` under a
 pinned ``now``, the custody ``cycle_day`` (> 1), and the panel payload
 dict shape (``done`` -> ``completed``, ``on_time`` passthrough, and
 ``missed`` omission) are all exercised as literals.
+
+The database is a standalone core one (the integration owns no
+database since Feature 18's DB removal); the closing round-trip pins
+that the integration's coordinator reconstructs the SAME dataclasses
+from the route's payload.
 """
 from __future__ import annotations
 
 import datetime
 from zoneinfo import ZoneInfo
 
-from conftest import wire_entry_to_registry
+from conftest import set_coordinator_client, wire_entry_to_registry
 
 from custom_components.nestquest import async_setup_entry
-from custom_components.nestquest.children import create_child
-from custom_components.nestquest.completion import complete_instance
+from custom_components.nestquest.core.children import create_child
+from custom_components.nestquest.core.completion import complete_instance
 from custom_components.nestquest.core.snapshot import (
     ChildDaySnapshot,
     NestQuestSnapshot,
@@ -28,14 +33,17 @@ from custom_components.nestquest.core.snapshot import (
     build_snapshot,
     instance_payload,
 )
-from custom_components.nestquest.dao_instances import QuestInstancesDao
-from custom_components.nestquest.dao_presence import (
+from custom_components.nestquest.core.dao_instances import QuestInstancesDao
+from custom_components.nestquest.core.dao_presence import (
     PresenceOverridesDao,
     PresenceSchedulesDao,
 )
-from custom_components.nestquest.materialize import materialize
-from custom_components.nestquest.quest_definitions import create_quest_definition
-from custom_components.nestquest.recurrence import ScheduleRule
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.materialize import materialize
+from custom_components.nestquest.core.migrations import apply_migrations
+from custom_components.nestquest.core.quest_definitions import create_quest_definition
+from custom_components.nestquest.core.recurrence import ScheduleRule
+from custom_components.nestquest.core.settings import NestQuestSettings
 
 
 async def test_instance_payload_shape_and_missed_omission() -> None:
@@ -105,7 +113,7 @@ async def test_instance_payload_shape_and_missed_omission() -> None:
     )
 
 
-async def test_build_snapshot_explicit_values(hass, make_entry, monkeypatch) -> None:
+async def test_build_snapshot_explicit_values(hass, make_entry, tmp_path) -> None:
     """The builder produces the documented shape as literals, pinned in time.
 
     Ada is AWAY today (a 2-week schedule whose absent week 0 covers today,
@@ -117,15 +125,18 @@ async def test_build_snapshot_explicit_values(hass, make_entry, monkeypatch) -> 
     scheduled active child is Ada, whose 2-week cycle anchored one day
     before today puts ``cycle_day`` at 2.
     """
-    entry = wire_entry_to_registry(make_entry(), hass.registry)
-    assert await async_setup_entry(hass, entry) is True
-    coordinator = entry.runtime_data.coordinator
-    database = entry.runtime_data.database
-    settings = entry.runtime_data.settings
+    # A standalone core database (the integration owns none): the
+    # builder and its seed run against it through the executor.
+    database = NestQuestDatabase(hass.async_add_executor_job)
+    await database.open(tmp_path / "snapshot.db")
+    await apply_migrations(database)
+    settings = NestQuestSettings()
 
-    # Single clock read for the seed/snapshot anchor (no midnight skew).
-    today = coordinator._local_now().date()
+    # Single clock read for the seed/snapshot anchor (no midnight skew);
+    # the coordinator no longer owns a clock read (the API serves the
+    # snapshot), so the test resolves the HA-local zone directly.
     time_zone = ZoneInfo(hass.config.time_zone)
+    today = datetime.datetime.now(time_zone).date()
     # Pin the build instant at 12:00 local: past Ada's 10:00 due time
     # (overdue) and before Bo's 17:00, and the completion moment for Bo.
     pinned_now = datetime.datetime(
@@ -294,13 +305,42 @@ async def test_build_snapshot_explicit_values(hass, make_entry, monkeypatch) -> 
         == "missed"
     )
 
-    # REQUIRED wrapper tie-in: the coordinator's _async_update_data is a
-    # thin WRAPPER over build_snapshot, so pinning its clock to the SAME
-    # pinned_now the builder was called with must reproduce the builder's
-    # snapshot byte-for-byte.  The dataclasses are frozen, so == is a full
-    # deep compare — a wrapper that mis-passed today vs now, or stopped
-    # calling the builder, would diverge here even though the literal
-    # assertions above still pass.
-    monkeypatch.setattr(coordinator, "_local_now", lambda: pinned_now)
-    await coordinator.async_refresh()
+    # REQUIRED wrapper tie-in: since Feature 18 the coordinator's
+    # refresh polls the snapshot through its API client, so pinning the
+    # client to serve the payload of the SAME snapshot built with
+    # pinned_now must reproduce the builder's snapshot byte-for-byte.
+    # The dataclasses are frozen, so == is a full deep compare — a
+    # reconstruction that dropped or reshaped a field would diverge
+    # here even though the literal assertions above still pass.
+    class _PinnedPayloadClient:
+        async def get_snapshot(self):
+            return {
+                "today_iso": built.today_iso,
+                "cycle_day": built.cycle_day,
+                "children": [
+                    {
+                        "child_id": child.child_id,
+                        "child_name": child.child_name,
+                        "present": child.present,
+                        "next_present": child.next_present,
+                        "due_today": child.due_today,
+                        "completed_today": child.completed_today,
+                        "remaining_today": child.remaining_today,
+                        "completion_pct": child.completion_pct,
+                        "instances": instance_payload(
+                            child.instances, include_missed=False
+                        ),
+                    }
+                    for child in built.children
+                ],
+            }
+
+    entry = wire_entry_to_registry(
+        make_entry(data={"api_base_url": "http://api.test:8000", "panel_token": "tok"}),
+        hass.registry,
+    )
+    set_coordinator_client(entry, _PinnedPayloadClient())
+    assert await async_setup_entry(hass, entry) is True
+    coordinator = entry.runtime_data.coordinator
     assert coordinator.data == built
+    await database.close()

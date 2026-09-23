@@ -22,7 +22,6 @@ pytest -q``); it is never meant to run against a real HA install.
 from __future__ import annotations
 
 import asyncio
-import datetime
 import importlib.util
 import inspect
 import sys
@@ -52,6 +51,7 @@ _HA_MODULES = (
     "homeassistant.helpers.entity",
     "homeassistant.helpers.event",
     "homeassistant.helpers.update_coordinator",
+    "homeassistant.helpers.aiohttp_client",
     "homeassistant.components",
     "homeassistant.components.sensor",
     "homeassistant.components.binary_sensor",
@@ -99,6 +99,7 @@ for _parent, _child in (
     ("homeassistant.helpers", "entity"),
     ("homeassistant.helpers", "event"),
     ("homeassistant.helpers", "update_coordinator"),
+    ("homeassistant.helpers", "aiohttp_client"),
     ("homeassistant", "components"),
     ("homeassistant.components", "sensor"),
     ("homeassistant.components", "binary_sensor"),
@@ -365,6 +366,15 @@ class BinarySensorEntity(Entity):
         return self._attr_device_class
 
 
+class UpdateFailed(HomeAssistantError):
+    """Stand-in mirroring homeassistant.helpers.update_coordinator.UpdateFailed.
+
+    The exception an update pass raises to report a failed fetch: the
+    coordinator records ``last_update_success = False`` instead of
+    propagating it out of the refresh.
+    """
+
+
 class DataUpdateCoordinator:
     """Functional stand-in for HA's DataUpdateCoordinator.
 
@@ -373,8 +383,20 @@ class DataUpdateCoordinator:
     ``async_add_listener``/``async_update_listeners`` for entity
     subscription, ``async_refresh``/``async_config_entry_first_refresh``
     driving the subclass's ``_async_update_data``, ``last_update_success``,
-    and ``data``.  Interval scheduling is NOT simulated (no real clock
-    ticks in tests) — tests drive refreshes directly.
+    ``last_exception``, and ``data``.  Interval scheduling is NOT
+    simulated (no real clock ticks in tests) — tests drive refreshes
+    directly.
+
+    The failure contract mirrors real HA exactly (it is the trap this
+    harness once hid): an update failure NEVER propagates out of
+    ``async_refresh`` — the coordinator records
+    ``last_update_success = False``, keeps its last good ``data``, and
+    still notifies listeners so entities re-render unavailable — and
+    ``async_config_entry_first_refresh`` wraps ANY failed pass in
+    :class:`ConfigEntryNotReady`, with the original error only
+    surviving as ``__cause__``.  A stand-in that re-raised the raw
+    update error would let setup code key on the original exception
+    type — a clause real HA can never reach.
     """
 
     def __init__(self, hass, logger, *, name=None, update_interval=None):
@@ -384,6 +406,7 @@ class DataUpdateCoordinator:
         self.update_interval = update_interval
         self.data = None
         self.last_update_success = False
+        self.last_exception = None
         self._listeners = []
 
     def async_add_listener(self, update_callback, context=None):
@@ -403,18 +426,35 @@ class DataUpdateCoordinator:
             callback()
 
     async def async_refresh(self):
-        """Run one update pass and notify listeners."""
+        """Run one update pass and notify listeners.
+
+        Mirrors HA: a failed update pass is RECORDED, never raised —
+        ``last_update_success`` goes False, the exception lands on
+        ``last_exception``, and listeners still fire; only cancellation
+        propagates.
+        """
         try:
             self.data = await self._async_update_data()
             self.last_update_success = True
-        except BaseException:
+        except Exception as err:
             self.last_update_success = False
-            raise
+            self.last_exception = err
         self.async_update_listeners()
 
     async def async_config_entry_first_refresh(self):
-        """First refresh at config-entry setup (alias of refresh)."""
+        """First refresh at config-entry setup, per HA's real contract.
+
+        HA's real ``async_config_entry_first_refresh`` wraps ANY failed
+        update pass in ``ConfigEntryNotReady`` — the original error
+        survives only as ``__cause__`` — so setup code that must
+        tolerate a failed first refresh keys on ConfigEntryNotReady,
+        never on the original exception type.
+        """
         await self.async_refresh()
+        if not self.last_update_success:
+            raise ConfigEntryNotReady(
+                f"error fetching {self.name} data: {self.last_exception}"
+            ) from self.last_exception
 
     async def async_shutdown(self):
         """Release listeners on teardown."""
@@ -424,6 +464,7 @@ class DataUpdateCoordinator:
 _update_coordinator_mock = _ha_mock("homeassistant.helpers.update_coordinator")
 _update_coordinator_mock.DataUpdateCoordinator = DataUpdateCoordinator
 _update_coordinator_mock.CoordinatorEntity = CoordinatorEntity
+_update_coordinator_mock.UpdateFailed = UpdateFailed
 
 _entity_mock = _ha_mock("homeassistant.helpers.entity")
 _entity_mock.DeviceInfo = DeviceInfo
@@ -700,6 +741,174 @@ def wire_entry_to_registry(entry, registry: ListenerRegistry):
     return entry
 
 
+class StubSnapshotClient:
+    """A no-network stand-in for the API client's snapshot surface.
+
+    Answers ``get_snapshot()`` from a scripted queue of outcomes — a
+    payload dict or an exception per call, consumed in order — and
+    records every call.  When the queue is exhausted it re-serves the
+    last outcome, so setup's first refresh and a test's explicit
+    refreshes poll the same scripted state.  Register it (or any
+    scripted client) with :func:`set_coordinator_client` BEFORE setup.
+    """
+
+    def __init__(self, *outcomes) -> None:
+        self.calls = 0
+        self._outcomes = list(outcomes)
+        self._last = outcomes[-1] if outcomes else None
+        #: The SSE frames the stand-in "published" (the API service's
+        # stream content), drained by :func:`refire_api_transitions`.
+        self.published_frames = []
+
+    async def get_snapshot(self):
+        self.calls += 1
+        if not self._outcomes:
+            # Re-serve the last outcome: setup's first refresh and the
+            # test's explicit pass both poll the same scripted state.
+            outcome = self._last
+        else:
+            outcome = self._outcomes.pop(0)
+            self._last = outcome
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+class ScriptedPanelClient(StubSnapshotClient):
+    """Snapshot + completion stand-in for the API service's panel plane.
+
+    Serves the scripted snapshot outcomes (like
+    :class:`StubSnapshotClient`), records ``complete_instance`` calls
+    the way the panel route receives them, optionally fails them the
+    way the client types the failure, and carries the SSE frames the
+    API "published" in ``published_frames`` for
+    :func:`refire_api_transitions` to deliver.  Everything the
+    integration reads over the wire, no network.
+    """
+
+    def __init__(self, *outcomes) -> None:
+        super().__init__(*outcomes)
+        self.complete_calls: list[tuple[int, int]] = []
+        self.published_frames: list[tuple[str, dict]] = []
+        #: When set, the next ``complete_instance`` raises this instead
+        # of succeeding (a typed NestQuestApiError in production).
+        self.fail_complete_with: BaseException | None = None
+
+    async def complete_instance(
+        self, instance_id: int, actor_child_id: int
+    ) -> dict:
+        self.complete_calls.append((instance_id, actor_child_id))
+        if self.fail_complete_with is not None:
+            raise self.fail_complete_with
+        return {"status": "done"}
+
+
+def set_coordinator_client(entry, client):
+    """Register a scripted client for ``entry``'s coordinator factory."""
+    import custom_components.nestquest.coordinator as coordinator_module
+
+    coordinator_module._COORDINATOR_CLIENT_OVERRIDES[entry.entry_id] = client
+    return client
+
+
+@pytest.fixture(autouse=True)
+def coordinator_client_from_test_override():
+    """Resolve every entry's coordinator client through the test seam.
+
+    The integration's setup builds its API client through
+    ``coordinator_client_from_entry``; this fixture swaps that factory
+    for a test one handing out the client registered with
+    :func:`set_coordinator_client`, or — for an entry with no scripted
+    client — a stub serving an EMPTY but valid household snapshot (the
+    shape the API's panel route returns before any child exists; the
+    real client would need aiohttp, which this mock-only harness does
+    not provide).
+    """
+    import datetime
+    import unittest.mock as mock
+
+    import custom_components.nestquest as nq_mod
+    import custom_components.nestquest.coordinator as coordinator_module
+
+    _COORDINATOR_CLIENT_OVERRIDES = (
+        coordinator_module._COORDINATOR_CLIENT_OVERRIDES
+    )
+
+    def _factory(hass, entry, **kwargs):
+        override = _COORDINATOR_CLIENT_OVERRIDES.get(entry.entry_id)
+        if override is not None:
+            return override
+        return StubSnapshotClient(
+            {
+                "today_iso": datetime.date.today().isoformat(),
+                "cycle_day": 0,
+                "children": [],
+            }
+        )
+
+    _COORDINATOR_CLIENT_OVERRIDES.clear()
+    patcher = mock.patch.object(
+        nq_mod, "coordinator_client_from_entry", _factory
+    )
+    patcher.start()
+    yield
+    patcher.stop()
+    _COORDINATOR_CLIENT_OVERRIDES.clear()
+
+
+async def refire_api_transitions(hass, entry, client):
+    """Deliver the SSE frames the stand-in client has published so far
+    through the integration's SSE subscription — the production event
+    path.
+
+    Since Feature 18 the ``complete_quest`` service fires no local
+    bus event: the API service builds and publishes the transition
+    frames on its SSE stream, and the integration's subscription
+    (:mod:`custom_components.nestquest.sse`) re-fires each frame on
+    the bus.  This helper streams the frames the stand-in client
+    published (``client.published_frames``) through a real
+    :class:`~custom_components.nestquest.sse.NestQuestEventStream`
+    and waits (bounded) until the bus has re-fired every one of them.
+    """
+    import asyncio
+
+    from custom_components.nestquest.sse import NestQuestEventStream
+
+    frames, client.published_frames = client.published_frames, []
+
+    class _ScriptedStream:
+        """A healthy stream: the frames, then it stays open."""
+
+        def __init__(self, frames) -> None:
+            self._frames = frames
+
+        def stream_events(self):
+            async def _gen():
+                for frame in self._frames:
+                    yield frame
+                await asyncio.Event().wait()
+
+            return _gen()
+
+    before = {etype: len(hass.bus.fired(etype)) for etype, _ in frames}
+    expected = len(frames)
+    manager = NestQuestEventStream(hass, _ScriptedStream(frames))
+    manager.start()
+    try:
+        async with asyncio.timeout(2):
+            while True:
+                delivered = sum(
+                    len(hass.bus.fired(etype)) - before[etype]
+                    for etype, _ in frames
+                )
+                if delivered >= expected:
+                    break
+                await asyncio.sleep(0.01)
+    finally:
+        await manager.stop()
+    return frames
+
+
 class _HassNamespace(SimpleNamespace):
     """SimpleNamespace subclass so the hass stub can hold weak references."""
 
@@ -921,42 +1130,6 @@ def make_config_flow_entry():
         return SimpleNamespace(domain=domain, entry_id=entry_id)
 
     return _factory
-
-
-def freeze_nestquest_clock(
-    monkeypatch, instant: datetime.datetime
-) -> tuple[datetime.datetime, list]:
-    """Freeze the integration's ``datetime`` clock to a fixed aware instant.
-
-    Only ``custom_components.nestquest``'s ``datetime`` binding is patched,
-    so the generation path's ``datetime.datetime.now`` reads this instant
-    (localized to whatever time zone it asks for) while every other module
-    and the test harness keep the real clock.  Returns ``(frozen, requested)``
-    where ``frozen`` is the instant normalized to UTC and ``requested`` is
-    the list of ``tzinfo`` objects the code under test passed to ``now`` —
-    so a caller can prove the generation path actually requested the
-    configured HA time zone rather than silently reading UTC.
-    """
-    import custom_components.nestquest as nestquest
-
-    frozen = instant.astimezone(datetime.timezone.utc)
-    requested: list = []
-
-    class _FrozenDatetime(datetime.datetime):
-        @classmethod
-        def now(cls, tz=None):
-            requested.append(tz)
-            if tz is None:
-                return frozen.replace(tzinfo=None)
-            return frozen.astimezone(tz)
-
-    fake_module = SimpleNamespace(
-        datetime=_FrozenDatetime,
-        timedelta=datetime.timedelta,
-        date=datetime.date,
-    )
-    monkeypatch.setattr(nestquest, "datetime", fake_module)
-    return frozen, requested
 
 
 # ---------------------------------------------------------------------------

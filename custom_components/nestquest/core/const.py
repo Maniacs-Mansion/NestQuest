@@ -20,40 +20,25 @@ TIME_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 PLATFORMS: list[str] = ["sensor", "binary_sensor"]
 
 # Home Assistant bus events (design/ENTITIES-AND-SERVICES.md §3).  The
-# panel and admin cards listen for these; Feature 10 fires completed,
-# uncompleted, and child_day_complete from the service paths, and
-# Feature 11's nightly sweep fires quest_missed.
+# panel and admin cards listen for these; since Feature 18 the
+# completed/uncompleted/day-complete transitions are published by the
+# API service on its SSE stream and re-fired on the bus by the
+# integration's subscription, and Feature 11's nightly sweep fires
+# quest_missed.
 EVENT_QUEST_COMPLETED = "nestquest_quest_completed"
 EVENT_QUEST_UNCOMPLETED = "nestquest_quest_uncompleted"
 EVENT_QUEST_MISSED = "nestquest_quest_missed"
 EVENT_CHILD_DAY_COMPLETE = "nestquest_child_day_complete"
 
-#: Canonical domain-global service names (design/ENTITIES-AND-SERVICES.md §2
-#: plus the existing Feature 07 regenerate service).
+#: Canonical domain-global service name (design/ENTITIES-AND-SERVICES.md §2).
+#: Since Feature 18 only the panel completion service remains: the admin
+#: surface is the PWA and the API service's admin routes, so the former
+#: HA admin services (uncomplete, quest-definition and presence
+#: management, CSV export, child management, regenerate) are gone.
 SERVICE_COMPLETE_QUEST = "complete_quest"
-SERVICE_UNCOMPLETE_QUEST = "uncomplete_quest"
-SERVICE_CREATE_QUEST_DEFINITION = "create_quest_definition"
-SERVICE_UPDATE_QUEST_DEFINITION = "update_quest_definition"
-SERVICE_SET_QUEST_DEFINITION_ACTIVE = "set_quest_definition_active"
-SERVICE_SET_PRESENCE_PATTERN = "set_presence_pattern"
-SERVICE_CREATE_PRESENCE_OVERRIDE = "create_presence_override"
-SERVICE_DELETE_PRESENCE_OVERRIDE = "delete_presence_override"
-SERVICE_EXPORT_HISTORY_CSV = "export_history_csv"
-SERVICE_MANAGE_CHILD = "manage_child"
-SERVICE_REGENERATE = "regenerate"
 
 DOMAIN_SERVICES: tuple[str, ...] = (
     SERVICE_COMPLETE_QUEST,
-    SERVICE_UNCOMPLETE_QUEST,
-    SERVICE_CREATE_QUEST_DEFINITION,
-    SERVICE_UPDATE_QUEST_DEFINITION,
-    SERVICE_SET_QUEST_DEFINITION_ACTIVE,
-    SERVICE_SET_PRESENCE_PATTERN,
-    SERVICE_CREATE_PRESENCE_OVERRIDE,
-    SERVICE_DELETE_PRESENCE_OVERRIDE,
-    SERVICE_EXPORT_HISTORY_CSV,
-    SERVICE_MANAGE_CHILD,
-    SERVICE_REGENERATE,
 )
 
 SQLITE_DB_FILENAME = "nestquest.db"
@@ -81,6 +66,21 @@ CONF_UPDATE_INTERVAL = "update_interval"
 DEFAULT_UPDATE_INTERVAL = 300
 MIN_UPDATE_INTERVAL = 30
 
+# Last-good snapshot staleness (Feature 18), in SECONDS: how long the
+# coordinator keeps SERVING the last good snapshot after the API stops
+# answering.  A failed poll whose elapsed time since the last successful
+# fetch is within the threshold returns the cached snapshot (the panel
+# keeps rendering last-good data, entities stay available); past it the
+# poll fails the HA way and the entities go unavailable.  The default is
+# 3x the default update interval (900 s = 15 minutes): three consecutive
+# failed five-minute polls before the board is declared stale — enough
+# to ride out an API service restart, short enough not to render a
+# days-old board all day.  Validation floor: the threshold must be at
+# least the configured update interval, or the cache could never span
+# even one failed poll.
+CONF_SNAPSHOT_STALENESS = "snapshot_staleness"
+DEFAULT_SNAPSHOT_STALENESS = 3 * DEFAULT_UPDATE_INTERVAL
+
 # Notification automations (Feature 11).  The notify target is a free-text
 # Home Assistant service name (e.g. "notify.mobile_app_dads_phone") the
 # household fills in — never a hard-coded personal target; the times are
@@ -100,6 +100,32 @@ CONF_AFTERNOON_REMINDER_ENABLED = "afternoon_reminder_enabled"
 CONF_END_OF_DAY_REPORT_ENABLED = "end_of_day_report_enabled"
 CONF_CELEBRATION_ENABLED = "celebration_enabled"
 DEFAULT_AUTOMATION_ENABLED = True
+
+# Panel-plane API client (Feature 18): the integration reaches the
+# NestQuest API service (Feature 16) over HTTP instead of the database.
+# The base URL points at the API service host serving ``/api/v1/panel/*``
+# (uvicorn's default host/port is the sensible starting point); the panel
+# service token is the static Bearer credential the panel plane requires
+# (``NESTQUEST_PANEL_TOKEN`` on the API side).  Both are stored on the
+# entry like every other setting — options first, then the entry-data
+# copy, then defaults.  The TOKEN IS A SECRET: it is never logged, never
+# echoed into error messages, and never committed.  The shipped default
+# token IS the empty string (DEFAULT_PANEL_TOKEN) — an entry with no
+# configured token is therefore NOT a working client: the options flow
+# accepts an empty token as "not configured yet" and only rejects
+# malformed (padded/whitespace-only/non-string) values — the actual
+# non-emptiness guard is enforced at client construction, where
+# NestQuestApiClient fails fast on an empty/whitespace token
+# (api_client.py).  So a caller building the client from a bare
+# entry must either ensure a token is configured first or handle the
+# construction ValueError and surface an "API not configured" state —
+# an unconfigured entry never yields a client that can only 401.
+# This mirrors the API service's fail-closed stance (api/config.py: no
+# default token exists).
+CONF_API_BASE_URL = "api_base_url"
+DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
+CONF_PANEL_TOKEN = "panel_token"
+DEFAULT_PANEL_TOKEN = ""
 
 # Quest windows (D-008): a definition may declare several day windows;
 # each produces its own instance per day and groups the panel's Quest

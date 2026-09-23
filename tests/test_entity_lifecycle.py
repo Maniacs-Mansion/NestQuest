@@ -1,24 +1,16 @@
-"""Entity lifecycle across child add/deactivate/reactivate (Feature 10, task 8)."""
+"""Entity lifecycle across child add/deactivate/reactivate (Feature 10, task 8).
+
+The household state the entities mirror comes from the API service's
+panel route, so a deactivate/reactivate/add is scripted as a payload
+change served by :class:`conftest.StubSnapshotClient`; the reload
+(unload + setup) re-polls it, exactly as production does.
+"""
 from __future__ import annotations
 
-import datetime
-
-from conftest import wire_entry_to_registry
+from conftest import StubSnapshotClient, set_coordinator_client, wire_entry_to_registry
 
 from custom_components.nestquest import async_setup_entry, async_unload_entry
-from custom_components.nestquest.children import (
-    create_child,
-    list_children,
-    set_child_active,
-)
-from custom_components.nestquest.const import DOMAIN
-from custom_components.nestquest.materialize import materialize
-from custom_components.nestquest.quest_definitions import (
-    create_quest_definition,
-)
-from custom_components.nestquest.recurrence import ScheduleRule
 
-SEED_HORIZON_DAYS = 3
 PER_CHILD_KINDS = (
     "quests_due_today",
     "quests_completed_today",
@@ -34,6 +26,78 @@ HOUSEHOLD_UNIQUE_IDS = (
     "nestquest_cycle_day",
 )
 
+ADA = 1
+BO = 2
+CORY_ID = 4
+
+
+def _child(child_id: int, name: str, *, present=True, instances=()):
+    completed = sum(1 for i in instances if i["state"] == "completed")
+    due = len(instances)
+    return {
+        "child_id": child_id,
+        "child_name": name,
+        "present": present,
+        "next_present": None,
+        "due_today": due,
+        "completed_today": completed,
+        "remaining_today": due - completed,
+        "completion_pct": 100 if due == 0 else round(completed / due * 100),
+        "instances": list(instances),
+    }
+
+
+def _instance(instance_id: int, child_id: int, *, state="open") -> dict:
+    return {
+        "id": instance_id,
+        "definition_id": 3,
+        "child_id": child_id,
+        "title": "Brush teeth",
+        "icon": "🦷",
+        "window": "morning",
+        "due_time": "08:00",
+        "state": state,
+        "overdue": False,
+        "completed_at": None if state == "open" else "2026-09-23T07:55:00+00:00",
+        "on_time": None if state == "open" else True,
+    }
+
+
+def _payload(children) -> dict:
+    return {
+        "today_iso": "2026-09-23",
+        "cycle_day": 0,
+        "children": list(children),
+    }
+
+
+#: The full household (Ada + Bo, one daily quest each) and the states
+#: the lifecycle walks through: Bo deactivated, reactivated, completed.
+_BOTH = _payload(
+    [
+        _child(ADA, "Ada", instances=[_instance(7, ADA)]),
+        _child(BO, "Bo", instances=[_instance(8, BO)]),
+    ]
+)
+_BO_GONE = _payload([_child(ADA, "Ada", instances=[_instance(7, ADA)])])
+_BO_DONE = _payload(
+    [
+        _child(ADA, "Ada", instances=[_instance(7, ADA)]),
+        _child(BO, "Bo", instances=[_instance(8, BO, state="completed")]),
+    ]
+)
+_ADA_ONLY = _payload([_child(ADA, "Ada", instances=[_instance(7, ADA)])])
+_ADA_AND_CORY = _payload(
+    [
+        _child(ADA, "Ada", instances=[_instance(7, ADA)]),
+        _child(CORY_ID, "Cory"),
+    ]
+)
+
+
+def _child_unique_ids(child_id: int) -> set[str]:
+    return {f"nestquest_child_{child_id}_{kind}" for kind in PER_CHILD_KINDS}
+
 
 async def _reload(hass, entry) -> None:
     """Unload then set up: the harness's restart/reload equivalent."""
@@ -41,46 +105,36 @@ async def _reload(hass, entry) -> None:
     assert await async_setup_entry(hass, entry) is True
 
 
-def _child_unique_ids(child_id: int) -> set[str]:
-    return {f"nestquest_child_{child_id}_{kind}" for kind in PER_CHILD_KINDS}
-
-
-async def _setup_and_seed(hass, make_entry):
-    entry = wire_entry_to_registry(make_entry(), hass.registry)
-    assert await async_setup_entry(hass, entry) is True
-    database = entry.runtime_data.database
-    ada = await create_child(database, "Ada")
-    bo = await create_child(database, "Bo")
-    today = datetime.date.today()
-    await create_quest_definition(
-        database,
-        "Brush teeth",
-        ScheduleRule.from_dict(
-            {"rule_type": "daily", "start_date": today.isoformat()}
+async def _setup_with_household(hass, make_entry, *payloads):
+    """Set up the entry with a scripted, ordered snapshot history."""
+    entry = wire_entry_to_registry(
+        make_entry(
+            data={"api_base_url": "http://api.test:8000", "panel_token": "tok"}
         ),
-        [ada.id, bo.id],
-        ["morning"],
+        hass.registry,
     )
-    end = (today + datetime.timedelta(days=SEED_HORIZON_DAYS)).isoformat()
-    await materialize(database, today.isoformat(), end, today=today)
-    await entry.runtime_data.coordinator.async_refresh()
-    return entry, ada, bo
+    client = set_coordinator_client(entry, StubSnapshotClient(*payloads))
+    assert await async_setup_entry(hass, entry) is True
+    return entry, entry.runtime_data.coordinator, client
 
 
 async def test_deactivated_child_entities_removed_on_reload(
     hass, make_entry
 ) -> None:
-    entry, ada, bo = await _setup_and_seed(hass, make_entry)
-    assert _child_unique_ids(ada.id) <= set(hass.entities)
-    assert _child_unique_ids(bo.id) <= set(hass.entities)
+    """A child absent from the API's snapshot loses its entities on
+    reload; the surviving child's entities are untouched."""
+    entry, _coordinator, _client = await _setup_with_household(
+        hass, make_entry, _BOTH, _BO_GONE
+    )
+    assert _child_unique_ids(ADA) <= set(hass.entities)
+    assert _child_unique_ids(BO) <= set(hass.entities)
 
-    await set_child_active(entry.runtime_data.database, bo.id, False)
     await _reload(hass, entry)
 
-    assert _child_unique_ids(ada.id) <= set(hass.entities), (
+    assert _child_unique_ids(ADA) <= set(hass.entities), (
         "the surviving child's entities must be untouched"
     )
-    assert not (_child_unique_ids(bo.id) & set(hass.entities)), (
+    assert not (_child_unique_ids(BO) & set(hass.entities)), (
         "the deactivated child's entities must be gone after reload"
     )
 
@@ -88,100 +142,61 @@ async def test_deactivated_child_entities_removed_on_reload(
 async def test_reactivation_restores_entities_with_original_unique_ids(
     hass, make_entry
 ) -> None:
-    entry, ada, bo = await _setup_and_seed(hass, make_entry)
-    original = _child_unique_ids(bo.id)
-    await set_child_active(entry.runtime_data.database, bo.id, False)
+    original = _child_unique_ids(BO)
+    entry, _coordinator, _client = await _setup_with_household(
+        hass, make_entry, _BOTH, _BO_GONE, _BOTH
+    )
     await _reload(hass, entry)
     assert not (original & set(hass.entities))
 
-    await set_child_active(entry.runtime_data.database, bo.id, True)
     await _reload(hass, entry)
 
     assert original <= set(hass.entities), (
         "reactivation must restore the exact original unique_ids"
     )
-    bo_due = hass.entities[f"nestquest_child_{bo.id}_quests_due_today"]
+    bo_due = hass.entities[f"nestquest_child_{BO}_quests_due_today"]
     assert bo_due.native_value == 1, "restored entities carry live state"
 
 
 async def test_new_child_gets_entities_without_disturbing_existing(
     hass, make_entry
 ) -> None:
-    entry, ada, bo = await _setup_and_seed(hass, make_entry)
-    before_ada = set(hass.entities) & _child_unique_ids(ada.id)
+    """A child ADDED to the API's snapshot gains its entities on
+    reload; the existing children's entities are untouched."""
+    entry, _coordinator, _client = await _setup_with_household(
+        hass, make_entry, _ADA_ONLY, _ADA_AND_CORY
+    )
+    before_ada = set(hass.entities) & _child_unique_ids(ADA)
 
-    cory = await create_child(entry.runtime_data.database, "Cory")
     await _reload(hass, entry)
 
     assert before_ada <= set(hass.entities), "existing entities untouched"
-    assert _child_unique_ids(cory.id) <= set(hass.entities), (
+    assert _child_unique_ids(CORY_ID) <= set(hass.entities), (
         "the new child's entities appear after reload"
     )
-    assert hass.entities[f"nestquest_child_{cory.id}_quests_due_today"].native_value == 0
+    assert hass.entities[
+        f"nestquest_child_{CORY_ID}_quests_due_today"
+    ].native_value == 0
 
 
 async def test_restart_equivalent_restores_all_entity_states(
     hass, make_entry
 ) -> None:
     """Unload + setup (the restart equivalent) restores every active
-    child's entities with correct states and the household rollups."""
-    from custom_components.nestquest.completion import complete_instance
-
-    entry, ada, bo = await _setup_and_seed(hass, make_entry)
-    coordinator = entry.runtime_data.coordinator
-    snapshot_ada = next(
-        child
-        for child in coordinator.data.children
-        if child.child_id == ada.id
+    child's entities with the API's current states and the household
+    rollups."""
+    entry, _coordinator, _client = await _setup_with_household(
+        hass, make_entry, _BOTH, _BO_DONE
     )
-    await complete_instance(
-        entry.runtime_data.database,
-        snapshot_ada.instances[0].instance_id,
-        actor_source="panel",
-        actor_child_id=ada.id,
-    )
-    await coordinator.async_refresh()
-    assert hass.entities[
-        f"nestquest_child_{ada.id}_quests_completed_today"
-    ].native_value == 1
-
     await _reload(hass, entry)
 
     assert hass.entities[
-        f"nestquest_child_{ada.id}_quests_completed_today"
-    ].native_value == 1, "completed count survives the restart"
-    assert hass.entities[
-        f"nestquest_child_{bo.id}_quests_completed_today"
+        f"nestquest_child_{ADA}_quests_completed_today"
     ].native_value == 0
+    assert hass.entities[
+        f"nestquest_child_{BO}_quests_completed_today"
+    ].native_value == 1, "the API's recorded completion survives the restart"
     assert set(HOUSEHOLD_UNIQUE_IDS) <= set(hass.entities)
     assert hass.entities[
         "nestquest_household_quests_completed_today"
     ].native_value == 1
-
-
-async def test_unload_shuts_coordinator_before_closing_database(
-    hass, make_entry
-) -> None:
-    """The coordinator's listeners are cleared while the database is
-    still connected: a scheduled refresh must never race the close."""
-    entry = wire_entry_to_registry(make_entry(), hass.registry)
-    assert await async_setup_entry(hass, entry) is True
-    coordinator = entry.runtime_data.coordinator
-    database = entry.runtime_data.database
-    seen_connected = []
-
-    async def _probe_shutdown():
-        seen_connected.append(database.connected)
-
-    original_close = database.close
-
-    async def _recording_close():
-        seen_connected.append("closing")
-        await original_close()
-
-    coordinator.async_shutdown = _probe_shutdown
-    database.close = _recording_close
-    assert await async_unload_entry(hass, entry) is True
-    assert seen_connected == [True, "closing"], (
-        "coordinator shutdown must precede the database close"
-    )
