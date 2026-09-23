@@ -43,6 +43,18 @@ DOMAIN_SERVICES: tuple[str, ...] = (
 
 SQLITE_DB_FILENAME = "nestquest.db"
 
+# Zero-config panel dashboard (Feature 20): ONE storage-mode Lovelace
+# dashboard registered on setup whose config carries the bundle's
+# ``custom:nestquest-party`` strategy (frontend/src/strategy.ts) — the
+# views are generated at render time from the household roster.  The
+# url_path IS the domain: the stable key idempotency is keyed on (a
+# reload or a second entry never duplicates it, and a dashboard already
+# registered under it — ours or the user's — is left untouched).
+DASHBOARD_URL_PATH = DOMAIN
+DASHBOARD_TITLE = "NestQuest"
+DASHBOARD_ICON = "mdi:party-popper"
+DASHBOARD_STRATEGY_TYPE = "custom:nestquest-party"
+
 # Configuration keys and default values
 CONF_HORIZON_DAYS = "horizon_days"
 DEFAULT_HORIZON_DAYS = 14
