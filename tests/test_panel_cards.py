@@ -24,6 +24,8 @@ PARTY_BOARD = FRONTEND_CARDS_DIR / "party-board.ts"
 QUEST_LOG = FRONTEND_CARDS_DIR / "quest-log.ts"
 BUNDLE_PATH = REPO_ROOT / "custom_components" / "nestquest" / "www" / "nestquest-cards.js"
 RENDER_HARNESS = FRONTEND_DIR / "tests" / "render-party-board.mjs"
+STRATEGY_HARNESS = FRONTEND_DIR / "tests" / "render-strategy.mjs"
+STRATEGY_SOURCE = FRONTEND_DIR / "src" / "strategy.ts"
 
 PANEL_SOURCES = (PARTY_BOARD, QUEST_LOG)
 
@@ -287,3 +289,105 @@ def test_explicit_child_order_still_wins_over_discovery() -> None:
     )
     assert [plate["name"] for plate in result["plates"]] == ["Bo", "Ada"]
     assert "Cory" not in [plate["name"] for plate in result["plates"]]
+
+# --- Dashboard strategy tests -------------------------------------------------
+
+STRATEGY_NAME = "nestquest-party"
+
+
+def _generate_dashboard(config: dict, states: dict, url: str | None = None) -> dict:
+    """Generate the strategy's dashboard from the built bundle.
+
+    Drives frontend/tests/render-strategy.mjs: the harness imports the
+    committed bundle into a jsdom window at the given dashboard URL and
+    prints the views ``window.customStrategies["nestquest-party"].
+    generate(config, hass)`` returns.
+    """
+    assert BUNDLE_PATH.is_file(), "bundle missing: run cd frontend && npm run build"
+    assert STRATEGY_HARNESS.is_file()
+    spec = {
+        "bundle": str(BUNDLE_PATH),
+        "url": url or "http://homeassistant.local/nestquest/party",
+        "config": config,
+        "hass": {"config": {"time_zone": "UTC"}, "states": states},
+    }
+    completed = subprocess.run(
+        ["node", str(STRATEGY_HARNESS)],
+        input=json.dumps(spec),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, (
+        f"strategy harness failed: {completed.stderr}"
+    )
+    return json.loads(completed.stdout)
+
+
+def test_strategy_is_registered_on_the_bundle() -> None:
+    """The strategy ships in the same bundle as the cards and registers
+    itself under window.customStrategies so a dashboard can use
+    strategy: { type: custom:nestquest-party }."""
+    source = _read(STRATEGY_SOURCE)
+    assert "customStrategies" in source
+    assert f'["{STRATEGY_NAME}"]' in source or f'"{STRATEGY_NAME}"' in source
+    bundle = _read(BUNDLE_PATH)
+    assert "nestquest-party" in bundle
+
+
+def test_strategy_generates_views_for_three_children() -> None:
+    """For the seeded three-child household the strategy generates one
+    party-board view plus one quest-log view per child in roster order,
+    with COMPUTED paths: the board view at the dashboard root, each log
+    view at the child's slug so quest-log.ts's childSlugFromPath reads
+    the child from the URL's last segment."""
+    result = _generate_dashboard({}, _three_child_states())
+    views = result["views"]
+    assert len(views) == 4
+    assert [view["path"] for view in views] == [
+        "party",
+        "ada",
+        "bo",
+        "cory",
+    ]
+
+
+def test_strategy_wires_navigation_between_the_views() -> None:
+    """The board's quest_log_path and each log's board_path are computed
+    to the dashboard root the strategy renders at, so party-board.ts's
+    crest tap pushes <root>/<slug> and quest-log.ts's idle return goes
+    back to the board — neither path is configured by hand."""
+    dashboard_url = "http://homeassistant.local/nestquest"
+    root = "/nestquest"
+    result = _generate_dashboard(
+        {}, _three_child_states(), url=dashboard_url
+    )
+    views = result["views"]
+    board = views[0]["cards"][0]
+    assert board["type"] == "custom:nestquest-party-board-card"
+    assert board["quest_log_path"] == root
+    for slug, view in zip(("ada", "bo", "cory"), views[1:]):
+        assert view["cards"][0]["type"] == "custom:nestquest-quest-log-card"
+        assert view["cards"][0]["board_path"] == root
+
+
+def test_strategy_zero_children_still_generates_the_board() -> None:
+    """With an empty roster (NestQuest not set up yet) the strategy
+    renders the board view alone — the board card shows its own
+    "not set up yet" notice for an empty roster — and never crashes."""
+    result = _generate_dashboard({}, {})
+    assert len(result["views"]) == 1
+    assert result["views"][0]["path"] == "party"
+
+
+def test_strategy_config_overrides_still_apply() -> None:
+    """Explicit strategy configuration wins where the design allows: an
+    explicit url_path pins the computed dashboard root."""
+    result = _generate_dashboard(
+        {"url_path": "/wallboard"},
+        _three_child_states(),
+    )
+    root = "/wallboard"
+    assert result["views"][0]["cards"][0]["quest_log_path"] == root
+    for view in result["views"][1:]:
+        assert view["cards"][0]["board_path"] == root
