@@ -16,7 +16,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.event import async_track_time_change
 
-from .api_client import NestQuestApiError
 from .const import (
     CONF_ADMIN_USER_IDS,
     CONF_UPDATE_INTERVAL,
@@ -526,10 +525,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # (unconfigured token, API service down) does NOT crash setup:
         # the coordinator reports last_update_success=False, entities
         # come up unavailable, and HA's standard retry cycle applies
-        # once the API is reachable.  Any non-API error still raises.
+        # once the API is reachable.  HA's real
+        # ``async_config_entry_first_refresh`` wraps ANY failed update
+        # pass in ConfigEntryNotReady — the original error survives
+        # only as ``__cause__``, never as the raised exception — so the
+        # catch keys on ConfigEntryNotReady, NOT on the typed API
+        # error.  Everything else (a platform-forward failure,
+        # cancellation) still unwinds through the except block below.
         try:
             await coordinator.async_config_entry_first_refresh()
-        except NestQuestApiError:
+        except ConfigEntryNotReady:
             pass
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except BaseException:
@@ -564,6 +569,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # closes the already-closed database through the stale record.
         if getattr(entry, "runtime_data", None) is not None:
             entry.runtime_data = None
+        # The runtime record was ALSO registered in hass.data before
+        # the first refresh: remove it here on ANY failure, or a later
+        # unload picks up the stale, already-torn-down record
+        # (hass.data wins over entry.runtime_data there) and
+        # re-invokes the already-consumed update-listener remover.
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         await database.close()
         raise
     assert remove_update_listener is not None

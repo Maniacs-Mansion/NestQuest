@@ -32,11 +32,17 @@ Failure handling: constructing the client fails fast (ValueError) when
 the entry has no panel token configured, and a fetch failure raises the
 typed :class:`~.api_client.NestQuestApiError`.  Neither crashes
 integration setup: the constructor logs a clear message and hands back
-a client-shaped stub whose refresh raises the same typed error, so the
-coordinator's refresh pass marks the entities unavailable
-(``last_update_success = False``, ``data = None``) — exactly how a HA
-``DataUpdateCoordinator`` surfaces a failed update.  The typed error is
-never swallowed silently: it is logged with its message and chained.
+a client-shaped stub whose refresh raises the same typed error, and
+``_async_update_data`` converts every typed error into
+:class:`~homeassistant.helpers.update_coordinator.UpdateFailed` — the
+exception a HA ``DataUpdateCoordinator`` records as a failed pass
+(``last_update_success = False``, ``data = None``), so the entities
+come up unavailable.  The typed error is never swallowed silently: it
+is logged with its message and chained into the UpdateFailed.  (The
+conversion matters at setup: HA's real
+``async_config_entry_first_refresh`` wraps any failed pass in
+``ConfigEntryNotReady``, so a setup that keys on the original
+exception type would never match it.)
 """
 from __future__ import annotations
 
@@ -45,7 +51,10 @@ import datetime
 from typing import Any
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import (
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 
 from .api_client import NestQuestApiClient, NestQuestApiError, resolve_api_config
 from .const import (
@@ -150,9 +159,11 @@ class _UnconfiguredApiClient:
     yet must not crash integration setup, so the coordinator swaps in
     this stub: every refresh raises the SAME typed
     :class:`~.api_client.NestQuestApiError` a transport failure would,
-    carrying a clear "API not configured" message, so the coordinator
-    marks the entities unavailable and the HA standard retry cycle
-    applies.  The error is logged, never silent.
+    carrying a clear "API not configured" message;
+    :meth:`NestQuestCoordinator._async_update_data` converts it to
+    :class:`~homeassistant.helpers.update_coordinator.UpdateFailed`, so
+    the coordinator marks the entities unavailable and the HA standard
+    retry cycle applies.  The error is logged, never silent.
     """
 
     __slots__ = ()
@@ -171,10 +182,15 @@ class NestQuestCoordinator(DataUpdateCoordinator):
     One refresh pass = one ``GET /api/v1/panel/snapshot`` through the
     API client, reconstructed into the core snapshot dataclasses every
     entity reads.  A failed pass (unconfigured API, transport failure,
-    non-2xx response) raises the typed error out of
-    ``_async_update_data``, so the coordinator's ``data`` keeps its last
-    good value while ``last_update_success`` goes False — HA marks the
-    entities unavailable until a later pass succeeds.
+    non-2xx response) raises the typed error out of the client;
+    ``_async_update_data`` converts it to
+    :class:`~homeassistant.helpers.update_coordinator.UpdateFailed`, the
+    exception HA's coordinator machinery records as a failed pass: the
+    coordinator's ``data`` keeps its last good value while
+    ``last_update_success`` goes False — HA marks the entities
+    unavailable until a later pass succeeds.  An unexpected
+    non-typed error still propagates out of ``_async_update_data``
+    and is logged (with its traceback) by HA's machinery, the same way.
 
     Forced refreshes (the service paths pushing an immediate update
     after a completion) are SERIALIZED per entry: overlapping
@@ -218,13 +234,24 @@ class NestQuestCoordinator(DataUpdateCoordinator):
             await super().async_refresh()
 
     async def _async_update_data(self) -> NestQuestSnapshot:
+        """One refresh pass: fetch the panel snapshot and rebuild it.
+
+        A typed API failure (unconfigured token stub, transport
+        failure, non-2xx response) is converted to
+        :class:`~homeassistant.helpers.update_coordinator.UpdateFailed`
+        — the exception HA's coordinator machinery records as a failed
+        pass (``last_update_success = False``, ``data`` unchanged) so
+        entities go unavailable and the setup-time first refresh
+        arrives as ``ConfigEntryNotReady`` — with the typed error
+        logged and chained.  Anything else still propagates.
+        """
         try:
             payload = await self.api_client.get_snapshot()
         except NestQuestApiError as err:
             LOGGER.error(
                 "NestQuest coordinator refresh failed: %s", err
             )
-            raise
+            raise UpdateFailed(str(err)) from err
         return snapshot_from_api_payload(payload)
 
 
@@ -247,8 +274,6 @@ def coordinator_client_from_entry(
     inject a stub transport without importing aiohttp — the mock-only
     test harness has no ``homeassistant.helpers.aiohttp_client``.
     """
-    from custom_components.nestquest.api_client import NestQuestApiClient
-
     base_url, panel_token = resolve_api_config(entry)
     if not isinstance(panel_token, str) or not panel_token.strip():
         LOGGER.warning(

@@ -367,6 +367,15 @@ class BinarySensorEntity(Entity):
         return self._attr_device_class
 
 
+class UpdateFailed(HomeAssistantError):
+    """Stand-in mirroring homeassistant.helpers.update_coordinator.UpdateFailed.
+
+    The exception an update pass raises to report a failed fetch: the
+    coordinator records ``last_update_success = False`` instead of
+    propagating it out of the refresh.
+    """
+
+
 class DataUpdateCoordinator:
     """Functional stand-in for HA's DataUpdateCoordinator.
 
@@ -375,8 +384,20 @@ class DataUpdateCoordinator:
     ``async_add_listener``/``async_update_listeners`` for entity
     subscription, ``async_refresh``/``async_config_entry_first_refresh``
     driving the subclass's ``_async_update_data``, ``last_update_success``,
-    and ``data``.  Interval scheduling is NOT simulated (no real clock
-    ticks in tests) — tests drive refreshes directly.
+    ``last_exception``, and ``data``.  Interval scheduling is NOT
+    simulated (no real clock ticks in tests) — tests drive refreshes
+    directly.
+
+    The failure contract mirrors real HA exactly (it is the trap this
+    harness once hid): an update failure NEVER propagates out of
+    ``async_refresh`` — the coordinator records
+    ``last_update_success = False``, keeps its last good ``data``, and
+    still notifies listeners so entities re-render unavailable — and
+    ``async_config_entry_first_refresh`` wraps ANY failed pass in
+    :class:`ConfigEntryNotReady`, with the original error only
+    surviving as ``__cause__``.  A stand-in that re-raised the raw
+    update error would let setup code key on the original exception
+    type — a clause real HA can never reach.
     """
 
     def __init__(self, hass, logger, *, name=None, update_interval=None):
@@ -386,6 +407,7 @@ class DataUpdateCoordinator:
         self.update_interval = update_interval
         self.data = None
         self.last_update_success = False
+        self.last_exception = None
         self._listeners = []
 
     def async_add_listener(self, update_callback, context=None):
@@ -405,18 +427,35 @@ class DataUpdateCoordinator:
             callback()
 
     async def async_refresh(self):
-        """Run one update pass and notify listeners."""
+        """Run one update pass and notify listeners.
+
+        Mirrors HA: a failed update pass is RECORDED, never raised —
+        ``last_update_success`` goes False, the exception lands on
+        ``last_exception``, and listeners still fire; only cancellation
+        propagates.
+        """
         try:
             self.data = await self._async_update_data()
             self.last_update_success = True
-        except BaseException:
+        except Exception as err:
             self.last_update_success = False
-            raise
+            self.last_exception = err
         self.async_update_listeners()
 
     async def async_config_entry_first_refresh(self):
-        """First refresh at config-entry setup (alias of refresh)."""
+        """First refresh at config-entry setup, per HA's real contract.
+
+        HA's real ``async_config_entry_first_refresh`` wraps ANY failed
+        update pass in ``ConfigEntryNotReady`` — the original error
+        survives only as ``__cause__`` — so setup code that must
+        tolerate a failed first refresh keys on ConfigEntryNotReady,
+        never on the original exception type.
+        """
         await self.async_refresh()
+        if not self.last_update_success:
+            raise ConfigEntryNotReady(
+                f"error fetching {self.name} data: {self.last_exception}"
+            ) from self.last_exception
 
     async def async_shutdown(self):
         """Release listeners on teardown."""
@@ -426,6 +465,7 @@ class DataUpdateCoordinator:
 _update_coordinator_mock = _ha_mock("homeassistant.helpers.update_coordinator")
 _update_coordinator_mock.DataUpdateCoordinator = DataUpdateCoordinator
 _update_coordinator_mock.CoordinatorEntity = CoordinatorEntity
+_update_coordinator_mock.UpdateFailed = UpdateFailed
 
 _entity_mock = _ha_mock("homeassistant.helpers.entity")
 _entity_mock.DeviceInfo = DeviceInfo
@@ -787,9 +827,6 @@ def coordinator_serves_local_snapshot():
     """
     import custom_components.nestquest as nq_mod
     import custom_components.nestquest.coordinator as coordinator_module
-    from custom_components.nestquest.coordinator import (
-        coordinator_client_from_entry as production_factory,
-    )
 
     _COORDINATOR_CLIENT_OVERRIDES = (
         coordinator_module._COORDINATOR_CLIENT_OVERRIDES

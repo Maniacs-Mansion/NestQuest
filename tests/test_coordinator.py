@@ -33,6 +33,7 @@ from custom_components.nestquest.coordinator import (
     snapshot_from_api_payload,
 )
 from custom_components.nestquest.core.snapshot import instance_payload
+from homeassistant.helpers.update_coordinator import UpdateFailed
 
 
 def _today_iso() -> str:
@@ -340,10 +341,12 @@ async def test_coordinator_entities_read_the_api_snapshot(hass, make_entry) -> N
 
 
 async def test_coordinator_failed_fetch_marks_unavailable(hass, make_entry) -> None:
-    """A failed fetch (transport failure or non-2xx — both typed) raises
-    out of the refresh pass: last_update_success goes False (entities
-    unavailable), data keeps its last good value, and the typed error is
-    logged, never swallowed."""
+    """A failed fetch (transport failure or non-2xx — both typed) is a
+    FAILED refresh pass: the update pass converts the typed error to
+    UpdateFailed (the exception HA's coordinator machinery records as a
+    failed pass, chaining the typed error as ``__cause__``), the refresh
+    records the failure instead of raising, and data keeps its last
+    good value."""
     error = NestQuestApiError(
         "NestQuest API GET /api/v1/panel/snapshot failed with HTTP 503",
         status=503,
@@ -356,13 +359,61 @@ async def test_coordinator_failed_fetch_marks_unavailable(hass, make_entry) -> N
     assert coordinator.data is not None
     assert coordinator.last_update_success is True
 
-    # The next pass hits the scripted failure: it raises out of the
-    # refresh, marks the entities unavailable, and keeps the last GOOD
-    # snapshot as data.
-    with pytest.raises(NestQuestApiError):
-        await coordinator.async_refresh()
+    # The next pass hits the scripted failure: the update pass converts
+    # the typed error to UpdateFailed, with the typed error chained.
+    with pytest.raises(UpdateFailed, match="HTTP 503") as excinfo:
+        await coordinator._async_update_data()
+    assert isinstance(excinfo.value.__cause__, NestQuestApiError)
+
+    # The refresh pass records the failure the HA way — it does NOT
+    # raise: last_update_success goes False, data keeps the last GOOD
+    # snapshot, and the failed pass lands on last_exception as the
+    # converted UpdateFailed with the typed error chained.
+    await coordinator.async_refresh()
     assert coordinator.last_update_success is False
     assert coordinator.data.children[0].child_name == "Ada"
+    assert isinstance(coordinator.last_exception, UpdateFailed)
+    assert isinstance(coordinator.last_exception.__cause__, NestQuestApiError)
+
+
+async def test_failed_first_refresh_does_not_crash_setup(
+    hass, make_entry
+) -> None:
+    """A failed fetch at the FIRST refresh (at setup) does not crash
+    setup: the coordinator reports last_update_success=False, the setup
+    catches the ConfigEntryNotReady that HA's real first refresh raises
+    for a failed pass, and the platforms still forward so the entities
+    come up unavailable."""
+    # The stub fails every snapshot fetch (HTTP 503), including setup's
+    # first refresh.
+    client = StubSnapshotClient(
+        NestQuestApiError(
+            "NestQuest API GET /api/v1/panel/snapshot failed with HTTP 503",
+            status=503,
+        )
+    )
+    entry = wire_entry_to_registry(
+        make_entry(
+            data={"api_base_url": "http://api.test:8000", "panel_token": "tok"}
+        ),
+        hass.registry,
+    )
+    set_coordinator_client(entry, client)
+    assert await async_setup_entry(hass, entry) is True
+    coordinator = entry.runtime_data.coordinator
+    assert coordinator.api_client is client
+    # The failed first pass: the entities' surface stays unavailable.
+    assert coordinator.last_update_success is False
+    assert coordinator.data is None
+    # Setup survived the failed first refresh — the platforms were
+    # forwarded (the regression the review caught: a first-refresh
+    # failure used to abort setup before any entity was created).
+    assert hass.config_entries.forwarded_platforms == [
+        "sensor",
+        "binary_sensor",
+    ]
+    # The unload after the failed-first-refresh setup stays clean.
+    assert await async_unload_entry(hass, entry) is True
 
 
 async def test_coordinator_unconfigured_api_does_not_crash_setup(
@@ -386,10 +437,19 @@ async def test_coordinator_unconfigured_api_does_not_crash_setup(
     assert isinstance(coordinator.api_client, _UnconfiguredApiClient)
     # A real NestQuestApiClient was never built (it would ValueError).
     assert not isinstance(coordinator.api_client, NestQuestApiClient)
+    # The first refresh failed the HA way: the update pass converted
+    # the stub's typed error to UpdateFailed, the first refresh raised
+    # ConfigEntryNotReady, and setup tolerated it — platforms forwarded
+    # so the entities come up unavailable.
     assert coordinator.last_update_success is False
     assert coordinator.data is None
-    with pytest.raises(NestQuestApiError, match="not configured"):
-        await coordinator.async_refresh()
+    with pytest.raises(UpdateFailed, match="not configured"):
+        await coordinator._async_update_data()
+    assert hass.config_entries.forwarded_platforms == [
+        "sensor",
+        "binary_sensor",
+    ]
+    assert await async_unload_entry(hass, entry) is True
 
 
 async def test_coordinator_configured_token_builds_real_client(
@@ -484,11 +544,23 @@ async def test_unload_shuts_coordinator_down(hass, make_entry) -> None:
     assert torn_down == [coordinator]
 
 
-async def test_failed_first_refresh_shuts_coordinator_down(
+async def test_setup_failure_after_registration_shuts_coordinator_down(
     hass, make_entry, monkeypatch
 ) -> None:
     """A setup failure after coordinator creation must not leak its
-    listeners."""
+    listeners or leave a stale runtime record behind.
+
+    The runtime record registers in ``hass.data`` BEFORE the platform
+    forward, so a forward failure reaches the unwind with the record
+    already registered.  The unwind must shut the coordinator down,
+    clear ``entry.runtime_data``, AND remove the stale ``hass.data``
+    entry — otherwise a later unload picks up the stale, already-torn-
+    down record and re-invokes the already-consumed update-listener
+    remover, which raises.  (A failed first refresh is NOT such a
+    failure: HA's real first refresh wraps it in ConfigEntryNotReady,
+    which setup deliberately tolerates so entities come up
+    unavailable.)
+    """
     from custom_components.nestquest import async_setup_entry
     import custom_components.nestquest.coordinator as coordinator_module
 
@@ -503,20 +575,29 @@ async def test_failed_first_refresh_shuts_coordinator_down(
         _record_shutdown,
     )
 
-    async def _boom(self):
-        raise RuntimeError("refresh failed")
+    async def _boom(entry, platforms):
+        raise RuntimeError("platform forward failed")
 
     monkeypatch.setattr(
-        coordinator_module.NestQuestCoordinator,
-        "_async_update_data",
+        hass.config_entries,
+        "async_forward_entry_setups",
         _boom,
     )
 
     entry = wire_entry_to_registry(make_entry(), hass.registry)
-    with pytest.raises(RuntimeError, match="refresh failed"):
+    with pytest.raises(RuntimeError, match="platform forward failed"):
         await async_setup_entry(hass, entry)
     assert shutdown_calls == [entry.entry_id]
     assert getattr(entry, "runtime_data", None) is None
+    # The stale hass.data registration was removed with the runtime
+    # record: the unload below finds nothing stale, must not raise,
+    # and must leave no residue behind.
+    assert await async_unload_entry(hass, entry) is True
+    assert DOMAIN not in hass.data
+    assert hass.data == {}
+    assert hass.registry.size == 0
+    assert hass.time_change.size == 0
+    assert entry.runtime_data is None
 
 
 async def test_snapshot_from_api_payload_empty_household() -> None:

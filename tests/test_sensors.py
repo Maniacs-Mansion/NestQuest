@@ -264,6 +264,11 @@ async def test_due_today_payload_omits_missed_admin_equals_panel(
         "the API payload omits missed rows, so the admin payload "
         "carries none either (the PWA is the admin surface now)"
     )
+    # Counts still roll the missed instance up as not-completed: the
+    # counts arrive precomputed from the route's own build, which rolls
+    # the FULL day (the missed row included) into the numbers.
+    assert _sensor(hass, bo.id, "quests_completed_today").native_value == 0
+    assert _sensor(hass, bo.id, "quests_remaining_today").native_value == 1
 
 
 @pytest.mark.parametrize("kind", SENSOR_KINDS)
