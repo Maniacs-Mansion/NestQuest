@@ -18,7 +18,9 @@ from homeassistant.helpers.event import async_track_time_change
 
 from .const import (
     CONF_ADMIN_USER_IDS,
+    CONF_SNAPSHOT_STALENESS,
     CONF_UPDATE_INTERVAL,
+    DEFAULT_SNAPSHOT_STALENESS,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     LOGGER,
@@ -517,6 +519,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             api_client=api_client,
             update_interval_seconds=entry.options.get(
                 CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
+            ),
+            staleness_seconds=entry.options.get(
+                CONF_SNAPSHOT_STALENESS, DEFAULT_SNAPSHOT_STALENESS
             ),
         )
         # The panel event subscription (the SSE task): a background

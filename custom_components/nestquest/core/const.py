@@ -81,6 +81,21 @@ CONF_UPDATE_INTERVAL = "update_interval"
 DEFAULT_UPDATE_INTERVAL = 300
 MIN_UPDATE_INTERVAL = 30
 
+# Last-good snapshot staleness (Feature 18), in SECONDS: how long the
+# coordinator keeps SERVING the last good snapshot after the API stops
+# answering.  A failed poll whose elapsed time since the last successful
+# fetch is within the threshold returns the cached snapshot (the panel
+# keeps rendering last-good data, entities stay available); past it the
+# poll fails the HA way and the entities go unavailable.  The default is
+# 3x the default update interval (900 s = 15 minutes): three consecutive
+# failed five-minute polls before the board is declared stale — enough
+# to ride out an API service restart, short enough not to render a
+# days-old board all day.  Validation floor: the threshold must be at
+# least the configured update interval, or the cache could never span
+# even one failed poll.
+CONF_SNAPSHOT_STALENESS = "snapshot_staleness"
+DEFAULT_SNAPSHOT_STALENESS = 3 * DEFAULT_UPDATE_INTERVAL
+
 # Notification automations (Feature 11).  The notify target is a free-text
 # Home Assistant service name (e.g. "notify.mobile_app_dads_phone") the
 # household fills in — never a hard-coded personal target; the times are

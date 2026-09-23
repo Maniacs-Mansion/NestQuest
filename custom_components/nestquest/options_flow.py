@@ -23,6 +23,7 @@ from .const import (
     CONF_NOTIFY_TARGET,
     CONF_PANEL_IDLE_TIMEOUT,
     CONF_PANEL_TOKEN,
+    CONF_SNAPSHOT_STALENESS,
     CONF_UPDATE_INTERVAL,
     DEFAULT_API_BASE_URL,
     DEFAULT_AFTERNOON_REMINDER_TIME,
@@ -33,6 +34,7 @@ from .const import (
     DEFAULT_MORNING_SUMMARY_TIME,
     DEFAULT_PANEL_IDLE_TIMEOUT,
     DEFAULT_PANEL_TOKEN,
+    DEFAULT_SNAPSHOT_STALENESS,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     MIN_UPDATE_INTERVAL,
@@ -50,8 +52,18 @@ def _parse_time(value: str) -> bool:
     return TIME_PATTERN.fullmatch(value) is not None
 
 
-def _async_validate(user_input: dict[str, Any]) -> dict[str, str]:
-    """Validate user input and return field-level errors instead of raising."""
+def _async_validate(
+    user_input: dict[str, Any],
+    current: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Validate user input and return field-level errors instead of raising.
+
+    ``current`` carries the stored values (entry options → entry data →
+    defaults) so a raw submit that sets one field but omits a sibling it
+    is validated against (the staleness threshold vs. the update
+    interval) can still check the effective pair; raw submits omitting
+    BOTH keys keep their stored values untouched.
+    """
     errors: dict[str, str] = {}
 
     horizon_days = user_input.get(CONF_HORIZON_DAYS)
@@ -85,6 +97,33 @@ def _async_validate(user_input: dict[str, Any]) -> dict[str, str]:
         or update_interval < MIN_UPDATE_INTERVAL
     ):
         errors[CONF_UPDATE_INTERVAL] = "invalid"
+
+    # The last-good staleness threshold (Feature 18) is OPTIONAL in raw
+    # submits the same way: a missing key keeps the current value.  It
+    # must be a positive int, and at least the EFFECTIVE update interval
+    # (the one this submit carries, else the stored or default one) — a
+    # threshold shorter than the poll cadence could never serve even one
+    # cached snapshot.
+    staleness = user_input.get(CONF_SNAPSHOT_STALENESS)
+    if staleness is not None and (
+        isinstance(staleness, bool)
+        or not isinstance(staleness, int)
+        or staleness < 1
+    ):
+        errors[CONF_SNAPSHOT_STALENESS] = "invalid"
+    elif staleness is not None and not errors.get(CONF_UPDATE_INTERVAL):
+        stored_interval = (current or {}).get(CONF_UPDATE_INTERVAL)
+        effective_interval = update_interval
+        if effective_interval is None and (
+            isinstance(stored_interval, int)
+            and not isinstance(stored_interval, bool)
+            and stored_interval >= MIN_UPDATE_INTERVAL
+        ):
+            effective_interval = stored_interval
+        if effective_interval is None:
+            effective_interval = DEFAULT_UPDATE_INTERVAL
+        if staleness < effective_interval:
+            errors[CONF_SNAPSHOT_STALENESS] = "invalid_staleness"
 
     # The notification section (Feature 11) is OPTIONAL in raw submits
     # the same way: a missing key keeps the current value.  The three
@@ -178,6 +217,14 @@ def _build_schema(
         ): int,
         vol.Required(
             CONF_UPDATE_INTERVAL, default=current[CONF_UPDATE_INTERVAL]
+        ): int,
+        # The last-good staleness threshold (Feature 18): how long the
+        # coordinator keeps serving the cached snapshot after the API
+        # stops answering.  Schema-validated submits always carry it
+        # (the default pre-fills from the stored value); raw callers
+        # omitting it keep their stored value (see _async_validate).
+        vol.Required(
+            CONF_SNAPSHOT_STALENESS, default=current[CONF_SNAPSHOT_STALENESS]
         ): int,
         vol.Required(
             CONF_NOTIFY_TARGET, default=current[CONF_NOTIFY_TARGET]
@@ -291,7 +338,7 @@ class NestQuestOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
                 ),
             )
 
-        errors = _async_validate(user_input)
+        errors = _async_validate(user_input, self._current_values())
         # The admin ids are validated only when the key is present:
         # schema-validated submits always carry it (vol.Optional's
         # default fills from the current allowlist), while raw callers
@@ -354,6 +401,10 @@ class NestQuestOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
                 CONF_UPDATE_INTERVAL,
                 self._current_values()[CONF_UPDATE_INTERVAL],
             ),
+            CONF_SNAPSHOT_STALENESS: user_input.get(
+                CONF_SNAPSHOT_STALENESS,
+                self._current_values()[CONF_SNAPSHOT_STALENESS],
+            ),
         }
         # The notification section (Feature 11) stores the household's
         # choices the same fall-back-to-current way, so raw submits
@@ -398,6 +449,7 @@ class NestQuestOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             (CONF_DAY_ROLLOVER_TIME, DEFAULT_DAY_ROLLOVER_TIME),
             (CONF_PANEL_IDLE_TIMEOUT, DEFAULT_PANEL_IDLE_TIMEOUT),
             (CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL),
+            (CONF_SNAPSHOT_STALENESS, DEFAULT_SNAPSHOT_STALENESS),
             (CONF_NOTIFY_TARGET, ""),
             (CONF_MORNING_SUMMARY_TIME, DEFAULT_MORNING_SUMMARY_TIME),
             (CONF_AFTERNOON_REMINDER_TIME, DEFAULT_AFTERNOON_REMINDER_TIME),
