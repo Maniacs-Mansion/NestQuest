@@ -6,15 +6,15 @@ import sqlite3
 
 import pytest
 
-from custom_components.nestquest.dao_children import ChildrenDao
-from custom_components.nestquest.dao_presence import (
+from custom_components.nestquest.core.dao_children import ChildrenDao
+from custom_components.nestquest.core.dao_presence import (
     PresenceOverrideRecord,
     PresenceOverridesDao,
     PresenceScheduleRecord,
     PresenceSchedulesDao,
 )
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.migrations import apply_migrations
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.migrations import apply_migrations
 
 
 def _run(coro):
@@ -741,12 +741,12 @@ def test_override_create_racing_conflicts_serialize(tmp_path) -> None:
     from unittest.mock import MagicMock
 
     async def _main():
-        from custom_components.nestquest.dao_children import ChildrenDao
-        from custom_components.nestquest.dao_presence import (
+        from custom_components.nestquest.core.dao_children import ChildrenDao
+        from custom_components.nestquest.core.dao_presence import (
             PresenceOverridesDao,
         )
-        from custom_components.nestquest.db import NestQuestDatabase
-        from custom_components.nestquest.migrations import apply_migrations
+        from custom_components.nestquest.core.db import NestQuestDatabase
+        from custom_components.nestquest.core.migrations import apply_migrations
 
         armed = {"active": False, "gated": False}
         gate_open = asyncio_module.Event()

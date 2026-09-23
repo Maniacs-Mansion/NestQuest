@@ -10,17 +10,22 @@ child's ``next_present``, a due-timed quest's ``overdue`` under a
 pinned ``now``, the custody ``cycle_day`` (> 1), and the panel payload
 dict shape (``done`` -> ``completed``, ``on_time`` passthrough, and
 ``missed`` omission) are all exercised as literals.
+
+The database is a standalone core one (the integration owns no
+database since Feature 18's DB removal); the closing round-trip pins
+that the integration's coordinator reconstructs the SAME dataclasses
+from the route's payload.
 """
 from __future__ import annotations
 
 import datetime
 from zoneinfo import ZoneInfo
 
-from conftest import wire_entry_to_registry
+from conftest import set_coordinator_client, wire_entry_to_registry
 
 from custom_components.nestquest import async_setup_entry
-from custom_components.nestquest.children import create_child
-from custom_components.nestquest.completion import complete_instance
+from custom_components.nestquest.core.children import create_child
+from custom_components.nestquest.core.completion import complete_instance
 from custom_components.nestquest.core.snapshot import (
     ChildDaySnapshot,
     NestQuestSnapshot,
@@ -28,14 +33,17 @@ from custom_components.nestquest.core.snapshot import (
     build_snapshot,
     instance_payload,
 )
-from custom_components.nestquest.dao_instances import QuestInstancesDao
-from custom_components.nestquest.dao_presence import (
+from custom_components.nestquest.core.dao_instances import QuestInstancesDao
+from custom_components.nestquest.core.dao_presence import (
     PresenceOverridesDao,
     PresenceSchedulesDao,
 )
-from custom_components.nestquest.materialize import materialize
-from custom_components.nestquest.quest_definitions import create_quest_definition
-from custom_components.nestquest.recurrence import ScheduleRule
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.materialize import materialize
+from custom_components.nestquest.core.migrations import apply_migrations
+from custom_components.nestquest.core.quest_definitions import create_quest_definition
+from custom_components.nestquest.core.recurrence import ScheduleRule
+from custom_components.nestquest.core.settings import NestQuestSettings
 
 
 async def test_instance_payload_shape_and_missed_omission() -> None:
@@ -105,7 +113,7 @@ async def test_instance_payload_shape_and_missed_omission() -> None:
     )
 
 
-async def test_build_snapshot_explicit_values(hass, make_entry, monkeypatch) -> None:
+async def test_build_snapshot_explicit_values(hass, make_entry, tmp_path) -> None:
     """The builder produces the documented shape as literals, pinned in time.
 
     Ada is AWAY today (a 2-week schedule whose absent week 0 covers today,
@@ -117,11 +125,12 @@ async def test_build_snapshot_explicit_values(hass, make_entry, monkeypatch) -> 
     scheduled active child is Ada, whose 2-week cycle anchored one day
     before today puts ``cycle_day`` at 2.
     """
-    entry = wire_entry_to_registry(make_entry(), hass.registry)
-    assert await async_setup_entry(hass, entry) is True
-    coordinator = entry.runtime_data.coordinator
-    database = entry.runtime_data.database
-    settings = entry.runtime_data.settings
+    # A standalone core database (the integration owns none): the
+    # builder and its seed run against it through the executor.
+    database = NestQuestDatabase(hass.async_add_executor_job)
+    await database.open(tmp_path / "snapshot.db")
+    await apply_migrations(database)
+    settings = NestQuestSettings()
 
     # Single clock read for the seed/snapshot anchor (no midnight skew);
     # the coordinator no longer owns a clock read (the API serves the
@@ -303,8 +312,6 @@ async def test_build_snapshot_explicit_values(hass, make_entry, monkeypatch) -> 
     # The dataclasses are frozen, so == is a full deep compare — a
     # reconstruction that dropped or reshaped a field would diverge
     # here even though the literal assertions above still pass.
-    from conftest import set_coordinator_client
-
     class _PinnedPayloadClient:
         async def get_snapshot(self):
             return {
@@ -328,6 +335,12 @@ async def test_build_snapshot_explicit_values(hass, make_entry, monkeypatch) -> 
                 ],
             }
 
+    entry = wire_entry_to_registry(
+        make_entry(data={"api_base_url": "http://api.test:8000", "panel_token": "tok"}),
+        hass.registry,
+    )
     set_coordinator_client(entry, _PinnedPayloadClient())
-    await coordinator.async_refresh()
+    assert await async_setup_entry(hass, entry) is True
+    coordinator = entry.runtime_data.coordinator
     assert coordinator.data == built
+    await database.close()

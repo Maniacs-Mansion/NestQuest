@@ -9,16 +9,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.schema import SCHEMA_V7_META_STATE_DDL
-from custom_components.nestquest.migrations import (
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.schema import SCHEMA_V7_META_STATE_DDL
+from custom_components.nestquest.core.migrations import (
     MIGRATIONS,
     VERSION_TABLE,
     VERSION_TABLE_DDL,
     apply_migrations,
     read_schema_version,
 )
-from custom_components.nestquest.schema import (
+from custom_components.nestquest.core.schema import (
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL,
 )
@@ -1064,133 +1064,3 @@ def test_partial_pending_migrations_resume_from_current_version(
         assert "step_b" in _tables(database)
     finally:
         _run(database.close())
-
-
-# ---------------------------------------------------------------------------
-# Startup wiring: setup runs the migration runner, not raw DDL
-# ---------------------------------------------------------------------------
-
-
-async def _setup_entry(hass, entry, registry) -> object:
-    from tests.test_lifecycle import _wire  # reuse the established wiring
-
-    entry = _wire(entry, registry)
-    from custom_components.nestquest import async_setup_entry
-
-    await async_setup_entry(hass, entry)
-    return entry
-
-
-async def test_setup_entry_migrates_fresh_database(hass, make_entry) -> None:
-    import sqlite3 as sqlite3_mod
-
-    from custom_components.nestquest.migrations import read_schema_version
-    from custom_components.nestquest.store import async_get_db_path
-
-    entry = await _setup_entry(hass, make_entry(), hass.registry)
-    database = entry.runtime_data.database
-    assert await read_schema_version(database) == len(MIGRATIONS)
-    # The v1 tables exist because the runner applied migration 1.
-    names = {
-        row[0]
-        for row in await database.fetch_all(
-            "SELECT name FROM sqlite_master WHERE type = 'table' "
-            "AND name NOT LIKE 'sqlite_%'"
-        )
-    }
-    assert "children" in names and "completion_events" in names
-    # The version table exists with its singleton row stamped.
-    columns = await database.fetch_all(f"PRAGMA table_info({VERSION_TABLE})")
-    assert [(row[1], row[3]) for row in columns] == [("id", 1), ("version", 1)]
-    db_path = await async_get_db_path(hass)
-    conn = sqlite3_mod.connect(db_path)
-    try:
-        conn.execute(f"INSERT INTO {VERSION_TABLE} (id, version) VALUES (2, 1)")
-        violated = False
-    except sqlite3_mod.IntegrityError:
-        violated = True
-    finally:
-        conn.close()
-    assert violated, "singleton-row CHECK must be live in the setup-created DB"
-    await database.close()
-
-
-async def test_options_reload_reopens_and_rechecks_version(
-    hass, make_entry
-) -> None:
-    """A listener-triggered reload re-runs setup against the same file.
-
-    Unload then setup is the reload lifecycle: the old connection is
-    closed, apply_migrations runs again on the persisted file, keeps
-    version and rows intact, and the reopened connection is live.
-    """
-    from custom_components.nestquest import async_unload_entry
-    from custom_components.nestquest.migrations import read_schema_version
-
-    entry = await _setup_entry(hass, make_entry(), hass.registry)
-    database_a = entry.runtime_data.database
-    await database_a.execute(
-        "INSERT INTO children (display_name, created_at) VALUES (?, ?)",
-        ("Ada", "2026-09-13T00:00:00+00:00"),
-    )
-    assert await async_unload_entry(hass, entry) is True
-    assert not database_a.connected
-
-    entry_reloaded = await _setup_entry(hass, make_entry(), hass.registry)
-    database_b = entry_reloaded.runtime_data.database
-    assert database_b is not database_a
-    try:
-        assert await read_schema_version(database_b) == len(MIGRATIONS)
-        row = await database_b.fetch_one("SELECT COUNT(*) FROM children")
-        assert row == (1,)
-    finally:
-        await database_b.close()
-
-
-async def test_setup_entry_failure_closes_database(
-    hass, make_entry, monkeypatch
-) -> None:
-    """A failing migration closes the opened connection before re-raising.
-
-    A migration failure surfaces as ConfigEntryNotReady (HA retries
-    setup) with the original error preserved as __cause__.  Spies on
-    the real wrapper instance: records whether close() ran, rather
-    than inferring from hass.data (a failed setup never stores a
-    runtime record).
-    """
-    import pytest as pytest_module
-    from homeassistant.exceptions import ConfigEntryNotReady
-
-    import custom_components.nestquest as nestquest_module
-    from custom_components.nestquest.db import NestQuestDatabase
-    from custom_components.nestquest.migrations import (
-        MIGRATIONS as _MIGRATIONS,
-    )
-
-    async def _failing(database, migrations=_MIGRATIONS):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(
-        nestquest_module, "apply_migrations", _failing, raising=True
-    )
-
-    close_calls: list[bool] = []
-    original_close = NestQuestDatabase.close
-
-    async def _spy_close(self):
-        close_calls.append(True)
-        return await original_close(self)
-
-    monkeypatch.setattr(NestQuestDatabase, "close", _spy_close)
-
-    entry = make_entry()
-    with pytest_module.raises(ConfigEntryNotReady) as excinfo:
-        await _setup_entry(hass, entry, hass.registry)
-    assert isinstance(excinfo.value.__cause__, RuntimeError)
-    assert "boom" in str(excinfo.value.__cause__)
-
-    assert close_calls == [True], (
-        "failed setup must close the connection it opened"
-    )
-    record = hass.data["nestquest"].get(entry.entry_id)
-    assert record is None, "failed setup must not store runtime data"

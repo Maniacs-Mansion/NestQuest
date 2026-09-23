@@ -18,25 +18,19 @@
     "step": {
       "init": {
         "title": "NestQuest Settings",
-        "description": "Adjust how NestQuest plans, rolls over days, idles its panel, and reaches the NestQuest API service.",
+        "description": "Adjust how the NestQuest API client polls and reaches the NestQuest API service.",
         "data": {
-          "horizon_days": "Generation horizon (days)",
-          "day_rollover_time": "Day rollover time (HH:MM)",
           "panel_idle_timeout": "Panel idle timeout (seconds)",
           "snapshot_staleness": "Last-good snapshot staleness (seconds)",
           "api_base_url": "NestQuest API base URL (http://host:port)",
-          "panel_token": "Panel service token",
-          "admin_user_ids": "Admin users (parents)"
+          "panel_token": "Panel service token"
         }
       }
     },
     "errors": {
       "invalid": "Invalid value.",
-      "invalid_time": "Time must use 24-hour HH:MM format.",
       "invalid_url": "Enter the API base URL as a full http:// or https:// URL with a host.",
-      "invalid_staleness": "Last-good snapshot staleness must be at least the update interval.",
-      "no_admins": "Select at least one admin user; an empty allowlist would lock everyone out.",
-      "invalid_admin": "Invalid admin selection."
+      "invalid_staleness": "Last-good snapshot staleness must be at least the update interval."
     }
   }
 }

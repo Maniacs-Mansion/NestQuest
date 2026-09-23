@@ -6,8 +6,8 @@ import sqlite3
 
 import pytest
 
-from custom_components.nestquest.dao_children import ChildrenDao
-from custom_components.nestquest.dao_rules import (
+from custom_components.nestquest.core.dao_children import ChildrenDao
+from custom_components.nestquest.core.dao_rules import (
     ScheduleRuleRecord,
     ScheduleRuleStorage,
     ScheduleRulesDao,
@@ -17,9 +17,9 @@ from custom_components.nestquest.dao_rules import (
     schedule_rule_from_storage,
     schedule_rule_to_storage,
 )
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.migrations import apply_migrations
-from custom_components.nestquest.recurrence import (
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.migrations import apply_migrations
+from custom_components.nestquest.core.recurrence import (
     RuleType,
     RuleValidationError,
     ScheduleRule,
@@ -341,7 +341,7 @@ def test_rule_delete_concurrent_with_definition_create_is_safe(
                 # delete task has been scheduled, so the create holds
                 # the connection lock while the delete queues behind
                 # it — then the create proceeds and wins.
-                import custom_components.nestquest.dao_rules as dao_rules
+                import custom_components.nestquest.core.dao_rules as dao_rules
 
                 original_validate = (
                     dao_rules.QuestDefinitionsDao._validate_rule_exists

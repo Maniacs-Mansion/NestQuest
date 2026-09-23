@@ -54,7 +54,7 @@ def _require_runtime(hass: HomeAssistant, find_runtime: FindRuntime):
     runtime = find_runtime(hass)
     if runtime is None:
         raise HomeAssistantError(
-            "NestQuest has no live database; cannot run this service"
+            "NestQuest is not loaded; cannot run this service"
         )
     return runtime
 

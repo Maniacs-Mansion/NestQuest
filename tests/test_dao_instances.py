@@ -7,16 +7,16 @@ import sqlite3
 
 import pytest
 
-from custom_components.nestquest.dao_children import ChildrenDao
-from custom_components.nestquest.dao_instances import (
+from custom_components.nestquest.core.dao_children import ChildrenDao
+from custom_components.nestquest.core.dao_instances import (
     CompletionEventRecord,
     CompletionEventsDao,
     QuestInstanceRecord,
     QuestInstancesDao,
 )
-from custom_components.nestquest.dao_rules import ScheduleRulesDao, QuestDefinitionsDao
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.migrations import apply_migrations
+from custom_components.nestquest.core.dao_rules import ScheduleRulesDao, QuestDefinitionsDao
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.migrations import apply_migrations
 
 
 def _run(coro):
