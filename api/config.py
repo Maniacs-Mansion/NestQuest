@@ -1,16 +1,22 @@
 """Configuration for the NestQuest API service.
 
-The API reads its single configuration knob — the SQLite database path —
-from the ``NESTQUEST_DB_PATH`` environment variable.  Unlike a dev
-convenience default, a missing or empty value is a configuration ERROR,
-not a silent fallback to a predictable world-writable temp path: the API
-owns the database (it is the writer of record per Feature 16's
-contract), and silently dropping data into ``$TMPDIR/nestquest.db``
-would lose it at reboot.  ``ApiConfig.from_env`` therefore RAISES when
-the variable is unset or empty.  This mirrors the integration's
-"explicit settings object" discipline (Feature 15's
-``core.settings``): the API never reads HA config; callers pass the
-resolved path into the database wiring.
+The API reads its configuration knobs from environment variables:
+
+- ``NESTQUEST_DB_PATH`` — the SQLite database file.  The API opens this
+  file on startup (creating it if absent) and applies migrations.
+- ``NESTQUEST_PANEL_TOKEN`` — the static panel-plane service token
+  (D-012): the credential ``/api/v1/panel/*`` routes require via
+  :func:`api.dependencies.require_panel_token`.  It is stored outside
+  the repo and handed to the service through the environment.
+
+Unlike a dev convenience default, a missing or empty value is a
+configuration ERROR, not a silent fallback: a default database path
+would silently drop data at reboot, and a default (or empty) service
+token would either authenticate everyone or lock the panel plane out
+for good.  ``ApiConfig.from_env`` therefore RAISES when either variable
+is unset or empty.  This mirrors the integration's "explicit settings
+object" discipline (Feature 15's ``core.settings``): the API never
+reads HA config; callers pass the resolved values into the wiring.
 
 Serving: the app is built with the factory ``api.app:create_app`` — run
 it with ``uvicorn --factory api.app:create_app`` so the factory reads
@@ -27,6 +33,14 @@ from dataclasses import dataclass
 #: :meth:`ApiConfig.from_env`.
 DB_PATH_ENV = "NESTQUEST_DB_PATH"
 
+#: Environment variable holding the static panel-plane service token
+#: (D-012), checked by :func:`api.dependencies.require_panel_token`.
+#: REQUIRED — unset or empty raises :class:`ConfigError` from
+#: :meth:`ApiConfig.from_env`; there is no silent default, because an
+#: empty configured token would either authenticate every caller or
+#: lock the panel plane out permanently.
+PANEL_TOKEN_ENV = "NESTQUEST_PANEL_TOKEN"
+
 
 class ConfigError(RuntimeError):
     """Raised when required API configuration is missing or invalid."""
@@ -36,12 +50,18 @@ class ConfigError(RuntimeError):
 class ApiConfig:
     """Resolved API configuration.
 
-    Currently a single field — the SQLite path — but kept as a dataclass
-    so later tasks (auth, SSE, settings persistence) can extend it
-    without touching the call sites that read ``db_path``.
+    Both fields are required (no defaults): ``from_env`` rejects an
+    unset or empty value for either, and a caller building the dataclass
+    directly must pass an explicit token — the token check itself fails
+    closed on an empty configured token, but expecting a caller to
+    discover that at request time is a wiring mistake, so the field is
+    mandatory.  Kept as a dataclass so later tasks (admin plane, SSE,
+    settings persistence) can extend it without touching the call sites
+    that read ``db_path``.
     """
 
     db_path: str
+    panel_token: str
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "ApiConfig":
@@ -52,17 +72,27 @@ class ApiConfig:
 
         Raises :class:`ConfigError` when ``NESTQUEST_DB_PATH`` is unset
         or empty/whitespace-only — there is no silent default, because a
-        default in the temp directory would silently lose data at reboot.
+        default in the temp directory would silently lose data at reboot
+        — and likewise when ``NESTQUEST_PANEL_TOKEN`` is unset or empty
+        (a default token is never invented: the panel plane is closed
+        until a real one is configured).
         """
         source = env if env is not None else os.environ
-        raw = source.get(DB_PATH_ENV, "").strip()
-        if not raw:
+        raw_db_path = source.get(DB_PATH_ENV, "").strip()
+        if not raw_db_path:
             raise ConfigError(
                 f"{DB_PATH_ENV} must be set to a writable SQLite file path "
                 f"(it is unset or empty — the API will not fall back to a "
                 f"temp directory and silently lose data)"
             )
-        return cls(db_path=raw)
+        raw_panel_token = source.get(PANEL_TOKEN_ENV, "").strip()
+        if not raw_panel_token:
+            raise ConfigError(
+                f"{PANEL_TOKEN_ENV} must be set to the panel service token "
+                f"(it is unset or empty — the API will not start without "
+                f"one, and no default token is invented)"
+            )
+        return cls(db_path=raw_db_path, panel_token=raw_panel_token)
 
 
-__all__ = ["ApiConfig", "ConfigError", "DB_PATH_ENV"]
+__all__ = ["ApiConfig", "ConfigError", "DB_PATH_ENV", "PANEL_TOKEN_ENV"]
