@@ -39,6 +39,7 @@ from fastapi import FastAPI
 
 from api.config import ApiConfig
 from api.database import DatabaseState, make_database
+from api.events import TransitionPublisher
 from api.routes_panel import router as panel_router
 
 
@@ -47,12 +48,16 @@ def _build_lifespan(db_path: str):
 
     Captured as a closure so the app factory can hand the configured
     path in without threading it through FastAPI's lifespan signature.
+    The lifespan also installs the app's ONE in-process transition
+    publisher on ``app.state.publisher`` (see :mod:`api.events`) so
+    every route and SSE subscriber shares that single instance.
     """
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         state = make_database(db_path)
         app.state.db = state
+        app.state.publisher = TransitionPublisher()
         try:
             await state.open_and_migrate()
             yield
