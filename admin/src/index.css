@@ -1,0 +1,39 @@
+/* NestQuest Admin — global tokens + base.
+   Plain CubeCraft styling, mobile-first, 390x844 reference
+   (design/ADMIN-SPEC.md). Values mirror design/tokens/nestquest-admin-tokens.css,
+   re-scoped to :root for the standalone PWA. */
+
+:root {
+  --nq-brand-blue: #3b3ab8;
+  --nq-brand-purple: #a035cc;
+
+  --nq-a-page: #f4f4f6;
+  --nq-a-surface: #ffffff;
+  --nq-a-border: #e4e4ea;
+  --nq-a-divider: #ededf1;
+
+  --nq-a-ink: #18181d;
+  --nq-a-ink-secondary: #52525e;
+  --nq-a-ink-tertiary: #70707e;
+
+  --nq-a-font: Nunito, system-ui, sans-serif;
+  --nq-a-tabbar-height: 70px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--nq-a-font);
+  background: var(--nq-a-page);
+  color: var(--nq-a-ink);
+  -webkit-font-smoothing: antialiased;
+}
