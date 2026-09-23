@@ -350,6 +350,61 @@ def test_strategy_generates_views_for_three_children() -> None:
         "bo",
         "cory",
     ]
+    assert [view["title"] for view in views] == [
+        "The Party",
+        "Ada's Quest Log",
+        "Bo's Quest Log",
+        "Cory's Quest Log",
+    ]
+
+
+def test_strategy_every_view_is_panel_type() -> None:
+    """Every generated view carries ``type: "panel"``: Home Assistant
+    defaults an unspecified view to Masonry, which constrains the
+    1080px-tall NestQuest card to a narrow column (README's TouchHub
+    setup warns of exactly this); with a generated dashboard there is
+    no editor step left to set Panel by hand."""
+    result = _generate_dashboard({}, _three_child_states())
+    for view in result["views"]:
+        assert view["type"] == "panel"
+
+
+def test_strategy_log_view_titles_use_the_roster_display_name() -> None:
+    """Quest-log view titles come from the roster's ``name`` field (the
+    child's display name), not the lowercased entity-id slug; the slug
+    stays the view's path."""
+    result = _generate_dashboard(
+        {},
+        {
+            "sensor.nestquest_household_quests_due_today": _state(
+                "0",
+                child_roster=[
+                    {"child_id": 7, "name": "Milo", "slug": "milo"},
+                ],
+            ),
+        },
+    )
+    views = result["views"]
+    assert len(views) == 2
+    assert views[1]["path"] == "milo"
+    assert views[1]["title"] == "Milo's Quest Log"
+
+
+def test_strategy_passes_weather_entity_through_to_the_cards() -> None:
+    """An explicit ``weather_entity`` in the strategy configuration is
+    passed through to the generated card configs (both the board and
+    the quest log render the weather dock when it is set)."""
+    result = _generate_dashboard(
+        {"weather_entity": "weather.home"},
+        _three_child_states(),
+    )
+    views = result["views"]
+    for view in views:
+        assert view["cards"][0]["weather_entity"] == "weather.home"
+    # And without it, no weather_entity key is emitted at all.
+    unset = _generate_dashboard({}, _three_child_states())
+    for view in unset["views"]:
+        assert "weather_entity" not in view["cards"][0]
 
 
 def test_strategy_wires_navigation_between_the_views() -> None:

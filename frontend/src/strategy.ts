@@ -6,12 +6,14 @@ type StateObject = {
 };
 
 type RosterEntry = {
+  name: string;
   slug: string;
 };
 
 type View = {
   path?: string;
   title?: string;
+  type: string;
   cards: Record<string, unknown>[];
 };
 
@@ -22,7 +24,6 @@ type LovelaceConfig = {
 type StrategyConfig = Record<string, unknown>;
 
 type StrategyClass = {
-  new (): unknown;
   generate: (
     config: StrategyConfig,
     hass: HassLike | undefined
@@ -65,12 +66,23 @@ function dashboardUrlPath(config: StrategyConfig): string {
   return segment ?? "";
 }
 
+/** The display name a roster entry carries, or "" when it is not a
+ *  non-empty string — the roster's ``name`` field (sensor.py
+ *  ``_child_roster``), used for the quest-log view titles. */
+function asRosterName(entry: unknown): string {
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+    return "";
+  }
+  const name = (entry as Record<string, unknown>).name;
+  return typeof name === "string" ? name.trim() : "";
+}
+
 /** The ordered child roster the integration publishes on the household
  *  rollup (custom_components/nestquest/sensor.py — ``child_roster``,
  *  the snapshot's sort_order, then id).  The same source the party
  *  board's plate discovery reads, consumed here at render time so the
  *  quest-log views exist for exactly the active children. */
-function rosterSlugs(hass: HassLike | undefined): string[] {
+function rosterEntries(hass: HassLike | undefined): RosterEntry[] {
   const states = hass?.states as Record<string, StateObject> | undefined;
   const household = states?.["sensor.nestquest_household_quests_due_today"];
   const roster = household?.attributes?.child_roster;
@@ -78,8 +90,8 @@ function rosterSlugs(hass: HassLike | undefined): string[] {
     return [];
   }
   return roster
-    .map((entry) => asRosterSlug(entry))
-    .filter((slug) => slug.length > 0);
+    .map((entry) => ({ slug: asRosterSlug(entry), name: asRosterName(entry) }))
+    .filter((entry) => entry.slug.length > 0);
 }
 
 /**
@@ -129,11 +141,15 @@ export class NestQuestPartyStrategy {
         {
           path: "party",
           title: "The Party",
+          type: "panel",
           cards: [boardCard],
         },
-        ...rosterSlugs(hass).map<View>((slug) => ({
-          path: slug,
-          title: `${slug}'s Quest Log`,
+        ...rosterEntries(hass).map<View>((entry) => ({
+          path: entry.slug,
+          title: entry.name
+            ? `${entry.name}'s Quest Log`
+            : `${entry.slug}'s Quest Log`,
+          type: "panel",
           cards: [{ ...logCard }],
         })),
       ],

@@ -3506,10 +3506,16 @@ function _n(s) {
   return t || (window.location.pathname.split("/").filter(Boolean)[0] ?? "");
 }
 function yn(s) {
-  const n = s?.states?.["sensor.nestquest_household_quests_due_today"]?.attributes?.child_roster;
-  return Array.isArray(n) ? n.map((i) => gn(i)).filter((i) => i.length > 0) : [];
+  if (s === null || typeof s != "object" || Array.isArray(s))
+    return "";
+  const t = s.name;
+  return typeof t == "string" ? t.trim() : "";
 }
-class bn {
+function bn(s) {
+  const n = s?.states?.["sensor.nestquest_household_quests_due_today"]?.attributes?.child_roster;
+  return Array.isArray(n) ? n.map((i) => ({ slug: gn(i), name: yn(i) })).filter((i) => i.slug.length > 0) : [];
+}
+class vn {
   static async generate(t, e) {
     const n = `/${_n(t)}`, i = Bt(t.weather_entity), r = {
       type: "custom:nestquest-party-board-card",
@@ -3525,11 +3531,13 @@ class bn {
         {
           path: "party",
           title: "The Party",
+          type: "panel",
           cards: [r]
         },
-        ...yn(e).map((l) => ({
-          path: l,
-          title: `${l}'s Quest Log`,
+        ...bn(e).map((l) => ({
+          path: l.slug,
+          title: l.name ? `${l.name}'s Quest Log` : `${l.slug}'s Quest Log`,
+          type: "panel",
           cards: [{ ...o }]
         }))
       ]
@@ -3537,9 +3545,9 @@ class bn {
   }
 }
 window.customStrategies = window.customStrategies ?? {};
-window.customStrategies["nestquest-party"] = bn;
-const vn = "/nestquest-static/nestquest-fonts.css";
+window.customStrategies["nestquest-party"] = vn;
+const xn = "/nestquest-static/nestquest-fonts.css";
 if (!document.querySelector('link[data-nq-fonts=""]')) {
   const s = document.createElement("link");
-  s.rel = "stylesheet", s.href = vn, s.dataset.nqFonts = "", document.head.appendChild(s);
+  s.rel = "stylesheet", s.href = xn, s.dataset.nqFonts = "", document.head.appendChild(s);
 }
