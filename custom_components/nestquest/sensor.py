@@ -21,8 +21,6 @@ missed instances, and ``admin_instances`` includes them (D-009).
 """
 from __future__ import annotations
 
-import re
-import unicodedata
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -34,6 +32,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import slugify
 
 from .const import DOMAIN
 from .coordinator import (
@@ -50,9 +49,12 @@ from .core.snapshot import instance_payload
 #: sensors reuse the same helper.
 MAX_STATE_LENGTH = 255
 
-#: Entity-id length cap the slug mirror applies: HA truncates the
-#: entity_id (``sensor.`` + slug) at MAX_LENGTH_STATE_ENTITY_ID (64),
-#: so the slugged object id alone may not exceed 64 - len("sensor.").
+#: Entity-id length cap the roster applies to HA's slugify: HA's
+#: slugifier itself does NOT truncate, but the entity registry derives
+#: entity ids as ``<domain>.<slug>`` and truncates the full entity_id at
+#: MAX_LENGTH_STATE_ENTITY_ID (64), so for this module's ``sensor.``
+#: entities the slugged object id alone may not exceed
+#: 64 - len("sensor.").
 _MAX_SLUG_LENGTH = 64 - len("sensor.")
 
 
@@ -108,23 +110,18 @@ def _next_open_quest(
 def _slugify(text: str) -> str:
     """Slugify a display name the way Home Assistant derives entity ids.
 
-    Mirrors ``homeassistant.util.slugify`` (the unicode path HA runs
-    entity names through) for accented-Latin names: NFKD-normalize,
-    fold to ASCII (accents drop out with their combining marks),
-    lowercase, and turn every run of non-alphanumerics into one
-    underscore, capped at HA's entity-id length like the registry does.
-    The documented divergence from HA's vendored slugifier is unidecode:
-    HA transliterates any script to ASCII (so e.g. non-Latin names
-    survive), this mirror drops those characters instead, and a name
-    that then slugs to nothing falls through to HA's ``unknown``
-    sentinel — the same answer HA's wrapper gives.  (The harness is
-    mock-only — no real HA to import the helper from — and entity ids
-    are registry identity, so the mirror is deliberate.)
+    Runs ``homeassistant.util.slugify`` — the real slugifier HA runs
+    entity names through, which transliterates every script to ASCII
+    through unidecode (so non-Latin names survive: ``京子`` slugs to
+    ``jing_zi``) before folding to lowercase and turning every run of
+    non-alphanumerics into one underscore, answering HA's ``unknown``
+    sentinel when a name slugs to nothing — then caps the result at
+    the object-id length the entity registry enforces (the registry
+    truncates the full ``sensor.`` + slug entity_id at 64 characters,
+    so the slug alone is capped like this; HA's slugify does not
+    truncate by itself).
     """
-    slug = unicodedata.normalize("NFKD", text)
-    slug = slug.encode("ascii", "ignore").decode("ascii")
-    slug = re.sub(r"[^a-z0-9]+", "_", slug.lower()).strip("_")
-    return (slug or "unknown")[:_MAX_SLUG_LENGTH]
+    return slugify(text)[:_MAX_SLUG_LENGTH]
 
 
 def _child_roster(children: Iterable[ChildDaySnapshot]) -> list[dict[str, Any]]:
