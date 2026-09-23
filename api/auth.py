@@ -35,10 +35,13 @@ the real cause is visible in the server log instead of disguised as a
 bad credential; a short backoff window after a failed fetch fails fast
 (re-raising the recorded fault) rather than fetching once per request.
 
-This module validates the TOKEN only — it is authentication, not
-authorization.  Membership in the ``nestquest-admins`` group is the
-NEXT task, which extends :func:`require_admin_jwt` (the verified
-claims are already its return value, so no rewrite is needed).
+Beyond authentication, :func:`require_admin` is the ONE dependency
+every admin route uses: it REJECTS the panel service token outright —
+that credential authenticates the panel plane only, so treating it as
+a JWT candidate would blur two credential types into one check — and
+then requires the verified JWT's ``groups`` claim to name the
+``nestquest-admins`` group (authorization, 403, distinct from the
+uniform authentication 401 so the two failure classes stay apart).
 """
 from __future__ import annotations
 
@@ -69,6 +72,11 @@ _REJECTION_DETAIL = "Missing or invalid admin credentials"
 
 #: Challenge header returned with a 401, per the Bearer auth scheme.
 _WWW_AUTHENTICATE = {"WWW-Authenticate": "Bearer"}
+
+#: The authorization group a verified admin JWT must name in its
+#: ``groups`` claim.  A module constant (the value Authentik's
+#: nestquest-admins group maps to) so it is clearly named in one place.
+ADMIN_GROUP = "nestquest-admins"
 
 #: Seconds a fetched JWKS document stays trusted before the next
 #: fetch.  Five minutes bounds how long a rotated-away key keeps
@@ -266,6 +274,19 @@ class JwksCache:
         return document
 
 
+#: 403 detail for the panel service token on an admin route.  Deliberately
+#: non-leaking: it names the credential TYPE, not its value or where it came
+#: from.  403 (not 401) because this is a REFUSED credential type, not an
+#: absent/invalid one — challenging re-authentication would suggest the same
+#: credential could work with a retry, which it never can here.
+_PANEL_TOKEN_REJECTION_DETAIL = "This credential type is not accepted for admin access"
+
+#: 403 detail for a valid JWT that is not a member of the admin group.
+#: Distinct from the uniform 401 on purpose: the token AUTHENTICATED, but
+#: the caller is not AUTHORIZED, so the response may say so.
+_FORBIDDEN_DETAIL = "Admin access requires membership in the nestquest-admins group"
+
+
 def _reject() -> HTTPException:
     """Build the single 401 the dependency raises for every failure."""
     return HTTPException(
@@ -391,9 +412,9 @@ async def require_admin_jwt(
     :func:`verify_admin_token`, returning the verified claims for the
     route to use (the probe route surfaces the token's ``sub``).
 
-    The nestquest-admins GROUP check is the NEXT task: it extends this
-    dependency (e.g. by inspecting the returned claims) so every admin
-    route inherits it — the 401 contract stays exactly this uniform.
+    The nestquest-admins GROUP check lives in :func:`require_admin`,
+    which wraps this dependency; ``require_admin_jwt`` remains the plain
+    JWT-validation contract — the 401 path stays exactly this uniform.
     """
     if authorization is None:
         raise _reject()
@@ -403,4 +424,59 @@ async def require_admin_jwt(
     return await verify_admin_token(request, credential.strip())
 
 
-__all__ = ["JwksCache", "JwksFetcher", "require_admin_jwt", "verify_admin_token"]
+async def require_admin(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
+    """The ONE admin-plane dependency: service-token refusal + group gate.
+
+    Order matters.  FIRST the Bearer credential is compared against the
+    configured panel service token (``app.state.config.panel_token``):
+    a match is refused OUTRIGHT with 403 — BEFORE any JWT parsing — so
+    the panel credential is never even treated as a JWT candidate, let
+    alone a non-admin JWT.  (403 rather than 401 because this is a
+    refused credential TYPE, not an invalid one: challenging
+    re-authentication would imply retrying could ever succeed; the
+    detail names the type only, never the value.)  A config with an
+    EMPTY panel token never matches anything, so it cannot lock every
+    Bearer request out.
+
+    Otherwise the credential goes through the existing JWT path
+    (:func:`require_admin_jwt` → :func:`verify_admin_token`): a missing
+    or malformed header and any invalid JWT still yield the SAME
+    uniform 401 as before.  A VALID JWT is then checked for
+    authorization: its ``groups`` claim must be a list containing
+    :data:`ADMIN_GROUP` — a missing, empty, or non-list ``groups`` or
+    one without the group raises 403 (distinct from the 401 on
+    purpose: the token authenticated, the caller did not authorize).
+
+    Returns the verified claims for the route.
+    """
+    if authorization is not None:
+        scheme, _, credential = authorization.partition(" ")
+        if scheme.lower() == _BEARER_SCHEME and credential.strip():
+            config = getattr(request.app.state, "config", None)
+            if (
+                config is not None
+                and config.panel_token
+                and credential.strip() == config.panel_token
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail=_PANEL_TOKEN_REJECTION_DETAIL,
+                )
+    claims = await require_admin_jwt(request, authorization)
+    groups = claims.get("groups")
+    if not isinstance(groups, list) or ADMIN_GROUP not in groups:
+        raise HTTPException(status_code=403, detail=_FORBIDDEN_DETAIL)
+    return claims
+
+
+__all__ = [
+    "ADMIN_GROUP",
+    "JwksCache",
+    "JwksFetcher",
+    "require_admin",
+    "require_admin_jwt",
+    "verify_admin_token",
+]
