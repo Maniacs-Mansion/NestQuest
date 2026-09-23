@@ -18,20 +18,47 @@ check all live THERE, never in a handler — and serializes the returned
 payload (``id``, ``display_name``, ``colour``, ``avatar_ref``,
 ``sort_order``, ``is_active``).
 
-Error mapping (every children route, deliberately narrow):
+The quest-definition routes follow the same pattern over
+:mod:`nestquest_core.quest_definitions`: the body model carries the
+shape, the handler builds ONE
+:class:`~nestquest_core.recurrence.ScheduleRule` from the request's
+``rule`` object through the model's own ``from_dict`` (rule validation
+is the MODEL's construction-time job — a bad combination raises
+:class:`~nestquest_core.recurrence.RuleValidationError`, never
+hand-rolled here), and the call goes to
+``create_quest_definition`` / ``edit_quest_definition`` /
+``set_quest_definition_active``.  The title policy, the window-name
+and due-time policy, the assignee checks, the whole-set window
+replacement and the never-hard-delete policy (deactivation is the only
+removal path) all live in the core.  Assignment is NOT settable
+through the API: the core's edit path takes no assignees.  The edit
+route forwards only SUPPLIED fields (``exclude_unset``), like the
+children edit.
+
+Error mapping (every children and quest-definition route, deliberately
+narrow):
 
 - Malformed input the body model or the path parser rejects (a missing
-  or wrong-typed field, a non-integer child id) is FastAPI's 422 before
-  any handler code runs.
+  or wrong-typed field, a non-integer child or definition id) is
+  FastAPI's 422 before any handler code runs.
 - A core ``ValueError`` reporting a NON-EXISTENT child (edit or
   set_active on an unknown id) is mapped to 404.
+- A core ``ValueError`` reporting a NON-EXISTENT DEFINITION (edit or
+  set_active on an unknown id — the core prefixes that error with
+  ``definition_id:``) is mapped to 404.  Create's rejected-assignee
+  error names a child from the BODY, not a path id, so it maps to 422.
 - Every OTHER core ``ValueError`` — an empty display name, an explicit
   ``null`` colour/avatar_ref (clearing is not supported), a reorder
   list that is not a complete permutation of the children (missing,
-  duplicate, or unknown ids) — is mapped to 422: the body was
-  well-formed JSON but semantically invalid, the same failure class
-  Pydantic reports.  The core rejects these BEFORE any write, so a 422
-  never leaves a half-applied change behind.
+  duplicate, or unknown ids); a rejected rule
+  (:class:`~nestquest_core.recurrence.RuleValidationError`: unknown
+  ``rule_type``, a shape-missing field such as a weekly rule without
+  weekdays, a malformed date, a forbidden field), a bad window name or
+  due time, a rejected window or assignee list (empty, duplicate,
+  wrong-typed) — is mapped to 422: the body was well-formed JSON but
+  semantically invalid, the same failure class Pydantic reports.  The
+  core rejects these BEFORE any write, so a 422 never leaves a
+  half-applied change behind.
 
 PATCH edit semantics: the body model's fields are optional and only
 SUPPLIED fields are forwarded (``model_dump(exclude_unset=True)``), so
@@ -49,7 +76,11 @@ from pydantic import BaseModel
 
 from api.auth import require_admin
 from api.database import DatabaseState
-from api.nestquest_core import core_children
+from api.nestquest_core import (
+    core_children,
+    core_quest_definitions,
+    core_recurrence,
+)
 
 #: All admin-plane routes share this router; the ONE admin dependency
 #: (service-token refusal + JWT verification + nestquest-admins group
@@ -89,6 +120,60 @@ class AdminChildListResponse(BaseModel):
     """The children list: every profile in the household's display order."""
 
     children: list[AdminChildResponse]
+
+
+class AdminRuleResponse(BaseModel):
+    """A definition's schedule rule as the admin plane serializes it.
+
+    Mirrors :meth:`nestquest_core.recurrence.ScheduleRule.to_dict`: the
+    model-name ``rule_type`` (e.g. ``monthly_weekday``), the weekday
+    set as a sorted list, and ``None`` for every field the rule's shape
+    does not use.
+    """
+
+    rule_type: str
+    interval: int
+    weekday_set: list[int] | None
+    day_of_month: int | None
+    nth_weekday: int | None
+    nth_weekday_weekday: int | None
+    month: int | None
+    start_date: str
+    end_date: str | None
+
+
+class AdminAssigneeResponse(BaseModel):
+    """One assigned child: the id and display name the PWA renders."""
+
+    id: int
+    display_name: str
+
+
+class AdminDefinitionWindowResponse(BaseModel):
+    """One window declaration: its name and optional HH:MM due time."""
+
+    window: str
+    due_time: str | None
+
+
+class AdminQuestDefinitionResponse(BaseModel):
+    """One quest definition as the admin plane serializes it.
+
+    Mirrors the core's
+    :class:`~nestquest_core.quest_definitions.CreatedQuestDefinition`
+    bundle: the stored row (minus the internal ``schedule_rule_id``/
+    ``due_time``/``created_at`` columns) plus its decoded rule,
+    assignees and windows.
+    """
+
+    id: int
+    title: str
+    description: str | None
+    icon: str | None
+    is_active: bool
+    rule: AdminRuleResponse
+    assignees: list[AdminAssigneeResponse]
+    windows: list[AdminDefinitionWindowResponse]
 
 
 class AdminChildCreateRequest(BaseModel):
@@ -138,6 +223,77 @@ class AdminChildReorderRequest(BaseModel):
     ordered_ids: list[int]
 
 
+class AdminRuleRequest(BaseModel):
+    """The ``rule`` object of a quest-definition create or edit body.
+
+    The fields of :class:`~nestquest_core.recurrence.ScheduleRule` —
+    nothing more: the shape is the model's, the defaults are the
+    model's (``interval`` 1, ``start_date`` 1970-01-01).  Only
+    ``rule_type`` is required.  The COMBINATION policy (which fields a
+    shape requires and forbids, the 1..31/1..12/0..6 ranges, the strict
+    ISO dates) is enforced by the model's constructor, which the route
+    builds through ``from_dict`` — this model only guards the SHAPE.
+    """
+
+    rule_type: str
+    interval: int = 1
+    weekday_set: list[int] | None = None
+    day_of_month: int | None = None
+    nth_weekday: int | None = None
+    nth_weekday_weekday: int | None = None
+    month: int | None = None
+    start_date: str = "1970-01-01"
+    end_date: str | None = None
+
+
+class AdminQuestDefinitionCreateRequest(BaseModel):
+    """The body of ``POST /api/v1/admin/quest-definitions``.
+
+    ``title``, ``rule``, ``assignee_child_ids`` and ``windows`` are
+    required (the core rejects an empty title, a non-list or empty
+    assignee/window list, and unknown window names); ``description``
+    and ``icon`` are optional and default to NULL through the core.
+    ``windows`` entries are a window name (``morning``) or a two-item
+    ``[window, due_time]`` pair whose due time is a strict 24-hour
+    HH:MM (or ``null`` for none) — both forms the core normalizes.
+    """
+
+    title: str
+    rule: AdminRuleRequest
+    assignee_child_ids: list[int]
+    windows: list[str | tuple[str, str | None]]
+    description: str | None = None
+    icon: str | None = None
+
+
+class AdminQuestDefinitionEditRequest(BaseModel):
+    """The body of ``PATCH /api/v1/admin/quest-definitions/{definition_id}``.
+
+    Every field is optional; ONLY the fields the request supplies are
+    forwarded to :func:`nestquest_core.quest_definitions.edit_quest_definition`
+    (the route dumps the model with ``exclude_unset``), so an omitted
+    field stays unchanged.  An explicit ``null`` ``description``/
+    ``icon`` IS passed and CLEARS the stored value (the core supports
+    clearing here, unlike the children edit); an explicit ``null``
+    ``rule`` or ``windows`` is passed and rejected by the core.  A
+    supplied ``windows`` list REPLACES the whole window set, and
+    ``assignees`` are deliberately absent — assignment is not settable
+    through this route.
+    """
+
+    title: str | None = None
+    description: str | None = None
+    icon: str | None = None
+    rule: AdminRuleRequest | None = None
+    windows: list[str | tuple[str, str | None]] | None = None
+
+
+class AdminQuestDefinitionActiveRequest(BaseModel):
+    """The body of ``PATCH /api/v1/admin/quest-definitions/{id}/active``."""
+
+    is_active: bool
+
+
 #: 404 detail for a child id the core layer reports as non-existent.
 _CHILD_NOT_FOUND_DETAIL = "Child not found"
 
@@ -169,6 +325,76 @@ def _child_response(record: core_children.ChildRecord) -> AdminChildResponse:
         avatar_ref=record.avatar_ref,
         sort_order=record.sort_order,
         is_active=record.is_active,
+    )
+
+
+#: 404 detail for a definition id the core layer reports as non-existent.
+_QUEST_DEFINITION_NOT_FOUND_DETAIL = "Quest definition not found"
+
+
+def _raise_quest_definition_error(error: ValueError) -> NoReturn:
+    """Map a core quest-definitions ``ValueError`` onto 404 or 422.
+
+    The mapping mirrors :func:`_raise_child_error` and stays narrow:
+    the core names a missing definition by prefixing its error with
+    ``definition_id:`` (edit or set_active on an unknown id — its id
+    validator's message reads ``definition_id must be an integer``
+    WITHOUT the colon, so a malformed id stays 422), and that one case
+    is the quest-definition routes' 404.  Every other ``ValueError`` —
+    including :class:`~nestquest_core.recurrence.RuleValidationError`,
+    which subclasses it — becomes 422 with the core's message as the
+    detail: create's rejected assignee names a child from the BODY (not
+    a path id, so not 404), a rejected rule/window/title names the
+    field and what to fix, and none of it leaks more than the rule it
+    enforces.
+    """
+    if str(error).startswith("definition_id:"):
+        raise HTTPException(
+            status_code=404, detail=_QUEST_DEFINITION_NOT_FOUND_DETAIL
+        ) from error
+    raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+def _rule_from_request(rule: AdminRuleRequest) -> core_recurrence.ScheduleRule:
+    """Build the core ScheduleRule from the request's ``rule`` object.
+
+    The recurrence model validates AT CONSTRUCTION — through its own
+    ``from_dict`` here, which raises
+    :class:`~nestquest_core.recurrence.RuleValidationError` (a
+    ``ValueError``) for any bad combination — so the route re-implements
+    no rule policy of its own.
+    """
+    return core_recurrence.ScheduleRule.from_dict(
+        rule.model_dump(exclude_unset=True)
+    )
+
+
+def _rule_response(rule: core_recurrence.ScheduleRule) -> AdminRuleResponse:
+    """Serialize one core ScheduleRule via its lossless dict form."""
+    return AdminRuleResponse(**rule.to_dict())
+
+
+def _quest_definition_response(
+    bundle: core_quest_definitions.CreatedQuestDefinition,
+) -> AdminQuestDefinitionResponse:
+    """Serialize one core CreatedQuestDefinition into the payload."""
+    return AdminQuestDefinitionResponse(
+        id=bundle.definition.id,
+        title=bundle.definition.title,
+        description=bundle.definition.description,
+        icon=bundle.definition.icon,
+        is_active=bundle.definition.is_active,
+        rule=_rule_response(bundle.rule),
+        assignees=[
+            AdminAssigneeResponse(id=child.id, display_name=child.display_name)
+            for child in bundle.assignees
+        ],
+        windows=[
+            AdminDefinitionWindowResponse(
+                window=window.window, due_time=window.due_time
+            )
+            for window in bundle.windows
+        ],
     )
 
 
@@ -339,6 +565,120 @@ async def admin_reorder_children(
     except ValueError as error:
         _raise_child_error(error)
     return {"status": "ok"}
+
+
+@router.post(
+    "/quest-definitions",
+    summary="Create a quest definition",
+    status_code=201,
+    response_model=AdminQuestDefinitionResponse,
+)
+async def admin_create_quest_definition(
+    body: AdminQuestDefinitionCreateRequest, request: Request
+) -> AdminQuestDefinitionResponse:
+    """Create a quest definition (rule + assignees + windows) and return it.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: the body model
+    carries the shape, the request's ``rule`` becomes ONE
+    :class:`~nestquest_core.recurrence.ScheduleRule` (validated by the
+    model's constructor, :func:`_rule_from_request`), and the title
+    policy, the assignee and window policies and the atomic
+    rule+definition+assignees+windows persistence all live in
+    :func:`nestquest_core.quest_definitions.create_quest_definition`.
+    Create names no existing definition, so a missing definition can
+    never be its error: every rejection here is 422
+    (:func:`_raise_quest_definition_error`).
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        bundle = await core_quest_definitions.create_quest_definition(
+            state.database,
+            body.title,
+            _rule_from_request(body.rule),
+            body.assignee_child_ids,
+            body.windows,
+            description=body.description,
+            icon=body.icon,
+        )
+    except ValueError as error:
+        _raise_quest_definition_error(error)
+    return _quest_definition_response(bundle)
+
+
+@router.patch(
+    "/quest-definitions/{definition_id}",
+    summary="Edit a quest definition",
+    response_model=AdminQuestDefinitionResponse,
+)
+async def admin_edit_quest_definition(
+    definition_id: int,
+    body: AdminQuestDefinitionEditRequest,
+    request: Request,
+) -> AdminQuestDefinitionResponse:
+    """Edit a quest definition; only supplied fields change.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: the supplied
+    fields are forwarded with ``exclude_unset`` semantics so an omitted
+    field is never passed to
+    :func:`nestquest_core.quest_definitions.edit_quest_definition` and
+    stays unchanged; a supplied ``windows`` list replaces the WHOLE
+    window set in the core, and a supplied ``rule`` is rebuilt into a
+    ScheduleRule (:func:`_rule_from_request`, validated by the model).
+    An explicit ``null`` ``rule``/``windows`` reaches the core as None
+    and is rejected there (422), while an explicit ``null``
+    ``description``/``icon`` clears the stored value — the core edit
+    path supports clearing, unlike the children edit.  An unknown
+    definition id is mapped to 404 and any other core ``ValueError``
+    to 422 (:func:`_raise_quest_definition_error`).
+    """
+    state: DatabaseState = request.app.state.db
+    supplied = body.model_dump(exclude_unset=True)
+    try:
+        if isinstance(body.rule, AdminRuleRequest):
+            supplied["rule"] = _rule_from_request(body.rule)
+        bundle = await core_quest_definitions.edit_quest_definition(
+            state.database, definition_id, **supplied
+        )
+    except ValueError as error:
+        _raise_quest_definition_error(error)
+    return _quest_definition_response(bundle)
+
+
+@router.patch(
+    "/quest-definitions/{definition_id}/active",
+    summary="Set a quest definition's active flag",
+    response_model=AdminQuestDefinitionResponse,
+)
+async def admin_set_quest_definition_active(
+    definition_id: int,
+    body: AdminQuestDefinitionActiveRequest,
+    request: Request,
+) -> AdminQuestDefinitionResponse:
+    """Deactivate (or reactivate) a definition; it is NEVER deleted.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: ``is_active``
+    goes straight to
+    :func:`nestquest_core.quest_definitions.set_quest_definition_active`
+    — deactivation is the only removal path (the row, rule, assignees
+    and windows all survive, so completion history keeps its
+    references).  An unknown definition id is mapped to 404
+    (:func:`_raise_quest_definition_error`); the body model already
+    makes the core's real-bool check unreachable from this route.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        bundle = await core_quest_definitions.set_quest_definition_active(
+            state.database, definition_id, body.is_active
+        )
+    except ValueError as error:
+        _raise_quest_definition_error(error)
+    return _quest_definition_response(bundle)
 
 
 __all__ = ["router"]

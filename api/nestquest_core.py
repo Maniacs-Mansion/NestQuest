@@ -128,6 +128,20 @@ core_settings = importlib.import_module(f"{_CORE_MODULE_NAME}.settings")
 #: the admin plane's children routes call.
 core_children = importlib.import_module(f"{_CORE_MODULE_NAME}.children")
 
+#: The quest-definition business layer (``core.quest_definitions`` —
+#: ``create_quest_definition``, ``edit_quest_definition``,
+#: ``set_quest_definition_active``) the admin plane's quest-definition
+#: routes call.
+core_quest_definitions = importlib.import_module(
+    f"{_CORE_MODULE_NAME}.quest_definitions"
+)
+
+#: The recurrence model (``core.recurrence.ScheduleRule`` and
+#: ``RuleValidationError``) the quest-definition routes build request
+#: rules with — the model validates at construction, the routes never
+#: re-implement rule validation.
+core_recurrence = importlib.import_module(f"{_CORE_MODULE_NAME}.recurrence")
+
 __all__ = [
     "core",
     "core_children",
@@ -135,6 +149,8 @@ __all__ = [
     "core_db",
     "core_events",
     "core_migrations",
+    "core_quest_definitions",
+    "core_recurrence",
     "core_snapshot",
     "core_settings",
 ]
