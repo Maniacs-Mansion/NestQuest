@@ -67,6 +67,30 @@ _dao_instances = importlib.import_module("nestquest_core.dao_instances")
 _completion = importlib.import_module("nestquest_core.completion")
 
 
+async def _events_for_instance(database: object, instance_id: int) -> list:
+    """The instance's completion events, on the app's core copy.
+
+    Uses the SAME ``nestquest_core.*`` copy the app uses (the two-copy
+    caveat: never mix copies) against the app's live connection.
+    """
+    dao = _dao_instances.CompletionEventsDao(database)
+    return await dao.list_by_instance(instance_id)
+
+
+async def _derived_state(
+    database: object, instance: object, today: datetime.date
+) -> str:
+    """The instance's derived state on the app's core copy.
+
+    ``derive_state(instance, latest, today)`` from the app's core copy;
+    the latest event is fetched through the same copy's DAO against the
+    app's live connection.
+    """
+    dao = _dao_instances.CompletionEventsDao(database)
+    latest = await dao.get_latest_for_instance(instance.id)
+    return _completion.derive_state(instance, latest, today)
+
+
 async def _seed_household(
     db_path: str,
     today: datetime.date,
@@ -215,14 +239,15 @@ class _PanelRunner:
             ApiConfig(db_path=db_path, panel_token=panel_token)
         )
 
-    async def __aenter__(self) -> httpx.AsyncClient:
+    async def __aenter__(self) -> tuple["_PanelRunner", httpx.AsyncClient]:
         self._lifespan = self.app.router.lifespan_context(self.app)
         await self._lifespan.__aenter__()
         self._client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=self.app),
             base_url="http://testserver",
         )
-        return await self._client.__aenter__()
+        await self._client.__aenter__()
+        return self, self._client
 
     async def __aexit__(self, *exc) -> None:
         try:
@@ -240,7 +265,8 @@ def temp_db_path(tmp_path: Path) -> str:
 @pytest.fixture
 async def panel_client(temp_db_path: str) -> httpx.AsyncClient:
     """An app client with an empty (migrated) household database."""
-    async with _PanelRunner(temp_db_path) as client:
+    async with _PanelRunner(temp_db_path) as runner_and_client:
+        _, client = runner_and_client
         yield client
 
 
@@ -251,6 +277,9 @@ async def seeded_panel(temp_db_path: str, monkeypatch) -> SimpleNamespace:
     One host clock read anchors ``today``; the pinned instant is
     12:00 UTC that day (past Ada's 10:00 due, before Bo's 17:00).  The
     route's ``_local_now`` is patched to return the pinned instant.
+
+    Yields the runner too so tests reach the app's live database (the
+    SAME ``nestquest_core`` connection) for assertions.
     """
     today = datetime.datetime.now().astimezone().date()
     time_zone = ZoneInfo("UTC")
@@ -259,9 +288,11 @@ async def seeded_panel(temp_db_path: str, monkeypatch) -> SimpleNamespace:
     )
     seed = await _seed_household(temp_db_path, today, pinned_now)
     monkeypatch.setattr(routes_panel, "_local_now", lambda: pinned_now)
-    async with _PanelRunner(temp_db_path) as client:
+    async with _PanelRunner(temp_db_path) as runner_and_client:
+        runner, client = runner_and_client
         yield SimpleNamespace(
             client=client,
+            database=runner.app.state.db.database,
             seed=seed,
             today=today,
             pinned_now=pinned_now,
@@ -521,3 +552,137 @@ async def test_snapshot_route_is_documented(
     assert "PanelSnapshotResponse" in documented
     assert "PanelChildPayload" in documented
     assert "PanelInstancePayload" in documented
+
+
+# --- complete route -------------------------------------------------------
+
+
+async def test_complete_writes_panel_completion(
+    seeded_panel: SimpleNamespace,
+) -> None:
+    """The first POST completes the instance as the tapped profile.
+
+    Returns success; the completion event recorded is
+    ``actor_source='panel'`` with the tapped ``actor_child_id`` and NO
+    ``actor_user_id`` (the panel actor contract), and the instance's
+    derived state becomes ``done``.
+    """
+    seed = seeded_panel.seed
+    response = await seeded_panel.client.post(
+        f"/api/v1/panel/instances/{seed.pack_bag_instance.id}/complete",
+        headers={"Authorization": f"Bearer {PANEL_TOKEN}"},
+        json={"actor_child_id": seed.ada.id},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "done"}
+
+    # Assert the recorded event and derived state through the SAME core
+    # copy the app uses (two-copy caveat: never mix copies), against the
+    # app's live connection.
+    events = await _events_for_instance(
+        seeded_panel.database, seed.pack_bag_instance.id
+    )
+    assert len(events) == 1
+    event = events[0]
+    assert event.event_type == "completed"
+    assert event.actor_source == "panel"
+    assert event.actor_child_id == seed.ada.id
+    assert event.actor_user_id is None
+
+    instance = await _dao_instances.QuestInstancesDao(
+        seeded_panel.database
+    ).get_by_id(seed.pack_bag_instance.id)
+    assert await _derived_state(
+        seeded_panel.database, instance, seeded_panel.today
+    ) == "done"
+
+
+async def test_complete_is_idempotent(
+    seeded_panel: SimpleNamespace,
+) -> None:
+    """A second call is a no-op that still returns success.
+
+    The core completion layer's ``appended`` flag decides: the repeat
+    call appends nothing, so exactly ONE completion event row exists
+    after two calls.
+    """
+    seed = seeded_panel.seed
+    headers = {"Authorization": f"Bearer {PANEL_TOKEN}"}
+    url = f"/api/v1/panel/instances/{seed.pack_bag_instance.id}/complete"
+    body = {"actor_child_id": seed.ada.id}
+    first = await seeded_panel.client.post(url, headers=headers, json=body)
+    assert first.status_code == 200
+    second = await seeded_panel.client.post(url, headers=headers, json=body)
+    assert second.status_code == 200
+    assert second.json() == {"status": "done"}
+
+    events = await _events_for_instance(
+        seeded_panel.database, seed.pack_bag_instance.id
+    )
+    assert len(events) == 1, (
+        "the idempotent call must not append a second event"
+    )
+
+
+async def test_complete_unknown_instance_is_not_found(
+    panel_client: httpx.AsyncClient,
+) -> None:
+    """Completing a non-existent instance returns 404."""
+    response = await panel_client.post(
+        "/api/v1/panel/instances/999999/complete",
+        headers={"Authorization": f"Bearer {PANEL_TOKEN}"},
+        json={"actor_child_id": 1},
+    )
+    assert response.status_code == 404
+
+
+async def test_complete_without_token_is_unauthorized(
+    panel_client: httpx.AsyncClient,
+) -> None:
+    """A complete request with no Authorization header returns 401."""
+    response = await panel_client.post(
+        "/api/v1/panel/instances/1/complete",
+        json={"actor_child_id": 1},
+    )
+    assert response.status_code == 401
+
+
+async def test_complete_wrong_child_is_not_found(
+    seeded_panel: SimpleNamespace,
+) -> None:
+    """Tapping the wrong child's profile answers 404, not success.
+
+    ``complete_instance`` does not itself check that the tapped
+    ``actor_child_id`` is the child the instance belongs to; the route
+    guards it so a wrong-profile tap can never complete another
+    child's quest.
+    """
+    seed = seeded_panel.seed
+    response = await seeded_panel.client.post(
+        f"/api/v1/panel/instances/{seed.pack_bag_instance.id}/complete",
+        headers={"Authorization": f"Bearer {PANEL_TOKEN}"},
+        json={"actor_child_id": seed.bo.id},
+    )
+    assert response.status_code == 404
+    # And nothing was completed.
+    events = await _events_for_instance(
+        seeded_panel.database, seed.pack_bag_instance.id
+    )
+    assert events == []
+
+
+async def test_complete_route_is_documented(
+    panel_client: httpx.AsyncClient,
+) -> None:
+    """The complete route and its request shape are in the OpenAPI doc."""
+    response = await panel_client.get("/openapi.json")
+    assert response.status_code == 200
+    schema = response.json()
+    path = "/api/v1/panel/instances/{instance_id}/complete"
+    assert path in schema["paths"]
+    assert "post" in schema["paths"][path]
+    documented = {
+        model["title"]
+        for model in schema["components"]["schemas"].values()
+    }
+    assert "PanelCompleteRequest" in documented
