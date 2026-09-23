@@ -9,7 +9,11 @@ re-fires them.  The service-driven tests below therefore deliver the
 frames through :func:`conftest.refire_api_transitions` (the
 production event path, driven synchronously) before asserting the
 bus; the shim-level tests drive :mod:`custom_components.nestquest
-.events` directly, the way its remaining callers do.
+.events` directly, the way its remaining callers do.  The HA
+``uncomplete_quest`` service is also gone (the API service's admin
+uncomplete route is the reversal path), so the reversal tests drive
+the core completion layer the route calls and deliver the published
+frame through the same SSE subscription helper.
 """
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ from conftest import refire_api_transitions, wire_entry_to_registry
 
 from custom_components.nestquest import async_setup_entry
 from custom_components.nestquest.children import create_child
+from custom_components.nestquest.completion import uncomplete_instance
 from custom_components.nestquest.const import (
     CONF_ADMIN_USER_IDS,
     DOMAIN,
@@ -27,10 +32,9 @@ from custom_components.nestquest.const import (
     EVENT_QUEST_MISSED,
     EVENT_QUEST_UNCOMPLETED,
     SERVICE_COMPLETE_QUEST,
-    SERVICE_CREATE_QUEST_DEFINITION,
-    SERVICE_MANAGE_CHILD,
-    SERVICE_REGENERATE,
-    SERVICE_UNCOMPLETE_QUEST,
+)
+from custom_components.nestquest.core.events import (
+    build_quest_uncompleted_events,
 )
 from custom_components.nestquest.dao_instances import QuestInstancesDao
 from custom_components.nestquest.materialize import materialize
@@ -39,7 +43,6 @@ from custom_components.nestquest.quest_definitions import (
 )
 from custom_components.nestquest.recurrence import ScheduleRule
 
-ADMIN_CTX = {"user_id": "admin-1"}
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$")
 
 
@@ -61,15 +64,7 @@ async def _setup_and_seed(hass, make_entry, *, windows=("morning",), seed_date=N
     )
     assert await async_setup_entry(hass, entry) is True
     database = entry.runtime_data.database
-    await hass.services.call(
-        DOMAIN,
-        SERVICE_MANAGE_CHILD,
-        {"action": "create", "display_name": "Ada"},
-        context=ADMIN_CTX,
-    )
-    from custom_components.nestquest.children import list_children
-
-    child = (await list_children(database))[0]
+    child = await create_child(database, "Ada")
     await create_quest_definition(
         database,
         "Brush teeth",
@@ -205,32 +200,44 @@ async def test_child_day_complete_does_not_fire_partway(
 
 
 async def test_uncompleted_fires_on_reversal_only(hass, make_entry) -> None:
+    """An actual reversal fires the uncompleted event — but only once,
+    and only through the API service's transition stream: the HA
+    ``uncomplete_quest`` service is gone, so the reversal is driven
+    through the core completion layer the API's admin uncomplete route
+    calls, with the published frame delivered by the SSE subscription."""
     entry, child, instances = await _setup_and_seed(hass, make_entry)
     instance_id = instances[0].id
+    database = entry.runtime_data.database
+    client = entry.runtime_data.coordinator.api_client
     await hass.services.call(
         DOMAIN,
         SERVICE_COMPLETE_QUEST,
         {"instance_id": instance_id, "actor": "panel", "actor_child_id": child.id},
     )
-    # Un-completing an open instance is a no-op and fires nothing.
-    await hass.services.call(
-        DOMAIN,
-        SERVICE_UNCOMPLETE_QUEST,
-        {"instance_id": instance_id, "actor": "user"},
-        context=ADMIN_CTX,
+    # The reversal appends through the core completion layer; the API
+    # route publishes the transition on its SSE stream and the
+    # subscription re-fires it on the bus.
+    result = await uncomplete_instance(
+        database, instance_id, actor_source="user", actor_user_id="admin-1"
     )
+    assert result.appended is True
+    client.published_frames.extend(
+        await build_quest_uncompleted_events(database, instance_id)
+    )
+    await refire_api_transitions(hass, entry, client)
     fired = hass.bus.fired(EVENT_QUEST_UNCOMPLETED)
     assert len(fired) == 1
     payload = fired[0]
     assert payload["instance_id"] == instance_id
     assert payload["quest_title"] == "Brush teeth"
     assert _TIMESTAMP.match(payload["occurred_at"])
-    await hass.services.call(
-        DOMAIN,
-        SERVICE_UNCOMPLETE_QUEST,
-        {"instance_id": instance_id, "actor": "user"},
-        context=ADMIN_CTX,
+    # Un-completing an already-open instance is a no-op: nothing is
+    # appended, nothing is published, and nothing further fires.
+    no_op = await uncomplete_instance(
+        database, instance_id, actor_source="user", actor_user_id="admin-1"
     )
+    assert no_op.appended is False
+    await refire_api_transitions(hass, entry, client)
     assert len(hass.bus.fired(EVENT_QUEST_UNCOMPLETED)) == 1
 
 
@@ -387,40 +394,6 @@ async def test_completion_updates_entities_immediately(
     )
     assert len(hass.bus.fired(EVENT_CHILD_DAY_COMPLETE)) == (
         1 if len(instances) == 1 else 0
-    )
-
-
-async def test_uncompletion_updates_entities_immediately(
-    hass, make_entry
-) -> None:
-    entry, child, instances = await _setup_and_seed(hass, make_entry)
-    coordinator = entry.runtime_data.coordinator
-    await coordinator.async_refresh()
-    await hass.services.call(
-        DOMAIN,
-        SERVICE_COMPLETE_QUEST,
-        {
-            "instance_id": instances[0].id,
-            "actor": "panel",
-            "actor_child_id": child.id,
-        },
-    )
-    completed_after_complete = hass.entities[
-        f"nestquest_child_{child.id}_quests_completed_today"
-    ].native_value
-    assert completed_after_complete == 1
-
-    await hass.services.call(
-        DOMAIN,
-        SERVICE_UNCOMPLETE_QUEST,
-        {"instance_id": instances[0].id, "actor": "user"},
-        context=ADMIN_CTX,
-    )
-    completed_after_uncomplete = hass.entities[
-        f"nestquest_child_{child.id}_quests_completed_today"
-    ].native_value
-    assert completed_after_uncomplete == 0, (
-        "sensor must reflect the reversal without a manual refresh"
     )
 
 
