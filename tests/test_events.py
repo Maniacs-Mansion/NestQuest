@@ -1,9 +1,21 @@
-"""Tests for the NestQuest bus events (Feature 10, task 6)."""
+"""Tests for the NestQuest bus events (Feature 10, task 6).
+
+Since Feature 18 the integration is a client of the NestQuest API
+service: ``nestquest.complete_quest`` proxies to the API's panel
+complete route and fires NO local bus event — the API service builds
+and publishes the transition frames on its SSE stream, and the
+integration's subscription (:mod:`custom_components.nestquest.sse`)
+re-fires them.  The service-driven tests below therefore deliver the
+frames through :func:`conftest.refire_api_transitions` (the
+production event path, driven synchronously) before asserting the
+bus; the shim-level tests drive :mod:`custom_components.nestquest
+.events` directly, the way its remaining callers do.
+"""
 from __future__ import annotations
 
 import re
 
-from conftest import wire_entry_to_registry
+from conftest import refire_api_transitions, wire_entry_to_registry
 
 from custom_components.nestquest import async_setup_entry
 from custom_components.nestquest.children import create_child
@@ -86,6 +98,11 @@ async def test_quest_completed_fires_with_documented_payload(
         SERVICE_COMPLETE_QUEST,
         {"instance_id": instance_id, "actor": "panel", "actor_child_id": child.id},
     )
+    # The completed event arrives over the API's SSE stream (the
+    # subscription re-fires it), never from the service handler.
+    await refire_api_transitions(
+        hass, entry, entry.runtime_data.coordinator.api_client
+    )
     fired = hass.bus.fired(EVENT_QUEST_COMPLETED)
     assert len(fired) == 1
     payload = fired[0]
@@ -111,6 +128,15 @@ async def test_recomplete_no_op_fires_nothing(hass, make_entry) -> None:
         SERVICE_COMPLETE_QUEST,
         {"instance_id": instance_id, "actor": "panel", "actor_child_id": child.id},
     )
+    # The no-op verdict is decided in the API's completion layer: the
+    # second call appended nothing, so the API published no second
+    # frame and the bus stays at exactly one event.
+    client = entry.runtime_data.coordinator.api_client
+    assert [result.appended for _id, result in client.completions] == [
+        True,
+        False,
+    ]
+    await refire_api_transitions(hass, entry, client)
     assert len(hass.bus.fired(EVENT_QUEST_COMPLETED)) == 1
 
 
@@ -128,6 +154,9 @@ async def test_child_day_complete_fires_when_day_clears(
                 "actor_child_id": child.id,
             },
         )
+    await refire_api_transitions(
+        hass, entry, entry.runtime_data.coordinator.api_client
+    )
     day_complete = hass.bus.fired(EVENT_CHILD_DAY_COMPLETE)
     assert len(day_complete) == 1, "exactly one day-complete per cleared day"
     payload = day_complete[0]
@@ -153,6 +182,12 @@ async def test_child_day_complete_does_not_fire_partway(
             "actor_child_id": child.id,
         },
     )
+    # The API publishes the completion but not a day-complete (the
+    # child's day is not clear yet); the subscription re-fires only
+    # what was published.
+    await refire_api_transitions(
+        hass, entry, entry.runtime_data.coordinator.api_client
+    )
     assert hass.bus.fired(EVENT_CHILD_DAY_COMPLETE) == []
     await hass.services.call(
         DOMAIN,
@@ -162,6 +197,9 @@ async def test_child_day_complete_does_not_fire_partway(
             "actor": "panel",
             "actor_child_id": child.id,
         },
+    )
+    await refire_api_transitions(
+        hass, entry, entry.runtime_data.coordinator.api_client
     )
     assert len(hass.bus.fired(EVENT_CHILD_DAY_COMPLETE)) == 1
 
@@ -223,6 +261,15 @@ async def test_appended_verdict_is_atomic_under_duplicate_calls(
         for _ in range(2)
     ]
     await asyncio.gather(*calls)
+    # The API's completion layer (the same core lock) decides the
+    # verdict: one call appended, the duplicate did not — so the API
+    # published exactly one frame and the bus carries one event.
+    client = entry.runtime_data.coordinator.api_client
+    assert len(client.completions) == 2
+    assert [result.appended for _id, result in client.completions].count(
+        True
+    ) == 1
+    await refire_api_transitions(hass, entry, client)
     assert len(hass.bus.fired(EVENT_QUEST_COMPLETED)) == 1
 
 
@@ -263,6 +310,9 @@ async def test_day_complete_ignored_for_backdated_completion(
                 "actor_child_id": child.id,
             },
         )
+    await refire_api_transitions(
+        hass, entry, entry.runtime_data.coordinator.api_client
+    )
     assert len(hass.bus.fired(EVENT_CHILD_DAY_COMPLETE)) == 1
 
     await _complete(
@@ -280,12 +330,19 @@ async def test_day_complete_ignored_for_backdated_completion(
             "actor_child_id": child.id,
         },
     )
+    # The service call on the already-done future instance is a no-op
+    # inside the API's completion layer: nothing appended, nothing
+    # published, nothing re-fired — today's single announcement stands.
+    client = entry.runtime_data.coordinator.api_client
+    assert client.completions[-1][1].appended is False
+    await refire_api_transitions(hass, entry, client)
     assert len(hass.bus.fired(EVENT_CHILD_DAY_COMPLETE)) == 1, (
         "a back-dated/future completion must not re-announce today"
     )
-    # The direct business-layer call fired nothing (only the service
-    # path fires), and the follow-up service call on the now-done
-    # future instance was a no-op: today's single completion stands.
+    # The direct business-layer call published nothing (only the API's
+    # completion path publishes), and the follow-up service call on
+    # the now-done future instance was a no-op: today's single
+    # completion stands.
     assert len(hass.bus.fired(EVENT_QUEST_COMPLETED)) == len(instances)
 
 
@@ -323,6 +380,10 @@ async def test_completion_updates_entities_immediately(
     ].native_value
     assert remaining_after == len(instances) - 1, (
         "sensor must reflect the completion without a manual refresh"
+    )
+    # The transition events arrive over the API's SSE stream.
+    await refire_api_transitions(
+        hass, entry, entry.runtime_data.coordinator.api_client
     )
     assert len(hass.bus.fired(EVENT_CHILD_DAY_COMPLETE)) == (
         1 if len(instances) == 1 else 0
@@ -538,17 +599,32 @@ async def test_shim_fires_completed_before_day_complete(hass, make_entry) -> Non
     """The shim fires ``nestquest_quest_completed`` BEFORE
     ``nestquest_child_day_complete`` (the pre-extraction ordering), so
     a failure in the day-complete DB reads cannot suppress the
-    completed event.  Asserted by bus event ORDER, not just counts."""
+    completed event.  Asserted by bus event ORDER, not just counts.
+
+    Driven directly: since Feature 18 the completion service proxies
+    to the API (whose event ordering is tested in test_api_sse.py);
+    this targets the shim module itself, the way its remaining
+    callers invoke it.
+    """
+    from custom_components.nestquest.completion import (
+        complete_instance as _complete,
+    )
+    from custom_components.nestquest.events import fire_quest_completed
+
     entry, child, instances = await _setup_and_seed(hass, make_entry)
+    database = entry.runtime_data.database
     for instance in instances:
-        await hass.services.call(
-            DOMAIN,
-            SERVICE_COMPLETE_QUEST,
-            {
-                "instance_id": instance.id,
-                "actor": "panel",
-                "actor_child_id": child.id,
-            },
+        result = await _complete(
+            database,
+            instance.id,
+            actor_source="panel",
+            actor_child_id=child.id,
+        )
+        await fire_quest_completed(
+            hass,
+            database,
+            instance.id,
+            was_on_time=result.was_on_time,
         )
     ordered = [
         etype for etype, _payload in hass.bus.events
@@ -732,20 +808,30 @@ async def test_day_complete_fully_cleared_today_yields_event(
 async def test_shim_day_complete_uses_ha_local_timezone(
     hass, make_entry
 ) -> None:
-    """The day-complete rule reads ``hass.config.time_zone`` and
-    derives ``today`` in HA-local time, not UTC.
+    """The shim's day-complete rule reads ``hass.config.time_zone``
+    and derives ``today`` in HA-local time, not UTC.
 
     Picks a zone whose current local date differs from UTC, seeds an
-    instance for THAT zone's today (not UTC's today), completes it
-    through the service path, and asserts
+    instance for THAT zone's today (not UTC's today), fires the shim
+    directly for a completion of that instance, and asserts
     ``nestquest_child_day_complete`` fires — proving the local date
     reached the day-complete rule.  If no candidate zone has a
     different date right now (only possible inside the ~1h window
     around 12:00 UTC when all zones share one date), the test skips
     rather than run vacuously.
+
+    Driven directly: since Feature 18 the completion service proxies
+    to the API (whose day-complete ``today`` is the API host's local
+    date, tested in test_api_sse.py); this targets the shim module
+    itself, the way its remaining callers invoke it.
     """
     import datetime as _dt
     from zoneinfo import ZoneInfo
+
+    from custom_components.nestquest.completion import (
+        complete_instance as _complete,
+    )
+    from custom_components.nestquest.events import fire_quest_completed
 
     utc_today = _dt.datetime.now(_dt.timezone.utc).date()
     far_zone = None
@@ -775,15 +861,19 @@ async def test_shim_day_complete_uses_ha_local_timezone(
     entry, child, instances = await _setup_and_seed(
         hass, make_entry, seed_date=far_today
     )
+    database = entry.runtime_data.database
     for instance in instances:
-        await hass.services.call(
-            DOMAIN,
-            SERVICE_COMPLETE_QUEST,
-            {
-                "instance_id": instance.id,
-                "actor": "panel",
-                "actor_child_id": child.id,
-            },
+        result = await _complete(
+            database,
+            instance.id,
+            actor_source="panel",
+            actor_child_id=child.id,
+        )
+        await fire_quest_completed(
+            hass,
+            database,
+            instance.id,
+            was_on_time=result.was_on_time,
         )
     day_complete = hass.bus.fired(EVENT_CHILD_DAY_COMPLETE)
     assert len(day_complete) == 1, (
