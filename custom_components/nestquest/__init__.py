@@ -5,7 +5,8 @@ SQLite file, the migrations, and every business rule.  Setup builds the
 entry's ONE shared API client, the coordinator that polls the panel
 snapshot through it, and the SSE subscription that re-fires the API's
 transition frames on the HA bus, registers the single
-``nestquest.complete_quest`` proxy service, and forwards the sensor and
+``nestquest.complete_quest`` proxy service, registers the zero-config
+panel dashboard (Feature 20), and forwards the sensor and
 binary_sensor platforms.
 """
 from __future__ import annotations
@@ -29,6 +30,7 @@ from .const import (
     PLATFORMS,
 )
 from .coordinator import NestQuestCoordinator, coordinator_client_from_entry
+from .dashboard import async_register_dashboard
 from .frontend import async_register_frontend
 from .services import async_deregister_services, async_register_services
 from .sse import NestQuestEventStream
@@ -87,6 +89,13 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up NestQuest from a config entry."""
     await async_register_frontend(hass)
+    # The zero-config panel dashboard (Feature 20): register the
+    # storage-mode strategy dashboard if no dashboard under the stable
+    # url_path exists yet.  Unavailability of the Lovelace dashboards
+    # collection (YAML mode, lovelace not loaded) logs a warning and
+    # NEVER fails setup; an existing dashboard — ours or the user's —
+    # is left untouched, so a reload cannot duplicate it.
+    await async_register_dashboard(hass)
     hass.data.setdefault(DOMAIN, {})
 
     async def _async_update_listener(
