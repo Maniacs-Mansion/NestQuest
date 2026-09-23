@@ -48,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import binascii
 import json
+import secrets
 import time
 from collections.abc import Awaitable, Callable
 from typing import Annotated
@@ -459,7 +460,14 @@ async def require_admin(
             if (
                 config is not None
                 and config.panel_token
-                and credential.strip() == config.panel_token
+                # compare_digest on bytes (as require_panel_token does)
+                # so the refusal does not short-circuit on the first
+                # mismatching byte — a constant-time comparison keeps a
+                # timing side channel on the credential off the table.
+                and secrets.compare_digest(
+                    credential.strip().encode("utf-8"),
+                    config.panel_token.encode("utf-8"),
+                )
             ):
                 raise HTTPException(
                     status_code=403,
