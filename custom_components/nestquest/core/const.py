@@ -101,6 +101,32 @@ CONF_END_OF_DAY_REPORT_ENABLED = "end_of_day_report_enabled"
 CONF_CELEBRATION_ENABLED = "celebration_enabled"
 DEFAULT_AUTOMATION_ENABLED = True
 
+# Panel-plane API client (Feature 18): the integration reaches the
+# NestQuest API service (Feature 16) over HTTP instead of the database.
+# The base URL points at the API service host serving ``/api/v1/panel/*``
+# (uvicorn's default host/port is the sensible starting point); the panel
+# service token is the static Bearer credential the panel plane requires
+# (``NESTQUEST_PANEL_TOKEN`` on the API side).  Both are stored on the
+# entry like every other setting — options first, then the entry-data
+# copy, then defaults.  The TOKEN IS A SECRET: it is never logged, never
+# echoed into error messages, and never committed.  The shipped default
+# token IS the empty string (DEFAULT_PANEL_TOKEN) — an entry with no
+# configured token is therefore NOT a working client: the options flow
+# accepts an empty token as "not configured yet" and only rejects
+# malformed (padded/whitespace-only/non-string) values — the actual
+# non-emptiness guard is enforced at client construction, where
+# NestQuestApiClient fails fast on an empty/whitespace token
+# (api_client.py).  So a caller building the client from a bare
+# entry must either ensure a token is configured first or handle the
+# construction ValueError and surface an "API not configured" state —
+# an unconfigured entry never yields a client that can only 401.
+# This mirrors the API service's fail-closed stance (api/config.py: no
+# default token exists).
+CONF_API_BASE_URL = "api_base_url"
+DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
+CONF_PANEL_TOKEN = "panel_token"
+DEFAULT_PANEL_TOKEN = ""
+
 # Quest windows (D-008): a definition may declare several day windows;
 # each produces its own instance per day and groups the panel's Quest
 # Log into three columns.  The clock ranges are stored here so they stay

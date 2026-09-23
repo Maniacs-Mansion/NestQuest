@@ -12,6 +12,7 @@ from .const import (
     CONF_ADMIN_USER_IDS,
     CONF_AFTERNOON_REMINDER_ENABLED,
     CONF_AFTERNOON_REMINDER_TIME,
+    CONF_API_BASE_URL,
     CONF_CELEBRATION_ENABLED,
     CONF_DAY_ROLLOVER_TIME,
     CONF_END_OF_DAY_REPORT_ENABLED,
@@ -21,7 +22,9 @@ from .const import (
     CONF_MORNING_SUMMARY_TIME,
     CONF_NOTIFY_TARGET,
     CONF_PANEL_IDLE_TIMEOUT,
+    CONF_PANEL_TOKEN,
     CONF_UPDATE_INTERVAL,
+    DEFAULT_API_BASE_URL,
     DEFAULT_AFTERNOON_REMINDER_TIME,
     DEFAULT_AUTOMATION_ENABLED,
     DEFAULT_DAY_ROLLOVER_TIME,
@@ -29,12 +32,14 @@ from .const import (
     DEFAULT_HORIZON_DAYS,
     DEFAULT_MORNING_SUMMARY_TIME,
     DEFAULT_PANEL_IDLE_TIMEOUT,
+    DEFAULT_PANEL_TOKEN,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     MIN_UPDATE_INTERVAL,
     TIME_PATTERN,
 )
 from .admin_allowlist import list_admin_ids, set_admin_ids
+from .api_client import is_valid_base_url
 
 MIN_HORIZON_DAYS = 1
 MIN_PANEL_IDLE_TIMEOUT = 30
@@ -116,6 +121,25 @@ def _async_validate(user_input: dict[str, Any]) -> dict[str, str]:
         if toggle_value is not None and not isinstance(toggle_value, bool):
             errors[toggle_key] = "invalid"
 
+    # The panel-plane API connection (Feature 18) is OPTIONAL in raw
+    # submits the same way: a missing key keeps the current value.  The
+    # base URL must be a full http(s) URL with a host — the same check
+    # the client's constructor enforces, so a malformed URL fails at
+    # the form, not at the first request.  The token may be EMPTY (the
+    # API connection is simply not configured yet) but a non-empty one
+    # must be pasted unpadded: a padded or whitespace-only value is a
+    # clipboard mistake that would fail the token check at request
+    # time.
+    api_base_url = user_input.get(CONF_API_BASE_URL)
+    if api_base_url is not None and not is_valid_base_url(api_base_url):
+        errors[CONF_API_BASE_URL] = "invalid_url"
+    panel_token = user_input.get(CONF_PANEL_TOKEN)
+    if panel_token is not None and (
+        not isinstance(panel_token, str)
+        or panel_token != panel_token.strip()
+    ):
+        errors[CONF_PANEL_TOKEN] = "invalid"
+
     return errors
 
 
@@ -186,6 +210,18 @@ def _build_schema(
             CONF_CELEBRATION_ENABLED,
             default=current[CONF_CELEBRATION_ENABLED],
         ): _strict_bool,
+        # Panel-plane API connection (Feature 18): the base URL the API
+        # client talks to and the panel service token it presents as
+        # the Bearer credential.  Schema-validated submits always carry
+        # both (the defaults pre-fill from the stored values); raw
+        # callers omitting them keep their stored values (see
+        # _async_validate).
+        vol.Required(
+            CONF_API_BASE_URL, default=current[CONF_API_BASE_URL]
+        ): str,
+        vol.Required(
+            CONF_PANEL_TOKEN, default=current[CONF_PANEL_TOKEN]
+        ): str,
     }
     if admin_choices is not None:
         # HA's supported multi-select validator: the frontend can
@@ -336,6 +372,11 @@ class NestQuestOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             data[notification_key] = user_input.get(
                 notification_key, current[notification_key]
             )
+        # The API connection section (Feature 18) stores the base URL
+        # and panel token the same fall-back-to-current way, so raw
+        # submits that predate the section keep their stored values.
+        for api_key in (CONF_API_BASE_URL, CONF_PANEL_TOKEN):
+            data[api_key] = user_input.get(api_key, current[api_key])
         if admin_ids_present:
             data[CONF_ADMIN_USER_IDS] = admin_ids
         elif admin_default:
@@ -365,6 +406,8 @@ class NestQuestOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             (CONF_AFTERNOON_REMINDER_ENABLED, DEFAULT_AUTOMATION_ENABLED),
             (CONF_END_OF_DAY_REPORT_ENABLED, DEFAULT_AUTOMATION_ENABLED),
             (CONF_CELEBRATION_ENABLED, DEFAULT_AUTOMATION_ENABLED),
+            (CONF_API_BASE_URL, DEFAULT_API_BASE_URL),
+            (CONF_PANEL_TOKEN, DEFAULT_PANEL_TOKEN),
         ):
             if key in options:
                 values[key] = options[key]
