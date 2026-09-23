@@ -1,4 +1,5 @@
 from pathlib import Path
+import fcntl
 import os
 import subprocess
 import tempfile
@@ -47,6 +48,7 @@ class ForegroundLauncherTests(unittest.TestCase):
                 "NQ_PROJECT_ROOT": str(project),
                 "OPENCODE_BIN": str(opencode),
                 "SYSTEMCTL_BIN": str(systemctl),
+                "NQ_STATE_DIR": str(root / "state"),
             })
             printed = subprocess.run([str(SCRIPT), "--print-prompt"], env=env,
                                      text=True, capture_output=True)
@@ -67,6 +69,16 @@ class ForegroundLauncherTests(unittest.TestCase):
                              ["--check-interactive", "--project", str(project)])
 
             output.unlink()
+            lock_path = root / "state/controller.lock"
+            with lock_path.open("w") as held_lock:
+                fcntl.flock(held_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = subprocess.run([str(SCRIPT)], env=env, text=True,
+                                        capture_output=True)
+                self.assertEqual(locked.returncode, 75)
+                self.assertIn("Another NestQuest orchestrator or controller",
+                              locked.stderr)
+                self.assertFalse(output.exists())
+
             open_marker.touch()
             refused = subprocess.run([str(SCRIPT)], env=env, text=True,
                                      capture_output=True)
