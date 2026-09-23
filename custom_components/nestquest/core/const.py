@@ -112,9 +112,11 @@ DEFAULT_AUTOMATION_ENABLED = True
 # echoed into error messages, and never committed.  The shipped default
 # token IS the empty string (DEFAULT_PANEL_TOKEN) — an entry with no
 # configured token is therefore NOT a working client: the options flow
-# validates that a saved token is non-empty (the user-facing guard), and
-# NestQuestApiClient fails fast at construction on an empty/whitespace
-# token (api_client.py).  So a caller building the client from a bare
+# accepts an empty token as "not configured yet" and only rejects
+# malformed (padded/whitespace-only/non-string) values — the actual
+# non-emptiness guard is enforced at client construction, where
+# NestQuestApiClient fails fast on an empty/whitespace token
+# (api_client.py).  So a caller building the client from a bare
 # entry must either ensure a token is configured first or handle the
 # construction ValueError and surface an "API not configured" state —
 # an unconfigured entry never yields a client that can only 401.
