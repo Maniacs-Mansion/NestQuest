@@ -4,7 +4,7 @@
  * enough and keeps the bundle small. Change screens listen to popstate.
  */
 import { useEffect, useState } from "react";
-import { config } from "./config";
+import { ConfigError, config } from "./config";
 import {
   AuthError,
   buildAuthorizeUrl,
@@ -31,16 +31,13 @@ async function probeApi(setScreen: (screen: Screen) => void) {
   // A cheap authenticated probe so a 403 surfaces as an explicit refusal
   // right after login instead of a silent empty shell.
   try {
-    const response = await apiFetch("/api/v1/children", {}, config);
-    if (response.status === 403) {
-      setScreen({
-        kind: "refusal",
-        message: "Your account is not in the nestquest-admins group.",
-      });
-      return;
-    }
+    await apiFetch("/api/v1/children", {}, config);
     setScreen({ kind: "app" });
   } catch (error) {
+    if (error instanceof ConfigError) {
+      setScreen({ kind: "config-error", message: error.message });
+      return;
+    }
     if (error instanceof ApiForbiddenError) {
       setScreen({ kind: "refusal", message: error.message });
       return;

@@ -75,7 +75,10 @@ export async function apiFetch(
       });
       if (retryResponse.status === 403) throw new ApiForbiddenError();
       if (retryResponse.ok) return retryResponse;
-      throw new ApiUnauthorizedError();
+      // Only 401 means "unauthorized"; preserve every other status (e.g. a
+      // 500 from the API) so callers can react to the real response.
+      if (retryResponse.status === 401) throw new ApiUnauthorizedError();
+      return retryResponse;
     }
     await triggerLogin(app);
     throw new ApiUnauthorizedError();

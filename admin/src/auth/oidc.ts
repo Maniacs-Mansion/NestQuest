@@ -4,7 +4,7 @@
  * Never sends a client_secret anywhere. Tokens are stored in sessionStorage
  * (per-tab, cleared on tab close) — never localStorage.
  */
-import { config, type AppConfig } from "../config";
+import { config, resolveEndpoints, type AppConfig, type ResolvedAppConfig } from "../config";
 import {
   computeCodeChallenge,
   generateCodeVerifier,
@@ -36,14 +36,19 @@ function makeScopes(): string {
 
 /**
  * Build the Authentik authorization redirect URL, storing state + verifier in
- * sessionStorage so the callback can validate them.
+ * sessionStorage so the callback can validate them. Endpoints are resolved
+ * from the issuer's OIDC discovery document when not set on the config.
  */
-export async function buildAuthorizeUrl(app: AppConfig = config): Promise<string> {
+export async function buildAuthorizeUrl(
+  app: AppConfig = config,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string> {
   if (!app.clientId) {
     throw new AuthError(
       "Missing VITE_AUTHENTIK_CLIENT_ID configuration. Set it in your .env before building the admin PWA.",
     );
   }
+  const resolved = await resolveEndpoints(app, fetchImpl);
   const state = generateState();
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = await computeCodeChallenge(codeVerifier);
@@ -51,7 +56,7 @@ export async function buildAuthorizeUrl(app: AppConfig = config): Promise<string
   sessionStorage.setItem(STORAGE_KEYS.state, state);
   sessionStorage.setItem(STORAGE_KEYS.codeVerifier, codeVerifier);
 
-  const url = new URL(app.authorizeEndpoint);
+  const url = new URL(resolved.authorizeEndpoint);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", app.clientId);
   url.searchParams.set("redirect_uri", app.redirectUri);
@@ -99,6 +104,8 @@ export async function handleCallback(
     );
   }
 
+  const resolved: ResolvedAppConfig = await resolveEndpoints(app, fetchImpl);
+
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
@@ -107,7 +114,7 @@ export async function handleCallback(
     code_verifier: codeVerifier,
   });
 
-  const response = await fetchImpl(app.tokenEndpoint, {
+  const response = await fetchImpl(resolved.tokenEndpoint, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: body.toString(),
@@ -176,13 +183,15 @@ export async function refreshAccessToken(
   const refreshToken = getRefreshToken();
   if (!refreshToken || !app.clientId) return false;
 
+  const resolved = await resolveEndpoints(app, fetchImpl);
+
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     refresh_token: refreshToken,
     client_id: app.clientId,
   });
 
-  const response = await fetchImpl(app.tokenEndpoint, {
+  const response = await fetchImpl(resolved.tokenEndpoint, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: body.toString(),
@@ -201,12 +210,16 @@ export function clearAuth(): void {
 }
 
 /** Sign out: clear local auth, then send the browser to the end-session endpoint. */
-export function logout(app: AppConfig = config): void {
+export async function logout(
+  app: AppConfig = config,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const resolved = await resolveEndpoints(app, fetchImpl);
   const idTokenHint = getIdToken();
   clearAuth();
   const params = new URLSearchParams();
   if (idTokenHint) params.set("id_token_hint", idTokenHint);
   if (app.clientId) params.set("client_id", app.clientId);
   params.set("post_logout_redirect_uri", window.location.origin);
-  window.location.assign(`${app.endSessionEndpoint}?${params.toString()}`);
+  window.location.assign(`${resolved.endSessionEndpoint}?${params.toString()}`);
 }

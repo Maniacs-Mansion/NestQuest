@@ -72,4 +72,23 @@ describe("API client", () => {
     );
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
   });
+
+  it("preserves non-401/403 statuses on the post-refresh retry (500 is not mislabeled)", async () => {
+    storeTokens({ access_token: "stale", refresh_token: "rt-1", expires_in: 600 });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("", { status: 401 })) // initial API call
+      .mockResolvedValueOnce(
+        jsonResponse({ access_token: "fresh", expires_in: 600 }), // refresh grant
+      )
+      .mockResolvedValueOnce(new Response("", { status: 500 })); // retry
+
+    const response = await apiFetch("/api/v1/children", {}, app, fetchMock as any);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[1][0]).toBe(app.tokenEndpoint);
+    expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe("Bearer fresh");
+    // A server failure must surface as the real status, not ApiUnauthorizedError.
+    expect(response.status).toBe(500);
+  });
 });

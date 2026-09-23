@@ -117,13 +117,13 @@ describe("OIDC flow", () => {
     expect(sessionStorage.length).toBe(0);
   });
 
-  it("logout clears auth and redirects to the end-session endpoint", () => {
+  it("logout clears auth and redirects to the end-session endpoint", async () => {
     storeTokens({ access_token: "a", id_token: "idt", expires_in: 60 });
     const assign = vi.fn();
     const original = window.location;
     vi.stubGlobal("location", { ...original, assign, origin: "http://localhost:5173" });
 
-    logout(testApp());
+    await logout(testApp());
 
     expect(assign).toHaveBeenCalledTimes(1);
     const url = new URL(assign.mock.calls[0][0] as string);
@@ -132,5 +132,42 @@ describe("OIDC flow", () => {
     );
     expect(getToken()).toBeUndefined();
     vi.unstubAllGlobals();
+  });
+
+  it("buildAuthorizeUrl resolves the authorize endpoint via discovery for a non-default issuer", async () => {
+    const issuer = "https://sso.discovery.example/application/o/discovered";
+    const discoveryDoc = {
+      issuer,
+      authorization_endpoint: "https://sso.discovery.example/application/o/authorize/",
+      token_endpoint: "https://sso.discovery.example/application/o/token/",
+      userinfo_endpoint: "https://sso.discovery.example/application/o/userinfo/",
+      end_session_endpoint: `${issuer}/end-session/`,
+      jwks_uri: `${issuer}/jwks/`,
+    };
+    const fetchMock = vi.fn().mockImplementation((url: string) =>
+      Promise.resolve(
+        String(url).endsWith("/.well-known/openid-configuration")
+          ? jsonResponse(discoveryDoc)
+          : jsonResponse({}),
+      ),
+    );
+    const app: AppConfig = {
+      issuer,
+      clientId: "test-client-id",
+      apiBaseUrl: "https://api.example.com",
+      redirectUri: "http://localhost:5173/auth/callback",
+    };
+
+    const url = new URL(await buildAuthorizeUrl(app, fetchMock as any));
+
+    // The authorize endpoint comes from the discovery document — Authentik
+    // serves it outside the app-specific issuer path, so it is NOT
+    // `${issuer}/authorize/` and must never be a hardcoded production host.
+    expect(url.origin + url.pathname).toBe(discoveryDoc.authorization_endpoint);
+    expect(url.searchParams.get("client_id")).toBe("test-client-id");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      `${issuer}/.well-known/openid-configuration`,
+    );
   });
 });
