@@ -1,6 +1,7 @@
 import "./cards/party-board";
 import "./cards/quest-log";
 import "./cards/admin";
+import "./strategy";
 
 const FONTS_HREF = "/nestquest-static/nestquest-fonts.css";
 if (!document.querySelector('link[data-nq-fonts=""]')) {

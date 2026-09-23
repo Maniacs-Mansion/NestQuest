@@ -1,7 +1,7 @@
-const B = globalThis, nt = B.ShadowRoot && (B.ShadyCSS === void 0 || B.ShadyCSS.nativeShadow) && "adoptedStyleSheets" in Document.prototype && "replace" in CSSStyleSheet.prototype, it = /* @__PURE__ */ Symbol(), lt = /* @__PURE__ */ new WeakMap();
+const B = globalThis, nt = B.ShadowRoot && (B.ShadyCSS === void 0 || B.ShadyCSS.nativeShadow) && "adoptedStyleSheets" in Document.prototype && "replace" in CSSStyleSheet.prototype, st = /* @__PURE__ */ Symbol(), lt = /* @__PURE__ */ new WeakMap();
 let zt = class {
   constructor(t, e, n) {
-    if (this._$cssResult$ = !0, n !== it) throw Error("CSSResult is not constructable. Use `unsafeCSS` or `css` instead.");
+    if (this._$cssResult$ = !0, n !== st) throw Error("CSSResult is not constructable. Use `unsafeCSS` or `css` instead.");
     this.cssText = t, this.t = e;
   }
   get styleSheet() {
@@ -17,14 +17,14 @@ let zt = class {
     return this.cssText;
   }
 };
-const v = (s) => new zt(typeof s == "string" ? s : s + "", void 0, it), Pt = (s, ...t) => {
+const v = (s) => new zt(typeof s == "string" ? s : s + "", void 0, st), Pt = (s, ...t) => {
   const e = s.length === 1 ? s[0] : t.reduce((n, i, r) => n + ((o) => {
     if (o._$cssResult$ === !0) return o.cssText;
     if (typeof o == "number") return o;
     throw Error("Value passed to 'css' function must be a 'css' function result: " + o + ". Use 'unsafeCSS' to pass non-literal values, but take care to ensure page security.");
   })(i) + s[r + 1], s[0]);
-  return new zt(e, s, it);
-}, Bt = (s, t) => {
+  return new zt(e, s, st);
+}, Ft = (s, t) => {
   if (nt) s.adoptedStyleSheets = t.map((e) => e instanceof CSSStyleSheet ? e : e.styleSheet);
   else for (const e of t) {
     const n = document.createElement("style"), i = B.litNonce;
@@ -35,10 +35,10 @@ const v = (s) => new zt(typeof s == "string" ? s : s + "", void 0, it), Pt = (s,
   for (const n of t.cssRules) e += n.cssText;
   return v(e);
 })(s) : s;
-const { is: Ft, defineProperty: Qt, getOwnPropertyDescriptor: Wt, getOwnPropertyNames: Zt, getOwnPropertySymbols: Gt, getPrototypeOf: Vt } = Object, W = globalThis, dt = W.trustedTypes, Kt = dt ? dt.emptyScript : "", Jt = W.reactiveElementPolyfillSupport, I = (s, t) => s, et = { toAttribute(s, t) {
+const { is: Qt, defineProperty: Wt, getOwnPropertyDescriptor: Zt, getOwnPropertyNames: Gt, getOwnPropertySymbols: Vt, getPrototypeOf: Kt } = Object, W = globalThis, dt = W.trustedTypes, Jt = dt ? dt.emptyScript : "", Xt = W.reactiveElementPolyfillSupport, I = (s, t) => s, et = { toAttribute(s, t) {
   switch (t) {
     case Boolean:
-      s = s ? Kt : null;
+      s = s ? Jt : null;
       break;
     case Object:
     case Array:
@@ -63,7 +63,7 @@ const { is: Ft, defineProperty: Qt, getOwnPropertyDescriptor: Wt, getOwnProperty
       }
   }
   return e;
-} }, It = (s, t) => !Ft(s, t), pt = { attribute: !0, type: String, converter: et, reflect: !1, useDefault: !1, hasChanged: It };
+} }, It = (s, t) => !Qt(s, t), pt = { attribute: !0, type: String, converter: et, reflect: !1, useDefault: !1, hasChanged: It };
 Symbol.metadata ??= /* @__PURE__ */ Symbol("metadata"), W.litPropertyMetadata ??= /* @__PURE__ */ new WeakMap();
 let E = class extends HTMLElement {
   static addInitializer(t) {
@@ -75,11 +75,11 @@ let E = class extends HTMLElement {
   static createProperty(t, e = pt) {
     if (e.state && (e.attribute = !1), this._$Ei(), this.prototype.hasOwnProperty(t) && ((e = Object.create(e)).wrapped = !0), this.elementProperties.set(t, e), !e.noAccessor) {
       const n = /* @__PURE__ */ Symbol(), i = this.getPropertyDescriptor(t, n, e);
-      i !== void 0 && Qt(this.prototype, t, i);
+      i !== void 0 && Wt(this.prototype, t, i);
     }
   }
   static getPropertyDescriptor(t, e, n) {
-    const { get: i, set: r } = Wt(this.prototype, t) ?? { get() {
+    const { get: i, set: r } = Zt(this.prototype, t) ?? { get() {
       return this[e];
     }, set(o) {
       this[e] = o;
@@ -94,13 +94,13 @@ let E = class extends HTMLElement {
   }
   static _$Ei() {
     if (this.hasOwnProperty(I("elementProperties"))) return;
-    const t = Vt(this);
+    const t = Kt(this);
     t.finalize(), t.l !== void 0 && (this.l = [...t.l]), this.elementProperties = new Map(t.elementProperties);
   }
   static finalize() {
     if (this.hasOwnProperty(I("finalized"))) return;
     if (this.finalized = !0, this._$Ei(), this.hasOwnProperty(I("properties"))) {
-      const e = this.properties, n = [...Zt(e), ...Gt(e)];
+      const e = this.properties, n = [...Gt(e), ...Vt(e)];
       for (const i of n) this.createProperty(i, e[i]);
     }
     const t = this[Symbol.metadata];
@@ -146,7 +146,7 @@ let E = class extends HTMLElement {
   }
   createRenderRoot() {
     const t = this.shadowRoot ?? this.attachShadow(this.constructor.shadowRootOptions);
-    return Bt(t, this.constructor.elementStyles), t;
+    return Ft(t, this.constructor.elementStyles), t;
   }
   connectedCallback() {
     this.renderRoot ??= this.createRenderRoot(), this.enableUpdating(!0), this._$EO?.forEach((t) => t.hostConnected?.());
@@ -246,15 +246,15 @@ let E = class extends HTMLElement {
   firstUpdated(t) {
   }
 };
-E.elementStyles = [], E.shadowRootOptions = { mode: "open" }, E[I("elementProperties")] = /* @__PURE__ */ new Map(), E[I("finalized")] = /* @__PURE__ */ new Map(), Jt?.({ ReactiveElement: E }), (W.reactiveElementVersions ??= []).push("2.1.2");
-const st = globalThis, ht = (s) => s, F = st.trustedTypes, ut = F ? F.createPolicy("lit-html", { createHTML: (s) => s }) : void 0, Lt = "$lit$", $ = `lit$${Math.random().toFixed(9).slice(2)}$`, Ut = "?" + $, Xt = `<${Ut}>`, S = document, L = () => S.createComment(""), U = (s) => s === null || typeof s != "object" && typeof s != "function", rt = Array.isArray, Yt = (s) => rt(s) || typeof s?.[Symbol.iterator] == "function", V = `[ 	
+E.elementStyles = [], E.shadowRootOptions = { mode: "open" }, E[I("elementProperties")] = /* @__PURE__ */ new Map(), E[I("finalized")] = /* @__PURE__ */ new Map(), Xt?.({ ReactiveElement: E }), (W.reactiveElementVersions ??= []).push("2.1.2");
+const it = globalThis, ht = (s) => s, F = it.trustedTypes, ut = F ? F.createPolicy("lit-html", { createHTML: (s) => s }) : void 0, Lt = "$lit$", $ = `lit$${Math.random().toFixed(9).slice(2)}$`, Ut = "?" + $, Yt = `<${Ut}>`, S = document, L = () => S.createComment(""), U = (s) => s === null || typeof s != "object" && typeof s != "function", rt = Array.isArray, te = (s) => rt(s) || typeof s?.[Symbol.iterator] == "function", V = `[ 	
 \f\r]`, z = /<(?:(!--|\/[^a-zA-Z])|(\/?[a-zA-Z][^>\s]*)|(\/?$))/g, ft = /-->/g, mt = />/g, q = RegExp(`>|${V}(?:([^\\s"'>=/]+)(${V}*=${V}*(?:[^ 	
-\f\r"'\`<>=]|("|')|))|$)`, "g"), gt = /'/g, _t = /"/g, Rt = /^(?:script|style|textarea|title)$/i, te = (s) => (t, ...e) => ({ _$litType$: s, strings: t, values: e }), d = te(1), T = /* @__PURE__ */ Symbol.for("lit-noChange"), g = /* @__PURE__ */ Symbol.for("lit-nothing"), yt = /* @__PURE__ */ new WeakMap(), C = S.createTreeWalker(S, 129);
-function Dt(s, t) {
+\f\r"'\`<>=]|("|')|))|$)`, "g"), gt = /'/g, _t = /"/g, Rt = /^(?:script|style|textarea|title)$/i, ee = (s) => (t, ...e) => ({ _$litType$: s, strings: t, values: e }), d = ee(1), T = /* @__PURE__ */ Symbol.for("lit-noChange"), g = /* @__PURE__ */ Symbol.for("lit-nothing"), yt = /* @__PURE__ */ new WeakMap(), C = S.createTreeWalker(S, 129);
+function jt(s, t) {
   if (!rt(s) || !s.hasOwnProperty("raw")) throw Error("invalid template strings array");
   return ut !== void 0 ? ut.createHTML(t) : t;
 }
-const ee = (s, t) => {
+const ne = (s, t) => {
   const e = s.length - 1, n = [];
   let i, r = t === 2 ? "<svg>" : t === 3 ? "<math>" : "", o = z;
   for (let l = 0; l < e; l++) {
@@ -262,16 +262,16 @@ const ee = (s, t) => {
     let p, u, c = -1, f = 0;
     for (; f < a.length && (o.lastIndex = f, u = o.exec(a), u !== null); ) f = o.lastIndex, o === z ? u[1] === "!--" ? o = ft : u[1] !== void 0 ? o = mt : u[2] !== void 0 ? (Rt.test(u[2]) && (i = RegExp("</" + u[2], "g")), o = q) : u[3] !== void 0 && (o = q) : o === q ? u[0] === ">" ? (o = i ?? z, c = -1) : u[1] === void 0 ? c = -2 : (c = o.lastIndex - u[2].length, p = u[1], o = u[3] === void 0 ? q : u[3] === '"' ? _t : gt) : o === _t || o === gt ? o = q : o === ft || o === mt ? o = z : (o = q, i = void 0);
     const h = o === q && s[l + 1].startsWith("/>") ? " " : "";
-    r += o === z ? a + Xt : c >= 0 ? (n.push(p), a.slice(0, c) + Lt + a.slice(c) + $ + h) : a + $ + (c === -2 ? l : h);
+    r += o === z ? a + Yt : c >= 0 ? (n.push(p), a.slice(0, c) + Lt + a.slice(c) + $ + h) : a + $ + (c === -2 ? l : h);
   }
-  return [Dt(s, r + (s[e] || "<?>") + (t === 2 ? "</svg>" : t === 3 ? "</math>" : "")), n];
+  return [jt(s, r + (s[e] || "<?>") + (t === 2 ? "</svg>" : t === 3 ? "</math>" : "")), n];
 };
 class R {
   constructor({ strings: t, _$litType$: e }, n) {
     let i;
     this.parts = [];
     let r = 0, o = 0;
-    const l = t.length - 1, a = this.parts, [p, u] = ee(t, e);
+    const l = t.length - 1, a = this.parts, [p, u] = ne(t, e);
     if (this.el = R.createElement(p, n), C.currentNode = this.el.content, e === 2 || e === 3) {
       const c = this.el.content.firstChild;
       c.replaceWith(...c.childNodes);
@@ -280,7 +280,7 @@ class R {
       if (i.nodeType === 1) {
         if (i.hasAttributes()) for (const c of i.getAttributeNames()) if (c.endsWith(Lt)) {
           const f = u[o++], h = i.getAttribute(c).split($), m = /([.?@])?(.*)/.exec(f);
-          a.push({ type: 1, index: r, name: m[2], strings: h, ctor: m[1] === "." ? ie : m[1] === "?" ? se : m[1] === "@" ? re : Z }), i.removeAttribute(c);
+          a.push({ type: 1, index: r, name: m[2], strings: h, ctor: m[1] === "." ? ie : m[1] === "?" ? re : m[1] === "@" ? oe : Z }), i.removeAttribute(c);
         } else c.startsWith($) && (a.push({ type: 6, index: r }), i.removeAttribute(c));
         if (Rt.test(i.tagName)) {
           const c = i.textContent.split($), f = c.length - 1;
@@ -309,7 +309,7 @@ function N(s, t, e = s, n) {
   const r = U(t) ? void 0 : t._$litDirective$;
   return i?.constructor !== r && (i?._$AO?.(!1), r === void 0 ? i = void 0 : (i = new r(s), i._$AT(s, e, n)), n !== void 0 ? (e._$Co ??= [])[n] = i : e._$Cl = i), i !== void 0 && (t = N(s, i._$AS(s, t.values), i, n)), t;
 }
-class ne {
+class se {
   constructor(t, e) {
     this._$AV = [], this._$AN = void 0, this._$AD = t, this._$AM = e;
   }
@@ -326,7 +326,7 @@ class ne {
     for (; a !== void 0; ) {
       if (o === a.index) {
         let p;
-        a.type === 2 ? p = new O(r, r.nextSibling, this, t) : a.type === 1 ? p = new a.ctor(r, a.name, a.strings, this, t) : a.type === 6 && (p = new oe(r, this, t)), this._$AV.push(p), a = n[++l];
+        a.type === 2 ? p = new O(r, r.nextSibling, this, t) : a.type === 1 ? p = new a.ctor(r, a.name, a.strings, this, t) : a.type === 6 && (p = new ae(r, this, t)), this._$AV.push(p), a = n[++l];
       }
       o !== a?.index && (r = C.nextNode(), o++);
     }
@@ -356,7 +356,7 @@ class O {
     return this._$AB;
   }
   _$AI(t, e = this) {
-    t = N(this, t, e), U(t) ? t === g || t == null || t === "" ? (this._$AH !== g && this._$AR(), this._$AH = g) : t !== this._$AH && t !== T && this._(t) : t._$litType$ !== void 0 ? this.$(t) : t.nodeType !== void 0 ? this.T(t) : Yt(t) ? this.k(t) : this._(t);
+    t = N(this, t, e), U(t) ? t === g || t == null || t === "" ? (this._$AH !== g && this._$AR(), this._$AH = g) : t !== this._$AH && t !== T && this._(t) : t._$litType$ !== void 0 ? this.$(t) : t.nodeType !== void 0 ? this.T(t) : te(t) ? this.k(t) : this._(t);
   }
   O(t) {
     return this._$AA.parentNode.insertBefore(t, this._$AB);
@@ -368,10 +368,10 @@ class O {
     this._$AH !== g && U(this._$AH) ? this._$AA.nextSibling.data = t : this.T(S.createTextNode(t)), this._$AH = t;
   }
   $(t) {
-    const { values: e, _$litType$: n } = t, i = typeof n == "number" ? this._$AC(t) : (n.el === void 0 && (n.el = R.createElement(Dt(n.h, n.h[0]), this.options)), n);
+    const { values: e, _$litType$: n } = t, i = typeof n == "number" ? this._$AC(t) : (n.el === void 0 && (n.el = R.createElement(jt(n.h, n.h[0]), this.options)), n);
     if (this._$AH?._$AD === i) this._$AH.p(e);
     else {
-      const r = new ne(i, this), o = r.u(this.options);
+      const r = new se(i, this), o = r.u(this.options);
       r.p(e), this.T(o), this._$AH = r;
     }
   }
@@ -429,7 +429,7 @@ class ie extends Z {
     this.element[this.name] = t === g ? void 0 : t;
   }
 }
-class se extends Z {
+class re extends Z {
   constructor() {
     super(...arguments), this.type = 4;
   }
@@ -437,7 +437,7 @@ class se extends Z {
     this.element.toggleAttribute(this.name, !!t && t !== g);
   }
 }
-class re extends Z {
+class oe extends Z {
   constructor(t, e, n, i, r) {
     super(t, e, n, i, r), this.type = 5;
   }
@@ -450,7 +450,7 @@ class re extends Z {
     typeof this._$AH == "function" ? this._$AH.call(this.options?.host ?? this.element, t) : this._$AH.handleEvent(t);
   }
 }
-class oe {
+class ae {
   constructor(t, e, n) {
     this.element = t, this.type = 6, this._$AN = void 0, this._$AM = e, this.options = n;
   }
@@ -461,9 +461,9 @@ class oe {
     N(this, t);
   }
 }
-const ae = { I: O }, le = st.litHtmlPolyfillSupport;
-le?.(R, O), (st.litHtmlVersions ??= []).push("3.3.3");
-const ce = (s, t, e) => {
+const le = { I: O }, ce = it.litHtmlPolyfillSupport;
+ce?.(R, O), (it.litHtmlVersions ??= []).push("3.3.3");
+const de = (s, t, e) => {
   const n = e?.renderBefore ?? t;
   let i = n._$litPart$;
   if (i === void 0) {
@@ -483,7 +483,7 @@ let A = class extends E {
   }
   update(t) {
     const e = this.render();
-    this.hasUpdated || (this.renderOptions.isConnected = this.isConnected), super.update(t), this._$Do = ce(e, this.renderRoot, this.renderOptions);
+    this.hasUpdated || (this.renderOptions.isConnected = this.isConnected), super.update(t), this._$Do = de(e, this.renderRoot, this.renderOptions);
   }
   connectedCallback() {
     super.connectedCallback(), this._$Do?.setConnected(!0);
@@ -496,14 +496,14 @@ let A = class extends E {
   }
 };
 A._$litElement$ = !0, A.finalized = !0, ot.litElementHydrateSupport?.({ LitElement: A });
-const de = ot.litElementPolyfillSupport;
-de?.({ LitElement: A });
+const pe = ot.litElementPolyfillSupport;
+pe?.({ LitElement: A });
 (ot.litElementVersions ??= []).push("4.2.2");
-const jt = ':host{--nq-p-parchment-top: #f0e4c7;--nq-p-parchment-bottom: #ddcca3;--nq-p-parchment: radial-gradient(ellipse at 25% 10%, rgba(255,255,255,.5), transparent 55%), radial-gradient(ellipse at 85% 90%, rgba(120,86,44,.28), transparent 60%), repeating-linear-gradient(93deg, rgba(150,115,70,.05) 0 2px, transparent 2px 6px), repeating-linear-gradient(2deg, rgba(150,115,70,.04) 0 3px, transparent 3px 7px), linear-gradient(var(--nq-p-parchment-top), var(--nq-p-parchment-bottom));--nq-p-vignette: inset 0 0 200px rgba(80,52,20,.35);--nq-p-card-open: linear-gradient(#fdf7e6, #f2e7c9);--nq-p-card-done: linear-gradient(#f0e8d3, #e6dcc2);--nq-p-card-panel: linear-gradient(#fcf6e6, #f1e6ca);--nq-p-card-border: rgba(120,88,48,.38);--nq-p-panel-border: rgba(92,62,26,.4);--nq-p-card-shadow: 0 3px 0 rgba(120,88,48,.2), inset 0 1px 0 rgba(255,255,255,.7);--nq-p-panel-shadow: 0 6px 0 rgba(92,62,26,.18), inset 0 2px 0 rgba(255,255,255,.7);--nq-p-frame-outer: 2px solid rgba(92,62,26,.45);--nq-p-frame-inner: 1px solid rgba(92,62,26,.28);--nq-p-rule: 2px solid rgba(92,62,26,.35);--nq-p-ink: #2b1f14;--nq-p-ink-secondary: #5c452a;--nq-p-ink-muted: #6f6455;--nq-p-ink-away: #4d4433;--nq-p-ink-late: #8f1526;--nq-brand-blue: #3B3AB8;--nq-brand-purple: #A035CC;--nq-brand-gradient: linear-gradient(135deg, var(--nq-brand-blue), var(--nq-brand-purple));--nq-p-icon-tile: var(--nq-brand-gradient);--nq-p-icon-tile-done: rgba(92,62,26,.16);--nq-p-crest: var(--nq-brand-gradient);--nq-p-crest-away: linear-gradient(135deg, #6b6b7a, #7a7286);--nq-p-seal: radial-gradient(circle at 35% 30%, #a8283a, #6d1322);--nq-p-seal-shadow: 0 4px 10px rgba(60,10,20,.4), inset 0 0 0 4px rgba(255,255,255,.14);--nq-p-seal-size: 78px;--nq-p-dock-bg: rgba(43,31,20,.9);--nq-p-dock-ink: #f7efdb;--nq-p-dock-ink-secondary: #d8c9a6;--nq-p-dock-divider: rgba(233,220,189,.3);--nq-p-dock-height: 84px;--nq-p-font-display: "Cinzel Decorative", Cinzel, serif;--nq-p-font-heading: Cinzel, serif;--nq-p-font-body: Nunito, system-ui, sans-serif;--nq-p-size-hero: 86px;--nq-p-size-wordmark: 66px;--nq-p-size-title: 56px;--nq-p-size-name: 48px;--nq-p-size-section: 32px;--nq-p-size-quest: 30px;--nq-p-size-body: 22px;--nq-p-size-label: 21px;--nq-p-track-label: .14em;--nq-p-track-kicker: .3em;--nq-p-quest-min-height: 116px;--nq-p-quest-gap: 24px;--nq-p-quest-pad: 22px;--nq-p-tile-size: 64px;--nq-p-button-height: 72px;--nq-p-button-min-width: 150px;--nq-p-confirm-button: 108px;--nq-p-radius-card: 12px;--nq-p-radius-panel: 20px;--nq-p-radius-pill: 9999px;--nq-p-page-inset: 62px;--nq-p-frame-inset: 26px;--nq-ease-out: cubic-bezier(0, 0, .2, 1);--nq-dur-micro: .12s;--nq-dur-base: .2s;--nq-dur-modal: .35s}';
+const Dt = ':host{--nq-p-parchment-top: #f0e4c7;--nq-p-parchment-bottom: #ddcca3;--nq-p-parchment: radial-gradient(ellipse at 25% 10%, rgba(255,255,255,.5), transparent 55%), radial-gradient(ellipse at 85% 90%, rgba(120,86,44,.28), transparent 60%), repeating-linear-gradient(93deg, rgba(150,115,70,.05) 0 2px, transparent 2px 6px), repeating-linear-gradient(2deg, rgba(150,115,70,.04) 0 3px, transparent 3px 7px), linear-gradient(var(--nq-p-parchment-top), var(--nq-p-parchment-bottom));--nq-p-vignette: inset 0 0 200px rgba(80,52,20,.35);--nq-p-card-open: linear-gradient(#fdf7e6, #f2e7c9);--nq-p-card-done: linear-gradient(#f0e8d3, #e6dcc2);--nq-p-card-panel: linear-gradient(#fcf6e6, #f1e6ca);--nq-p-card-border: rgba(120,88,48,.38);--nq-p-panel-border: rgba(92,62,26,.4);--nq-p-card-shadow: 0 3px 0 rgba(120,88,48,.2), inset 0 1px 0 rgba(255,255,255,.7);--nq-p-panel-shadow: 0 6px 0 rgba(92,62,26,.18), inset 0 2px 0 rgba(255,255,255,.7);--nq-p-frame-outer: 2px solid rgba(92,62,26,.45);--nq-p-frame-inner: 1px solid rgba(92,62,26,.28);--nq-p-rule: 2px solid rgba(92,62,26,.35);--nq-p-ink: #2b1f14;--nq-p-ink-secondary: #5c452a;--nq-p-ink-muted: #6f6455;--nq-p-ink-away: #4d4433;--nq-p-ink-late: #8f1526;--nq-brand-blue: #3B3AB8;--nq-brand-purple: #A035CC;--nq-brand-gradient: linear-gradient(135deg, var(--nq-brand-blue), var(--nq-brand-purple));--nq-p-icon-tile: var(--nq-brand-gradient);--nq-p-icon-tile-done: rgba(92,62,26,.16);--nq-p-crest: var(--nq-brand-gradient);--nq-p-crest-away: linear-gradient(135deg, #6b6b7a, #7a7286);--nq-p-seal: radial-gradient(circle at 35% 30%, #a8283a, #6d1322);--nq-p-seal-shadow: 0 4px 10px rgba(60,10,20,.4), inset 0 0 0 4px rgba(255,255,255,.14);--nq-p-seal-size: 78px;--nq-p-dock-bg: rgba(43,31,20,.9);--nq-p-dock-ink: #f7efdb;--nq-p-dock-ink-secondary: #d8c9a6;--nq-p-dock-divider: rgba(233,220,189,.3);--nq-p-dock-height: 84px;--nq-p-font-display: "Cinzel Decorative", Cinzel, serif;--nq-p-font-heading: Cinzel, serif;--nq-p-font-body: Nunito, system-ui, sans-serif;--nq-p-size-hero: 86px;--nq-p-size-wordmark: 66px;--nq-p-size-title: 56px;--nq-p-size-name: 48px;--nq-p-size-section: 32px;--nq-p-size-quest: 30px;--nq-p-size-body: 22px;--nq-p-size-label: 21px;--nq-p-track-label: .14em;--nq-p-track-kicker: .3em;--nq-p-quest-min-height: 116px;--nq-p-quest-gap: 24px;--nq-p-quest-pad: 22px;--nq-p-tile-size: 64px;--nq-p-button-height: 72px;--nq-p-button-min-width: 150px;--nq-p-confirm-button: 108px;--nq-p-radius-card: 12px;--nq-p-radius-panel: 20px;--nq-p-radius-pill: 9999px;--nq-p-page-inset: 62px;--nq-p-frame-inset: 26px;--nq-ease-out: cubic-bezier(0, 0, .2, 1);--nq-dur-micro: .12s;--nq-dur-base: .2s;--nq-dur-modal: .35s}';
 function at(s) {
   window.customCards = window.customCards ?? [], window.customCards.push(s);
 }
-const pe = [
+const he = [
   "nestquest_quest_completed",
   "nestquest_quest_uncompleted",
   "nestquest_quest_missed",
@@ -524,7 +524,7 @@ function Q(s, t) {
   }
   return bt.set(e, i), i;
 }
-function he(s) {
+function ue(s) {
   const t = s?.config;
   if (!t || typeof t != "object")
     return;
@@ -534,14 +534,14 @@ function he(s) {
 function K(s, t) {
   return `${Q(t, { weekday: "long" }).format(s)}, ${Q(t, { month: "short", day: "numeric" }).format(s)}`;
 }
-function ue(s, t) {
+function fe(s, t) {
   return Q(t, {
     hour: "numeric",
     minute: "2-digit",
     hour12: !0
   }).format(s);
 }
-const fe = {
+const me = {
   "clear-night": "Clear",
   cloudy: "Cloudy",
   exceptional: "Clear",
@@ -557,7 +557,7 @@ const fe = {
   sunny: "Sunny",
   windy: "Windy",
   "windy-variant": "Windy"
-}, me = {
+}, ge = {
   "clear-night": "Clear night skies",
   cloudy: "Grey skies today",
   exceptional: "A striking day",
@@ -583,16 +583,22 @@ function J(s, t) {
   const e = typeof s == "number" ? s : Number(s);
   return Number.isFinite(e) ? e : t;
 }
+function _e(s) {
+  if (s === null || typeof s != "object" || Array.isArray(s))
+    return "";
+  const t = s.slug;
+  return typeof t == "string" ? t.trim() : "";
+}
 function xt(s) {
   return Number.isFinite(s) ? Math.min(100, Math.max(0, s)) : 0;
 }
 function wt(s) {
   return Math.max(0, Math.round(s));
 }
-function ge(s) {
+function ye(s) {
   return s.split(/[-_]+/).filter(Boolean).map((t) => t.charAt(0).toUpperCase() + t.slice(1)).join(" ");
 }
-function _e(s, t) {
+function be(s, t) {
   const e = Q(t, {
     year: "numeric",
     month: "2-digit",
@@ -614,7 +620,7 @@ function _e(s, t) {
   );
   return Number.isFinite(i) ? i - s : 0;
 }
-function ye(s, t) {
+function ve(s, t) {
   if (typeof s != "string")
     return null;
   const e = s.split("-");
@@ -627,17 +633,17 @@ function ye(s, t) {
     const a = new Date(n, i - 1, r);
     return Number.isNaN(a.getTime()) ? null : a;
   }
-  const o = Date.UTC(n, i - 1, r), l = new Date(o - _e(o, t));
+  const o = Date.UTC(n, i - 1, r), l = new Date(o - be(o, t));
   return Number.isNaN(l.getTime()) ? null : l;
 }
-function be(s) {
-  const t = fe[s];
+function xe(s) {
+  const t = me[s];
   return t || s.charAt(0).toUpperCase() + s.slice(1);
 }
-function ve(s, t) {
-  return me[s] ?? t;
+function we(s, t) {
+  return ge[s] ?? t;
 }
-const $t = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", xe = "polygon(50% 0, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%)", we = Pt`
+const $t = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", $e = "polygon(50% 0, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%)", qe = Pt`
   * {
     box-sizing: border-box;
   }
@@ -709,7 +715,7 @@ const $t = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", xe = "polygon(50% 
     justify-content: center;
     width: 34px;
     height: 34px;
-    clip-path: ${v(xe)};
+    clip-path: ${v($e)};
     background: var(--nq-brand-gradient);
   }
 
@@ -1032,7 +1038,7 @@ const $t = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", xe = "polygon(50% 
     font-weight: 800;
     line-height: 1;
   }
-`, $e = d`<svg
+`, ke = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -1043,7 +1049,7 @@ const $t = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", xe = "polygon(50% 
 >
   <circle cx="12" cy="12" r="10"></circle>
   <path d="m9 12 2 2 4-4"></path>
-</svg>`, qe = d`<svg
+</svg>`, Ce = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -1054,7 +1060,7 @@ const $t = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", xe = "polygon(50% 
 >
   <path d="M3.5 21 12 3.5 20.5 21"></path>
   <path d="M9 21l3-8 3 8"></path>
-</svg>`, ke = d`<svg
+</svg>`, Ae = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -1065,7 +1071,7 @@ const $t = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", xe = "polygon(50% 
 >
   <circle cx="12" cy="12" r="10"></circle>
   <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"></polygon>
-</svg>`, Ce = d`<svg
+</svg>`, Se = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -1077,7 +1083,7 @@ const $t = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", xe = "polygon(50% 
   <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path>
   <path d="M12 9v4"></path>
   <path d="M12 17h.01"></path>
-</svg>`, Ae = d`<svg
+</svg>`, Te = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -1089,14 +1095,14 @@ const $t = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", xe = "polygon(50% 
   <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path>
   <path d="m2 2 20 20"></path>
 </svg>`, qt = {
-  icon: Ce,
+  icon: Se,
   headline: "NestQuest is not set up yet",
   body: "A parent needs to finish setting up NestQuest before the party can gather."
-}, Se = {
-  icon: Ae,
+}, Ee = {
+  icon: Te,
   headline: "The records cannot be reached",
   body: "The party's records are quiet right now. NestQuest will return shortly."
-}, Te = d`<svg
+}, Ne = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -1112,13 +1118,13 @@ const $t = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", xe = "polygon(50% 
   <path d="M15.947 12.65a4 4 0 0 0-5.925-4.128"></path>
   <path d="M13 22H7a5 5 0 1 1 4.9-6H13a3 3 0 0 1 0 6Z"></path>
 </svg>`;
-class Ee extends A {
+class Me extends A {
   static properties = {
     hass: { attribute: !1 },
     _config: { state: !0 },
     _now: { state: !0 }
   };
-  static styles = [v(jt), we];
+  static styles = [v(Dt), qe];
   hass;
   _config;
   _now = /* @__PURE__ */ new Date();
@@ -1150,7 +1156,7 @@ class Ee extends A {
         e === this._subGeneration && (this._unsubscribeLive(), this._armSubscribeRetry());
       });
     };
-    for (const i of pe)
+    for (const i of he)
       n(
         t.subscribeEvents(() => this.requestUpdate(), i)
       );
@@ -1213,7 +1219,7 @@ class Ee extends A {
     `;
   }
   _timeZone() {
-    return he(this.hass);
+    return ue(this.hass);
   }
   _state(t) {
     const n = this.hass?.states?.[t];
@@ -1225,7 +1231,19 @@ class Ee extends A {
     const t = this._config.child_order;
     return Array.isArray(t) ? t.filter(
       (e) => typeof e == "string" && e.trim().length > 0
-    ).map((e) => e.trim()) : [];
+    ).map((e) => e.trim()) : this._discoveredChildSlugs();
+  }
+  /** Zero-config discovery (Feature 20): the ordered child roster the
+   *  integration publishes on the household rollup
+   *  (custom_components/nestquest/sensor.py — ``child_roster``, the
+   *  snapshot's sort_order, then id), each entry carrying the slug the
+   *  per-child entity ids are built from.  Consulted only when the
+   *  config has no child_order — explicit configuration wins. */
+  _discoveredChildSlugs() {
+    const e = this._state(
+      "sensor.nestquest_household_quests_due_today"
+    )?.attributes?.child_roster;
+    return Array.isArray(e) ? e.map((n) => _e(n)).filter((n) => n.length > 0) : [];
   }
   _plates() {
     return this._childSlugs().map((t) => this._plate(t));
@@ -1249,11 +1267,11 @@ class Ee extends A {
       const G = o?.attributes?.child_name;
       typeof G == "string" && G.trim() && (m = G.trim());
     }
-    m || (m = ge(t));
-    const x = ye(
+    m || (m = ye(t));
+    const x = ve(
       o?.attributes?.next_present,
       this._timeZone()
-    ), D = x ? `Returns ${K(x, this._timeZone())}` : null;
+    ), j = x ? `Returns ${K(x, this._timeZone())}` : null;
     return {
       slug: t,
       name: m,
@@ -1262,7 +1280,7 @@ class Ee extends A {
       completed: p,
       due: a,
       pct: c,
-      returns: D,
+      returns: j,
       unresolved: e
     };
   }
@@ -1279,7 +1297,7 @@ class Ee extends A {
   }
   _boardNotice() {
     const t = this._plates();
-    return t.length === 0 ? qt : t.every((e) => e.unresolved !== null) ? t.some((e) => e.unresolved === "stale") ? Se : qt : null;
+    return t.length === 0 ? qt : t.every((e) => e.unresolved !== null) ? t.some((e) => e.unresolved === "stale") ? Ee : qt : null;
   }
   _renderNotice(t) {
     return d`
@@ -1302,7 +1320,7 @@ class Ee extends A {
           </span>
           <span class="name">${t.name}</span>
           <span class="pill away">
-            ${ke}
+            ${Ae}
             <span>Unknown</span>
           </span>
           <span class="progress-line">&mdash;</span>
@@ -1322,7 +1340,7 @@ class Ee extends A {
           </span>
           <span class="name">${t.name}</span>
           <span class="pill">
-            ${$e}
+            ${ke}
             <span>Home today</span>
           </span>
           <span class="progress-line">
@@ -1341,7 +1359,7 @@ class Ee extends A {
         </span>
         <span class="name">${t.name}</span>
         <span class="pill away">
-          ${qe}
+          ${Ce}
           <span>On travels</span>
         </span>
         <span class="progress-line">${t.returns ?? "Returns —"}</span>
@@ -1393,13 +1411,13 @@ class Ee extends A {
         <div class="dock">
           <span class="date">${K(this._now, this._timeZone())}</span>
           <span class="divider"></span>
-          <span class="clock">${ue(this._now, this._timeZone())}</span>
+          <span class="clock">${fe(this._now, this._timeZone())}</span>
         </div>
       `;
-    const e = be(t.condition), n = ve(t.condition, e), i = t.temperature === null ? g : d`<span class="temp">${Math.round(t.temperature)}°</span>`, r = t.high === null || t.low === null ? null : `${Math.round(t.high)}° / ${Math.round(t.low)}°`;
+    const e = xe(t.condition), n = we(t.condition, e), i = t.temperature === null ? g : d`<span class="temp">${Math.round(t.temperature)}°</span>`, r = t.high === null || t.low === null ? null : `${Math.round(t.high)}° / ${Math.round(t.low)}°`;
     return d`
       <div class="dock">
-        ${Te}
+        ${Ne}
         ${i}
         <span class="divider"></span>
         <span class="condition">
@@ -1411,14 +1429,14 @@ class Ee extends A {
     `;
   }
 }
-customElements.define("nestquest-party-board-card", Ee);
+customElements.define("nestquest-party-board-card", Me);
 at({
   type: "nestquest-party-board-card",
   name: "NestQuest Party Board",
   description: "Kids' attract screen for present and away adventurers."
 });
-const Ne = { CHILD: 2 }, Me = (s) => (...t) => ({ _$litDirective$: s, values: t });
-let Oe = class {
+const Oe = { CHILD: 2 }, ze = (s) => (...t) => ({ _$litDirective$: s, values: t });
+let Pe = class {
   constructor(t) {
   }
   get _$AU() {
@@ -1434,11 +1452,11 @@ let Oe = class {
     return this.render(...e);
   }
 };
-const { I: ze } = ae, kt = (s) => s, Ct = () => document.createComment(""), P = (s, t, e) => {
+const { I: Ie } = le, kt = (s) => s, Ct = () => document.createComment(""), P = (s, t, e) => {
   const n = s._$AA.parentNode, i = t === void 0 ? s._$AB : t._$AA;
   if (e === void 0) {
     const r = n.insertBefore(Ct(), i), o = n.insertBefore(Ct(), i);
-    e = new ze(r, o, s, s.options);
+    e = new Ie(r, o, s, s.options);
   } else {
     const r = e._$AB.nextSibling, o = e._$AM, l = o !== s;
     if (l) {
@@ -1454,16 +1472,16 @@ const { I: ze } = ae, kt = (s) => s, Ct = () => document.createComment(""), P = 
     }
   }
   return e;
-}, k = (s, t, e = s) => (s._$AI(t, e), s), Pe = {}, Ie = (s, t = Pe) => s._$AH = t, Le = (s) => s._$AH, X = (s) => {
+}, k = (s, t, e = s) => (s._$AI(t, e), s), Le = {}, Ue = (s, t = Le) => s._$AH = t, Re = (s) => s._$AH, X = (s) => {
   s._$AR(), s._$AA.remove();
 };
 const At = (s, t, e) => {
   const n = /* @__PURE__ */ new Map();
   for (let i = t; i <= e; i++) n.set(s[i], i);
   return n;
-}, St = Me(class extends Oe {
+}, St = ze(class extends Pe {
   constructor(s) {
-    if (super(s), s.type !== Ne.CHILD) throw Error("repeat() can only be used in text expressions");
+    if (super(s), s.type !== Oe.CHILD) throw Error("repeat() can only be used in text expressions");
   }
   dt(s, t, e) {
     let n;
@@ -1477,7 +1495,7 @@ const At = (s, t, e) => {
     return this.dt(s, t, e).values;
   }
   update(s, [t, e, n]) {
-    const i = Le(s), { values: r, keys: o } = this.dt(t, e, n);
+    const i = Re(s), { values: r, keys: o } = this.dt(t, e, n);
     if (!Array.isArray(i)) return this.ut = o, r;
     const l = this.ut ??= [], a = [];
     let p, u, c = 0, f = i.length - 1, h = 0, m = r.length - 1;
@@ -1490,8 +1508,8 @@ const At = (s, t, e) => {
     else if (p === void 0 && (p = At(o, h, m), u = At(l, c, f)), p.has(l[c])) if (p.has(l[f])) {
       const _ = u.get(o[h]), x = _ !== void 0 ? i[_] : null;
       if (x === null) {
-        const D = P(s, i[c]);
-        k(D, r[h]), a[h] = D;
+        const j = P(s, i[c]);
+        k(j, r[h]), a[h] = j;
       } else a[h] = k(x, r[h]), P(s, i[c], x), i[_] = null;
       h++;
     } else X(i[f]), f--;
@@ -1504,9 +1522,9 @@ const At = (s, t, e) => {
       const _ = i[c++];
       _ !== null && X(_);
     }
-    return this.ut = o, Ie(s, a), T;
+    return this.ut = o, Ue(s, a), T;
   }
-}), Ue = [
+}), je = [
   "nestquest_quest_completed",
   "nestquest_quest_uncompleted",
   "nestquest_quest_missed",
@@ -1527,20 +1545,20 @@ function M(s, t) {
   }
   return Tt.set(e, i), i;
 }
-function Re(s) {
+function De(s) {
   const t = s?.config;
   if (!t || typeof t != "object")
     return;
   const e = t.time_zone;
   return typeof e == "string" && e.trim() ? e.trim() : void 0;
 }
-function j(s, t) {
+function D(s, t) {
   return `${M(t, { weekday: "long" }).format(s)}, ${M(t, { month: "short", day: "numeric" }).format(s)}`;
 }
-function De(s, t) {
+function He(s, t) {
   return M(t, { weekday: "long" }).format(s);
 }
-function je(s, t) {
+function Be(s, t) {
   const e = new Date(s);
   return Number.isNaN(e.getTime()) ? "" : M(t, {
     hour: "numeric",
@@ -1548,14 +1566,14 @@ function je(s, t) {
     hour12: !0
   }).format(e);
 }
-function He(s, t) {
+function Fe(s, t) {
   return M(t, {
     hour: "numeric",
     minute: "2-digit",
     hour12: !0
   }).format(s);
 }
-function Be(s) {
+function Qe(s) {
   if (!s)
     return null;
   const t = /^(\d{1,2}):(\d{2})$/.exec(s.trim());
@@ -1582,7 +1600,7 @@ function b(s) {
 function Y(s) {
   return s.split(/[-_]+/).filter(Boolean).map((t) => t.charAt(0).toUpperCase() + t.slice(1)).join(" ");
 }
-function Fe(s, t) {
+function We(s, t) {
   const e = M(t, {
     year: "numeric",
     month: "2-digit",
@@ -1617,14 +1635,14 @@ function Et(s, t) {
     const a = new Date(n, i - 1, r);
     return Number.isNaN(a.getTime()) ? null : a;
   }
-  const o = Date.UTC(n, i - 1, r), l = new Date(o - Fe(o, t));
+  const o = Date.UTC(n, i - 1, r), l = new Date(o - We(o, t));
   return Number.isNaN(l.getTime()) ? null : l;
 }
-function Qe() {
+function Ze() {
   const s = window.location.pathname.split("/").filter(Boolean);
   return s.length > 0 ? s[s.length - 1].toLowerCase() : "";
 }
-function We(s) {
+function Ge(s) {
   if (!s || typeof s != "object")
     return null;
   const t = s, e = w(t.state).toLowerCase();
@@ -1647,7 +1665,7 @@ function We(s) {
     on_time: t.on_time === !0 ? !0 : t.on_time === !1 ? !1 : null
   };
 }
-const Ze = {
+const Ve = {
   "clear-night": "Clear",
   cloudy: "Cloudy",
   exceptional: "Clear",
@@ -1663,7 +1681,7 @@ const Ze = {
   sunny: "Sunny",
   windy: "Windy",
   "windy-variant": "Windy"
-}, Ge = {
+}, Ke = {
   "clear-night": "Clear night skies",
   cloudy: "Grey skies today",
   exceptional: "A striking day",
@@ -1680,14 +1698,14 @@ const Ze = {
   windy: "A blustery day",
   "windy-variant": "A blustery day"
 };
-function Ve(s) {
-  const t = Ze[s];
+function Je(s) {
+  const t = Ve[s];
   return t || s.charAt(0).toUpperCase() + s.slice(1);
 }
-function Ke(s, t) {
-  return Ge[s] ?? t;
+function Xe(s, t) {
+  return Ke[s] ?? t;
 }
-const Nt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Je = "polygon(50% 0, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%)", Mt = [-9, 6, -4], Xe = Pt`
+const Nt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ye = "polygon(50% 0, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%)", Mt = [-9, 6, -4], tn = Pt`
   * {
     box-sizing: border-box;
   }
@@ -1824,7 +1842,7 @@ const Nt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Je = "polygon(50% 
     justify-content: center;
     width: 44px;
     height: 44px;
-    clip-path: ${v(Je)};
+    clip-path: ${v(Ye)};
     background: var(--nq-brand-gradient);
   }
 
@@ -2544,7 +2562,7 @@ const Nt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Je = "polygon(50% 
   aria-hidden="true"
 >
   <path d="M20 6 9 17l-5-5"></path>
-</svg>`, Ye = d`<svg
+</svg>`, en = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -2567,7 +2585,7 @@ const Nt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Je = "polygon(50% 
   <polygon
     points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"
   ></polygon>
-</svg>`, tn = d`<svg
+</svg>`, nn = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -2602,7 +2620,7 @@ const Nt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Je = "polygon(50% 
   <path d="M20 12h2"></path>
   <path d="m6.34 17.66-1.41 1.41"></path>
   <path d="m19.07 4.93-1.41 1.41"></path>
-</svg>`, en = d`<svg
+</svg>`, sn = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -2612,7 +2630,7 @@ const Nt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Je = "polygon(50% 
   aria-hidden="true"
 >
   <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path>
-</svg>`, nn = d`<svg
+</svg>`, rn = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -2623,7 +2641,7 @@ const Nt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Je = "polygon(50% 
 >
   <path d="M3.5 21 12 3.5 20.5 21"></path>
   <path d="M9 21l3-8 3 8"></path>
-</svg>`, sn = d`<svg
+</svg>`, on = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -2634,7 +2652,7 @@ const Nt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Je = "polygon(50% 
 >
   <circle cx="12" cy="12" r="10"></circle>
   <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"></polygon>
-</svg>`, rn = d`<svg
+</svg>`, an = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -2646,7 +2664,7 @@ const Nt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Je = "polygon(50% 
   <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path>
   <path d="M12 9v4"></path>
   <path d="M12 17h.01"></path>
-</svg>`, on = d`<svg
+</svg>`, ln = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -2657,7 +2675,7 @@ const Nt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Je = "polygon(50% 
 >
   <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path>
   <path d="m2 2 20 20"></path>
-</svg>`, an = d`<svg
+</svg>`, cn = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -2668,24 +2686,24 @@ const Nt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Je = "polygon(50% 
 >
   <path d="M13 16a3 3 0 1 1 0 6H7a5 5 0 1 1 4.9-6Z"></path>
   <path d="M10.1 9A6 6 0 0 1 16 4a4.5 4.5 0 0 0 8.9 4.2v.1a6 6 0 0 1-5.2 5.7"></path>
-</svg>`, ln = {
-  icon: sn,
+</svg>`, dn = {
+  icon: on,
   headline: "No adventurer chosen",
   body: "Open The Party and tap your crest to open your quest log."
-}, cn = {
-  icon: rn,
+}, pn = {
+  icon: an,
   headline: "NestQuest is not set up yet",
   body: "A parent needs to finish setting up NestQuest."
-}, dn = {
-  icon: on,
+}, hn = {
+  icon: ln,
   headline: "The records cannot be reached",
   body: "The party's records are quiet right now. NestQuest will return shortly."
 }, Ot = [
-  { key: "morning", name: "Morning", range: "Until 11:59 AM", icon: tn },
+  { key: "morning", name: "Morning", range: "Until 11:59 AM", icon: nn },
   { key: "afternoon", name: "Afternoon", range: "12:00–5:00 PM", icon: Ht },
-  { key: "evening", name: "Evening", range: "5:00–9:00 PM", icon: en }
+  { key: "evening", name: "Evening", range: "5:00–9:00 PM", icon: sn }
 ];
-class pn extends A {
+class un extends A {
   static properties = {
     hass: { attribute: !1 },
     _config: { state: !0 },
@@ -2695,7 +2713,7 @@ class pn extends A {
     _toast: { state: !0 },
     _countdown: { state: !0 }
   };
-  static styles = [v(jt), Xe];
+  static styles = [v(Dt), tn];
   hass;
   _config;
   _now = /* @__PURE__ */ new Date();
@@ -2737,7 +2755,7 @@ class pn extends A {
         e === this._subGeneration && (this._unsubscribeLive(), this._armSubscribeRetry());
       });
     };
-    for (const i of Ue)
+    for (const i of je)
       n(
         t.subscribeEvents(() => this.requestUpdate(), i)
       );
@@ -2790,18 +2808,18 @@ class pn extends A {
   _renderMain(t) {
     switch (t.kind) {
       case "no-adventurer":
-        return this._renderNotice(ln);
-      case "not-set-up":
-        return this._renderNotice(cn);
-      case "unreachable":
         return this._renderNotice(dn);
+      case "not-set-up":
+        return this._renderNotice(pn);
+      case "unreachable":
+        return this._renderNotice(hn);
       case "away": {
         const e = ["The quest log unlocks when they return."];
         return t.returns && e.push(`Returns ${t.returns}`), d`
           ${this._renderHeader(t)}
           <div class="notice-wrap">
             <div class="notice away" role="status">
-              ${nn}
+              ${rn}
               <span class="notice-headline">${t.name} is on travels</span>
               ${e.map((n) => d`<p class="notice-body">${n}</p>`)}
             </div>
@@ -2909,7 +2927,7 @@ class pn extends A {
       n?.attributes?.next_present,
       e
     );
-    return i ? j(i, e) : null;
+    return i ? D(i, e) : null;
   }
   _renderNotice(t) {
     return d`
@@ -2923,14 +2941,14 @@ class pn extends A {
     `;
   }
   _timeZone() {
-    return Re(this.hass);
+    return De(this.hass);
   }
   _state(t) {
     const n = this.hass?.states?.[t];
     return n && typeof n == "object" ? n : null;
   }
   _childSlug() {
-    return Qe();
+    return Ze();
   }
   _boardPath() {
     return w(this._config?.board_path).replace(/\/+$/, "");
@@ -2966,7 +2984,7 @@ class pn extends A {
     const e = this._state(`sensor.nestquest_${t}_quests_due_today`)?.attributes?.instances;
     if (!Array.isArray(e))
       return [];
-    const n = e.map(We).filter((r) => r !== null);
+    const n = e.map(Ge).filter((r) => r !== null);
     if (this._optimistic.size === 0)
       return n;
     let i = !1;
@@ -3020,7 +3038,7 @@ class pn extends A {
     };
   }
   _completeSub(t) {
-    const e = j(this._now, this._timeZone()), { claimed: n, onTime: i, late: r } = this._completeStats();
+    const e = D(this._now, this._timeZone()), { claimed: n, onTime: i, late: r } = this._completeStats();
     return n === 0 ? `${t} sealed the day on ${e}.` : r === 0 ? `${t} claimed every quest on ${e} — all on time.` : i === 0 ? `${t} claimed every quest on ${e} — all late.` : `${t} claimed every quest on ${e} — ${i} on time, ${r} late.`;
   }
   _otherChildren() {
@@ -3055,7 +3073,7 @@ class pn extends A {
           _?.attributes?.next_present,
           n
         );
-        m = x ? De(x, n) : null;
+        m = x ? He(x, n) : null;
       }
       i.push({
         slug: l,
@@ -3080,7 +3098,7 @@ class pn extends A {
         <div class="titles">
           <h1 class="title">${p}</h1>
           <p class="sub">
-            ${j(this._now, this._timeZone())} ·
+            ${D(this._now, this._timeZone())} ·
             ${n ? "On travels" : `${o} of ${r} claimed`}
           </p>
         </div>
@@ -3158,7 +3176,7 @@ class pn extends A {
   }
   _renderQuest(t, e, n) {
     if (e) {
-      const o = Mt[n % Mt.length], l = t.completed_at ? je(t.completed_at, this._timeZone()) : "";
+      const o = Mt[n % Mt.length], l = t.completed_at ? Be(t.completed_at, this._timeZone()) : "";
       return d`
         <div class="quest sealed" data-instance-id=${t.id}>
           <span class="tile" aria-hidden="true">${tt}</span>
@@ -3178,7 +3196,7 @@ class pn extends A {
         </div>
       `;
     }
-    const i = Be(t.due_time), r = t.overdue ? {
+    const i = Qe(t.due_time), r = t.overdue ? {
       text: i ? `Overdue · due ${i}` : "Overdue",
       late: !0
     } : {
@@ -3261,7 +3279,7 @@ class pn extends A {
               type="button"
               @click=${() => this._closeConfirm()}
             >
-              ${Ye}
+              ${en}
               <span>Not yet</span>
             </button>
             <button
@@ -3411,15 +3429,15 @@ class pn extends A {
     if (!t)
       return d`
         <div class="dock">
-          <span class="date">${j(this._now, this._timeZone())}</span>
+          <span class="date">${D(this._now, this._timeZone())}</span>
           <span class="divider"></span>
-          <span class="clock">${He(this._now, this._timeZone())}</span>
+          <span class="clock">${Fe(this._now, this._timeZone())}</span>
         </div>
       `;
-    const e = Ve(t.condition), n = Ke(t.condition, e), i = t.temperature === null ? g : d`<span class="temp">${Math.round(t.temperature)}°</span>`, r = t.high === null || t.low === null ? null : `${Math.round(t.high)}° / ${Math.round(t.low)}°`;
+    const e = Je(t.condition), n = Xe(t.condition, e), i = t.temperature === null ? g : d`<span class="temp">${Math.round(t.temperature)}°</span>`, r = t.high === null || t.low === null ? null : `${Math.round(t.high)}° / ${Math.round(t.low)}°`;
     return d`
       <div class="dock">
-        ${an}
+        ${cn}
         ${i}
         <span class="divider"></span>
         <span class="condition">
@@ -3441,19 +3459,19 @@ class pn extends A {
     this._logView().kind !== "complete-day" && this._armIdle(), this._confirm !== null && this._armConfirmTimer();
   };
 }
-customElements.define("nestquest-quest-log-card", pn);
+customElements.define("nestquest-quest-log-card", un);
 at({
   type: "nestquest-quest-log-card",
   name: "NestQuest Quest Log",
   description: "One child's daily quests, grouped by window."
 });
-const hn = ":host{--nq-brand-blue: #3B3AB8;--nq-brand-purple: #A035CC;--nq-brand-gradient: linear-gradient(135deg, var(--nq-brand-blue), var(--nq-brand-purple));--nq-brand-gradient-h: linear-gradient(90deg, var(--nq-brand-blue), var(--nq-brand-purple));--nq-a-page: #F4F4F6;--nq-a-surface: #FFFFFF;--nq-a-surface-subtle: #FAFAFA;--nq-a-selected: #EBEBF8;--nq-a-border: #E4E4EA;--nq-a-divider: #EDEDF1;--nq-a-ink: #18181D;--nq-a-ink-secondary: #52525E;--nq-a-ink-tertiary: #70707E;--nq-a-success: #15803D;--nq-a-danger: #DC2626;--nq-a-danger-strong: #B91C1C;--nq-a-danger-bg: #FEE2E2;--nq-a-warning-ink: #92400E;--nq-a-warning-ink-2: #78350F;--nq-a-warning-bg: #FEF3C7;--nq-a-warning-border: rgba(217,119,6,.35);--nq-a-info-bg: #DBEAFE;--nq-a-info-ink: #1E3A8A;--nq-a-info-icon: #1D4ED8;--nq-a-reversal: #7D28A0;--nq-a-font: Nunito, system-ui, sans-serif;--nq-a-size-screen: 24px;--nq-a-size-hero: 32px;--nq-a-size-card-title: 19px;--nq-a-size-stat: 22px;--nq-a-size-row: 13.5px;--nq-a-size-meta: 11px;--nq-a-size-label: 10px;--nq-a-track-label: .1em;--nq-a-density-page-pad: 14px 16px 92px;--nq-a-density-gap: 10px;--nq-a-density-card-pad: 13px;--nq-a-density-row-pad: 11px 13px;--nq-a-density-radius: 8px;--nq-a-density-shadow: none;--nq-a-tabbar-height: 70px;--nq-a-tap-min: 44px;--nq-a-radius-pill: 9999px;--nq-a-radius-sheet: 20px 20px 0 0;--nq-a-sheet-shadow: 0 -8px 28px rgba(9,9,11,.18);--nq-a-progress-height: 6px;--nq-ease-out: cubic-bezier(0, 0, .2, 1);--nq-dur-micro: .12s;--nq-dur-base: .2s;--nq-dur-modal: .35s}";
-class un extends A {
+const fn = ":host{--nq-brand-blue: #3B3AB8;--nq-brand-purple: #A035CC;--nq-brand-gradient: linear-gradient(135deg, var(--nq-brand-blue), var(--nq-brand-purple));--nq-brand-gradient-h: linear-gradient(90deg, var(--nq-brand-blue), var(--nq-brand-purple));--nq-a-page: #F4F4F6;--nq-a-surface: #FFFFFF;--nq-a-surface-subtle: #FAFAFA;--nq-a-selected: #EBEBF8;--nq-a-border: #E4E4EA;--nq-a-divider: #EDEDF1;--nq-a-ink: #18181D;--nq-a-ink-secondary: #52525E;--nq-a-ink-tertiary: #70707E;--nq-a-success: #15803D;--nq-a-danger: #DC2626;--nq-a-danger-strong: #B91C1C;--nq-a-danger-bg: #FEE2E2;--nq-a-warning-ink: #92400E;--nq-a-warning-ink-2: #78350F;--nq-a-warning-bg: #FEF3C7;--nq-a-warning-border: rgba(217,119,6,.35);--nq-a-info-bg: #DBEAFE;--nq-a-info-ink: #1E3A8A;--nq-a-info-icon: #1D4ED8;--nq-a-reversal: #7D28A0;--nq-a-font: Nunito, system-ui, sans-serif;--nq-a-size-screen: 24px;--nq-a-size-hero: 32px;--nq-a-size-card-title: 19px;--nq-a-size-stat: 22px;--nq-a-size-row: 13.5px;--nq-a-size-meta: 11px;--nq-a-size-label: 10px;--nq-a-track-label: .1em;--nq-a-density-page-pad: 14px 16px 92px;--nq-a-density-gap: 10px;--nq-a-density-card-pad: 13px;--nq-a-density-row-pad: 11px 13px;--nq-a-density-radius: 8px;--nq-a-density-shadow: none;--nq-a-tabbar-height: 70px;--nq-a-tap-min: 44px;--nq-a-radius-pill: 9999px;--nq-a-radius-sheet: 20px 20px 0 0;--nq-a-sheet-shadow: 0 -8px 28px rgba(9,9,11,.18);--nq-a-progress-height: 6px;--nq-ease-out: cubic-bezier(0, 0, .2, 1);--nq-dur-micro: .12s;--nq-dur-base: .2s;--nq-dur-modal: .35s}";
+class mn extends A {
   static properties = {
     hass: { attribute: !1 },
     _config: { state: !0 }
   };
-  static styles = [v(hn)];
+  static styles = [v(fn)];
   hass;
   _config;
   setConfig(t) {
@@ -3468,14 +3486,68 @@ class un extends A {
     return d`<div>NestQuest Admin</div>`;
   }
 }
-customElements.define("nestquest-admin-card", un);
+customElements.define("nestquest-admin-card", mn);
 at({
   type: "nestquest-admin-card",
   name: "NestQuest Admin",
   description: "Parent phone view for today, tasks, schedule, and history."
 });
-const fn = "/nestquest-static/nestquest-fonts.css";
+function Bt(s) {
+  return typeof s == "string" ? s.trim() : "";
+}
+function gn(s) {
+  if (s === null || typeof s != "object" || Array.isArray(s))
+    return "";
+  const t = s.slug;
+  return typeof t == "string" ? t.trim() : "";
+}
+function _n(s) {
+  const t = Bt(s.url_path).replace(/^\/+|\/+$/g, "");
+  return t || (window.location.pathname.split("/").filter(Boolean)[0] ?? "");
+}
+function yn(s) {
+  if (s === null || typeof s != "object" || Array.isArray(s))
+    return "";
+  const t = s.name;
+  return typeof t == "string" ? t.trim() : "";
+}
+function bn(s) {
+  const n = s?.states?.["sensor.nestquest_household_quests_due_today"]?.attributes?.child_roster;
+  return Array.isArray(n) ? n.map((i) => ({ slug: gn(i), name: yn(i) })).filter((i) => i.slug.length > 0) : [];
+}
+class vn {
+  static async generate(t, e) {
+    const n = `/${_n(t)}`, i = Bt(t.weather_entity), r = {
+      type: "custom:nestquest-party-board-card",
+      quest_log_path: n
+    };
+    i && (r.weather_entity = i);
+    const o = {
+      type: "custom:nestquest-quest-log-card",
+      board_path: n
+    };
+    return i && (o.weather_entity = i), {
+      views: [
+        {
+          path: "party",
+          title: "The Party",
+          type: "panel",
+          cards: [r]
+        },
+        ...bn(e).map((l) => ({
+          path: l.slug,
+          title: l.name ? `${l.name}'s Quest Log` : `${l.slug}'s Quest Log`,
+          type: "panel",
+          cards: [{ ...o }]
+        }))
+      ]
+    };
+  }
+}
+window.customStrategies = window.customStrategies ?? {};
+window.customStrategies["nestquest-party"] = vn;
+const xn = "/nestquest-static/nestquest-fonts.css";
 if (!document.querySelector('link[data-nq-fonts=""]')) {
   const s = document.createElement("link");
-  s.rel = "stylesheet", s.href = fn, s.dataset.nqFonts = "", document.head.appendChild(s);
+  s.rel = "stylesheet", s.href = xn, s.dataset.nqFonts = "", document.head.appendChild(s);
 }
