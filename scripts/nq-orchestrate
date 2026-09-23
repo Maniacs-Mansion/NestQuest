@@ -18,7 +18,7 @@ for required in "$renderer" "$profile"; do
   [[ -e "$required" ]] || { echo "missing required path: $required" >&2; exit 66; }
 done
 
-prompt=$("$renderer" "$profile" --runtime terminal)
+prompt=$("$renderer" "$profile")
 if [[ ${1:-} == "--print-prompt" ]]; then
   printf '%s\n' "$prompt"
   exit 0
@@ -41,7 +41,7 @@ fi
 # Foreground mode owns orchestration. A dormant service must never race it.
 "$systemctl_bin" --user stop nestquest-controller.service
 
-session_status=$("$control_home/scripts/nq-controller" --check-interactive)
+session_status=$("$control_home/scripts/nq-controller" --check-interactive --project "$project")
 if [[ "$session_status" == "interactive NestQuest session open" ]]; then
   echo "Another interactive NestQuest OpenCode session is open." >&2
   echo "Close it, then run nq-orchestrate again." >&2

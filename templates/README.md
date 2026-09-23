@@ -7,7 +7,6 @@ example. Render a concrete prompt with:
 
 ```bash
 scripts/render-cycle-prompt templates/nestquest.profile.json --output /tmp/opencode/nestquest-prompt.md
-scripts/render-cycle-prompt templates/nestquest.profile.json --runtime terminal --output /tmp/opencode/nestquest-terminal-prompt.md
 ```
 
 For another project, copy the profile and set its project name, tracker,
@@ -17,17 +16,17 @@ section, especially task/feature semantics, release rules, permissions,
 review gates, and the host runtime section. The template assumes an OpenCode
 controller, a feature/task tracker, a versioned context store, a code host,
 and a separate reviewer and approver. Adapt those sections when the project's
-systems differ. The default `service` runtime reproduces the CTXD prompt.
-The `terminal` runtime replaces Section 27 with a single-session foreground
-loop suitable for `opencode --agent ... --prompt ...`.
+systems differ. Section 27 is a single-session foreground loop suitable for
+`opencode --agent ... --prompt ...`; the reusable prompt has no service
+runtime.
 
 For NestQuest, `nq-orchestrate --print-prompt` emits the fully rendered
 foreground prompt without starting OpenCode. `nq-orchestrate [mission.md]`
 renders that same prompt, appends the optional mission, and supplies it to the
 foreground orchestrator agent.
 
-Publish the reviewed **service-rendered** prompt into that project's context
-store with its version check when CTXD should retain both runtime choices.
+Publish the reviewed rendered prompt into that project's context store with
+its version check.
 Give the project its own agent definitions, broker, profile, and terminal
 launcher. The template itself does not start an orchestrator or register
 another project.

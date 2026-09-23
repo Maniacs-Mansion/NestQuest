@@ -40,7 +40,11 @@ that copy, run `scripts/nq-controller --check`, and verify the OpenCode
 agents (terminal-orchestrator, developer, and approver)
 with `opencode debug agent <name>` while `OPENCODE_CONFIG_DIR` points at the
 installed `.opencode` directory. Install `scripts/nq-orchestrate` in
-`~/.local/bin/`. The old `nestquest-controller.service` remains static and
+`~/.local/bin/`. For the global slash command, also install
+`.opencode/agents/terminal-orchestrator.md` under
+`~/.config/opencode/agents/` and
+`deploy/opencode-global-commands/start-nestquest-development.md` under
+`~/.config/opencode/commands/`. The old `nestquest-controller.service` remains static and
 inactive only for migration safety; foreground launch stops it.
 
 Inside an already-open OpenCode TUI, `/start-development` (or the global

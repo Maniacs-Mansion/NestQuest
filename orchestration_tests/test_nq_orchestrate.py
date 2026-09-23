@@ -24,7 +24,13 @@ class ForegroundLauncherTests(unittest.TestCase):
             renderer = scripts / "render-cycle-prompt"
             renderer.write_text("#!/bin/sh\nprintf 'BASE TERMINAL PROMPT'")
             controller = scripts / "nq-controller"
-            controller.write_text("#!/bin/sh\nprintf 'no interactive NestQuest session\\n'")
+            controller_args = root / "controller-args"
+            open_marker = root / "open-session"
+            controller.write_text(
+                f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {controller_args}\n"
+                f"if test -f {open_marker}; then printf 'interactive NestQuest session open\\n'; "
+                "else printf 'no interactive NestQuest session\\n'; fi\n"
+            )
             opencode = root / "opencode"
             output = root / "args"
             opencode.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {output}\n")
@@ -57,6 +63,16 @@ class ForegroundLauncherTests(unittest.TestCase):
             self.assertIn("Complete feature EQ-17.", args)
             self.assertEqual(stopped.read_text().splitlines(),
                              ["--user", "stop", "nestquest-controller.service"])
+            self.assertEqual(controller_args.read_text().splitlines(),
+                             ["--check-interactive", "--project", str(project)])
+
+            output.unlink()
+            open_marker.touch()
+            refused = subprocess.run([str(SCRIPT)], env=env, text=True,
+                                     capture_output=True)
+            self.assertEqual(refused.returncode, 75)
+            self.assertIn("Another interactive NestQuest", refused.stderr)
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":

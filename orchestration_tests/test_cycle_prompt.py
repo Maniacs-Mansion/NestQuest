@@ -6,7 +6,6 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 RENDER = runpy.run_path(str(ROOT / "scripts/render-cycle-prompt"))["render"]
-SELECT_RUNTIME = runpy.run_path(str(ROOT / "scripts/render-cycle-prompt"))["select_runtime"]
 TEMPLATE = (ROOT / "templates/ORCHESTRATOR-PROMPT.template.md").read_text()
 PROFILE = json.loads((ROOT / "templates/nestquest.profile.json").read_text())
 
@@ -23,9 +22,8 @@ class CyclePromptTests(unittest.TestCase):
             "RELEASE_BRANCH": "production",
             "CONTROL_HOME": "/opt/examplequest/controller",
             "SERVICE_NAME": "examplequest-controller.service",
-            "START_COMMAND": "/start-examplequest-development",
-            "STOP_COMMAND": "/stop-examplequest-development",
-            "STATUS_COMMAND": "/examplequest-development-status",
+            "PROJECT_ROOT": "/srv/examplequest",
+            "TERMINAL_LAUNCHER": "eq-orchestrate",
             "FEATURE_BRANCH_EXAMPLE": "feature/EQ-17",
         })
         output = RENDER(TEMPLATE, other)
@@ -45,9 +43,8 @@ class CyclePromptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "PROJECT_NAME"):
             RENDER(TEMPLATE, other)
 
-    def test_terminal_runtime_replaces_service_controller(self):
-        selected = SELECT_RUNTIME(TEMPLATE, "terminal")
-        output = RENDER(selected, PROFILE)
+    def test_template_contains_only_terminal_runtime(self):
+        output = RENDER(TEMPLATE, PROFILE)
         self.assertIn("# 27. FOREGROUND TERMINAL RUNTIME", output)
         self.assertIn("nq-orchestrate", output)
         self.assertNotIn("# 27. HOST CONTROLLER RUNTIME", output)
