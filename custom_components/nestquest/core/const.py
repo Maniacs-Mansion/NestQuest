@@ -109,10 +109,17 @@ DEFAULT_AUTOMATION_ENABLED = True
 # (``NESTQUEST_PANEL_TOKEN`` on the API side).  Both are stored on the
 # entry like every other setting — options first, then the entry-data
 # copy, then defaults.  The TOKEN IS A SECRET: it is never logged, never
-# echoed into error messages, and never committed.  No invented default
-# token ships (an empty stored token means "not configured yet", and the
-# panel plane answers 401 until a real one is saved) — mirroring the API
-# service's fail-closed stance (api/config.py: no default token exists).
+# echoed into error messages, and never committed.  The shipped default
+# token IS the empty string (DEFAULT_PANEL_TOKEN) — an entry with no
+# configured token is therefore NOT a working client: the options flow
+# validates that a saved token is non-empty (the user-facing guard), and
+# NestQuestApiClient fails fast at construction on an empty/whitespace
+# token (api_client.py).  So a caller building the client from a bare
+# entry must either ensure a token is configured first or handle the
+# construction ValueError and surface an "API not configured" state —
+# an unconfigured entry never yields a client that can only 401.
+# This mirrors the API service's fail-closed stance (api/config.py: no
+# default token exists).
 CONF_API_BASE_URL = "api_base_url"
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
 CONF_PANEL_TOKEN = "panel_token"

@@ -399,6 +399,34 @@ def test_client_from_entry_reads_config_and_shared_session(monkeypatch) -> None:
     assert client._panel_token == "entry-token"
 
 
+def test_client_from_entry_unconfigured_token_raises_at_construction(
+    monkeypatch,
+) -> None:
+    """An entry with NO configured token (the shipped default) raises
+    ValueError AT CONSTRUCTION — the client's fail-fast guard — rather
+    than silently building a client that can only 401 (the documented
+    contract: the options flow's non-empty validation is the user-facing
+    guard; the coordinator must ensure a token is configured first or
+    handle the construction error as "API not configured")."""
+    fake_module = types.ModuleType("homeassistant.helpers.aiohttp_client")
+    fake_module.async_get_clientsession = lambda hass: object()
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.helpers.aiohttp_client", fake_module
+    )
+    entry = make_config_entry(
+        options={CONF_API_BASE_URL: DEFAULT_API_BASE_URL},
+    )
+    assert resolve_api_config(entry)[1] == DEFAULT_PANEL_TOKEN == ""
+
+    with pytest.raises(ValueError, match="panel_token must be a non-empty"):
+        api_client.client_from_entry(object(), entry)
+
+    # Same for a whitespace-only stored token: whitespace is not a token.
+    entry_ws = make_config_entry(options={CONF_PANEL_TOKEN: "   "})
+    with pytest.raises(ValueError, match="panel_token must be a non-empty"):
+        api_client.client_from_entry(object(), entry_ws)
+
+
 async def test_client_logs_nothing() -> None:
     """The client emits no log records at all (the token must never
     reach a log line), success or failure."""
