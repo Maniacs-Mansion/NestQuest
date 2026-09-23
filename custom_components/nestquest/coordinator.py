@@ -43,11 +43,24 @@ conversion matters at setup: HA's real
 ``async_config_entry_first_refresh`` wraps any failed pass in
 ``ConfigEntryNotReady``, so a setup that keys on the original
 exception type would never match it.)
+
+Last-good cache and staleness: every successful pass refreshes a cache
+of the rebuilt snapshot stamped with the :func:`time.monotonic`
+instant of the success.  A typed failure is checked against that stamp
+BEFORE the pass is declared failed: within the configured staleness
+threshold (``CONF_SNAPSHOT_STALENESS``, seconds, default three update
+intervals) the pass SUCCEEDS with the cached snapshot — the panel
+keeps rendering last-good data and the entities stay available — and
+the outage is logged as a warning.  Entities go unavailable only once
+the cache is older than the threshold (or before the first success);
+a later successful fetch refreshes the cache and the entities recover
+on their own, without a config-entry reload.
 """
 from __future__ import annotations
 
 import asyncio
 import datetime
+import time
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -59,6 +72,7 @@ from homeassistant.helpers.update_coordinator import (
 from .api_client import NestQuestApiClient, NestQuestApiError, resolve_api_config
 from .const import (
     CONF_UPDATE_INTERVAL,
+    DEFAULT_SNAPSHOT_STALENESS,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     LOGGER,
@@ -176,6 +190,17 @@ class _UnconfiguredApiClient:
         )
 
 
+def _monotonic() -> float:
+    """The monotonic clock the staleness math reads.
+
+    A one-line indirection over :func:`time.monotonic` so the staleness
+    tests can drive the clock deterministically (patch THIS function,
+    never the stdlib clock).  Monotonic is deliberate: wall-clock jumps
+    (NTP corrections, suspends) must not shorten or extend the window.
+    """
+    return time.monotonic()
+
+
 class NestQuestCoordinator(DataUpdateCoordinator):
     """Shared refresh cycle for every NestQuest entity.
 
@@ -199,6 +224,15 @@ class NestQuestCoordinator(DataUpdateCoordinator):
     newer one and leave entities wrong until the next poll.  Real
     HA's coordinator already serializes internally; the lock keeps
     the same guarantee on the stand-in and costs nothing upstream.
+
+    Last-good cache: a successful pass stamps the rebuilt snapshot
+    with the :func:`~.coordinator._monotonic` instant of the success;
+    a typed failure within the configured staleness threshold
+    (``staleness_seconds``, from ``CONF_SNAPSHOT_STALENESS``) serves
+    that cached snapshot instead of failing the pass, so a short API
+    outage keeps the board up.  Past the threshold — or before the
+    first success — the pass fails as above, and a later successful
+    pass refreshes the cache and recovers the entities on its own.
     """
 
     def __init__(
@@ -208,6 +242,7 @@ class NestQuestCoordinator(DataUpdateCoordinator):
         entry_id: str,
         api_client: NestQuestApiClient,
         update_interval_seconds: int | None = None,
+        staleness_seconds: int | None = None,
     ) -> None:
         interval = update_interval_seconds
         if (
@@ -216,6 +251,19 @@ class NestQuestCoordinator(DataUpdateCoordinator):
             or interval < MIN_UPDATE_INTERVAL
         ):
             interval = DEFAULT_UPDATE_INTERVAL
+        staleness = staleness_seconds
+        if (
+            not isinstance(staleness, int)
+            or isinstance(staleness, bool)
+            or staleness < interval
+        ):
+            # A missing or nonsensical threshold falls back to the
+            # shipped default; a configured-but-too-short one (below
+            # even one poll interval) falls back to whichever of
+            # default/interval spans at least one failed poll, so the
+            # cache is never dead on arrival.  (The options flow
+            # validates the same rule at the form.)
+            staleness = max(DEFAULT_SNAPSHOT_STALENESS, interval)
         super().__init__(
             hass,
             LOGGER,
@@ -225,6 +273,14 @@ class NestQuestCoordinator(DataUpdateCoordinator):
         self.entry_id = entry_id
         self.api_client = api_client
         self._refresh_lock = asyncio.Lock()
+        #: The configured last-good window, in SECONDS (const.py:
+        #: CONF_SNAPSHOT_STALENESS / DEFAULT_SNAPSHOT_STALENESS).
+        self._staleness_seconds = staleness
+        #: The last-good cache: the snapshot from the most recent
+        #: SUCCESSFUL fetch and the :func:`time.monotonic` instant it
+        #: landed.  Both stay None until the first success.
+        self._last_good_snapshot: NestQuestSnapshot | None = None
+        self._last_good_monotonic: float | None = None
 
     async def async_refresh(self) -> None:
         """One refresh at a time; a queued refresh runs AFTER the
@@ -236,8 +292,19 @@ class NestQuestCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> NestQuestSnapshot:
         """One refresh pass: fetch the panel snapshot and rebuild it.
 
+        A successful pass rebuilds the snapshot and refreshes the
+        last-good cache (the snapshot plus the
+        :func:`time.monotonic` instant of the success).
+
         A typed API failure (unconfigured token stub, transport
-        failure, non-2xx response) is converted to
+        failure, non-2xx response) is first checked against that
+        stamp: WITHIN the configured staleness threshold (elapsed time
+        since the last successful fetch, inclusive of the threshold
+        itself) the pass SUCCEEDS with the cached snapshot — the panel
+        keeps rendering last-good data, the entities stay available —
+        and the outage is logged as a clear warning (never silent).
+        With no cache yet, or past the threshold, the typed error is
+        converted to
         :class:`~homeassistant.helpers.update_coordinator.UpdateFailed`
         — the exception HA's coordinator machinery records as a failed
         pass (``last_update_success = False``, ``data`` unchanged) so
@@ -248,11 +315,31 @@ class NestQuestCoordinator(DataUpdateCoordinator):
         try:
             payload = await self.api_client.get_snapshot()
         except NestQuestApiError as err:
+            now = _monotonic()
+            cached = self._last_good_snapshot
+            fetched_at = self._last_good_monotonic
+            if (
+                cached is not None
+                and fetched_at is not None
+                and now - fetched_at <= self._staleness_seconds
+            ):
+                LOGGER.warning(
+                    "NestQuest API refresh failed (%s); serving the "
+                    "last-good snapshot fetched %.0f s ago, within the "
+                    "%d s staleness threshold",
+                    err,
+                    now - fetched_at,
+                    self._staleness_seconds,
+                )
+                return cached
             LOGGER.error(
                 "NestQuest coordinator refresh failed: %s", err
             )
             raise UpdateFailed(str(err)) from err
-        return snapshot_from_api_payload(payload)
+        snapshot = snapshot_from_api_payload(payload)
+        self._last_good_snapshot = snapshot
+        self._last_good_monotonic = _monotonic()
+        return snapshot
 
 
 def coordinator_client_from_entry(

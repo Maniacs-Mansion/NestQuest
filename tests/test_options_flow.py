@@ -28,6 +28,7 @@ from custom_components.nestquest.const import (
     CONF_NOTIFY_TARGET,
     CONF_PANEL_IDLE_TIMEOUT,
     CONF_PANEL_TOKEN,
+    CONF_SNAPSHOT_STALENESS,
     CONF_UPDATE_INTERVAL,
     DEFAULT_API_BASE_URL,
     DEFAULT_AFTERNOON_REMINDER_TIME,
@@ -35,6 +36,7 @@ from custom_components.nestquest.const import (
     DEFAULT_END_OF_DAY_REPORT_TIME,
     DEFAULT_MORNING_SUMMARY_TIME,
     DEFAULT_PANEL_TOKEN,
+    DEFAULT_SNAPSHOT_STALENESS,
     DEFAULT_UPDATE_INTERVAL,
     DEFAULT_DAY_ROLLOVER_TIME,
     DEFAULT_HORIZON_DAYS,
@@ -59,6 +61,7 @@ VALID_INPUT = {
 FULL_INPUT = {
     **VALID_INPUT,
     CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
+    CONF_SNAPSHOT_STALENESS: DEFAULT_SNAPSHOT_STALENESS,
     CONF_NOTIFY_TARGET: "",
     CONF_MORNING_SUMMARY_TIME: DEFAULT_MORNING_SUMMARY_TIME,
     CONF_AFTERNOON_REMINDER_TIME: DEFAULT_AFTERNOON_REMINDER_TIME,
@@ -246,6 +249,7 @@ def test_options_flow_schema_applies_stored_defaults() -> None:
             CONF_DAY_ROLLOVER_TIME: "05:45",
             CONF_PANEL_IDLE_TIMEOUT: 120,
             CONF_UPDATE_INTERVAL: 90,
+            CONF_SNAPSHOT_STALENESS: 450,
             CONF_NOTIFY_TARGET: "notify.mobile_app_test",
             CONF_MORNING_SUMMARY_TIME: "07:00",
             CONF_AFTERNOON_REMINDER_TIME: "14:00",
@@ -258,6 +262,7 @@ def test_options_flow_schema_applies_stored_defaults() -> None:
         CONF_DAY_ROLLOVER_TIME: "05:45",
         CONF_PANEL_IDLE_TIMEOUT: 120,
         CONF_UPDATE_INTERVAL: 90,
+        CONF_SNAPSHOT_STALENESS: 450,
         CONF_NOTIFY_TARGET: "notify.mobile_app_test",
         CONF_MORNING_SUMMARY_TIME: "07:00",
         CONF_AFTERNOON_REMINDER_TIME: "14:00",
@@ -900,4 +905,113 @@ def test_options_flow_strings_cover_api_section(
     for key in (CONF_API_BASE_URL, CONF_PANEL_TOKEN):
         assert data.get(key), f"Missing field name for '{key}'"
     assert strings["options"]["errors"]["invalid_url"]
+    assert translations_en["options"] == strings["options"]
+
+
+# ---------------------------------------------------------------------------
+# Last-good snapshot staleness section (Feature 18)
+# ---------------------------------------------------------------------------
+
+
+def test_options_flow_staleness_below_update_interval_refused() -> None:
+    """A staleness threshold shorter than the submit's update interval
+    is refused with the dedicated error: such a threshold could never
+    serve even one cached snapshot."""
+    flow = _make_flow(_make_entry())
+    result = _run(
+        flow.async_step_init(
+            {
+                **VALID_INPUT,
+                CONF_UPDATE_INTERVAL: 300,
+                CONF_SNAPSHOT_STALENESS: 60,
+            }
+        )
+    )
+    assert result["type"] == "form"
+    assert result["errors"] == {CONF_SNAPSHOT_STALENESS: "invalid_staleness"}
+
+
+def test_options_flow_staleness_below_stored_interval_refused() -> None:
+    """A raw submit setting the staleness but omitting the update
+    interval is checked against the STORED interval, not the default."""
+    entry = _make_entry(options={CONF_UPDATE_INTERVAL: 300})
+    flow = _make_flow(entry)
+    result = _run(
+        flow.async_step_init({**VALID_INPUT, CONF_SNAPSHOT_STALENESS: 60})
+    )
+    assert result["type"] == "form"
+    assert result["errors"] == {CONF_SNAPSHOT_STALENESS: "invalid_staleness"}
+
+
+def test_options_flow_staleness_must_be_positive_int() -> None:
+    """Non-int, boolean, and non-positive staleness values reject with
+    the plain invalid error."""
+    flow = _make_flow(_make_entry())
+    for bad_staleness in ("900", True, 0, -10):
+        result = _run(
+            flow.async_step_init(
+                {**VALID_INPUT, CONF_SNAPSHOT_STALENESS: bad_staleness}
+            )
+        )
+        assert result["type"] == "form"
+        assert result["errors"] == {CONF_SNAPSHOT_STALENESS: "invalid"}
+
+
+def test_options_flow_staleness_equal_to_interval_saves() -> None:
+    """A threshold exactly as long as the update interval is valid (the
+    boundary is inclusive)."""
+    flow = _make_flow(_make_entry())
+    result = _run(
+        flow.async_step_init(
+            {
+                **VALID_INPUT,
+                CONF_UPDATE_INTERVAL: 300,
+                CONF_SNAPSHOT_STALENESS: 300,
+            }
+        )
+    )
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_SNAPSHOT_STALENESS] == 300
+
+
+def test_options_flow_staleness_defaults_saved() -> None:
+    """A bare submit saves the staleness default (three update
+    intervals) alongside the other timing defaults."""
+    flow = _make_flow(_make_entry())
+    result = _run(flow.async_step_init(dict(VALID_INPUT)))
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_SNAPSHOT_STALENESS] == DEFAULT_SNAPSHOT_STALENESS
+
+
+def test_options_flow_staleness_stored_values_round_trip() -> None:
+    """A stored staleness is the form's default and a raw legacy submit
+    without it keeps the stored value."""
+    entry = _make_entry(
+        options={
+            **VALID_INPUT,
+            CONF_UPDATE_INTERVAL: 300,
+            CONF_SNAPSHOT_STALENESS: 1200,
+        }
+    )
+    flow = _make_flow(entry)
+    form = _run(flow.async_step_init(None))
+    schema_defaults = form["data_schema"]({})
+    assert schema_defaults[CONF_SNAPSHOT_STALENESS] == 1200
+
+    # A raw submit carrying only the legacy keys keeps the stored
+    # staleness (and never trips the interval cross-check).
+    result = _run(flow.async_step_init(dict(VALID_INPUT)))
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_SNAPSHOT_STALENESS] == 1200
+
+
+def test_options_flow_strings_cover_staleness_section(
+    strings: dict, translations_en: dict
+) -> None:
+    """Both string files name the staleness field and its error."""
+    data = strings["options"]["step"]["init"]["data"]
+    assert data.get(CONF_SNAPSHOT_STALENESS), (
+        f"Missing field name for '{CONF_SNAPSHOT_STALENESS}'"
+    )
+    assert strings["options"]["errors"]["invalid_staleness"]
     assert translations_en["options"] == strings["options"]

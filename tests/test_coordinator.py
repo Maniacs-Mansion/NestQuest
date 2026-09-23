@@ -12,6 +12,7 @@ cycle day, and the unconfigured / failed-fetch behaviour.
 from __future__ import annotations
 
 import datetime
+import logging
 
 import pytest
 
@@ -23,7 +24,9 @@ from custom_components.nestquest.api_client import (
     NestQuestApiError,
 )
 from custom_components.nestquest.const import (
+    CONF_SNAPSHOT_STALENESS,
     CONF_UPDATE_INTERVAL,
+    DEFAULT_SNAPSHOT_STALENESS,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
 )
@@ -65,6 +68,23 @@ class StubSnapshotClient:
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
+
+
+class FakeMonotonic:
+    """A deterministic stand-in for the staleness clock.
+
+    The coordinator reads elapsed time through
+    :func:`custom_components.nestquest.coordinator._monotonic`; tests
+    patch that seam with an instance of this class and advance ``now``
+    by whole seconds, so the staleness window is exercised without any
+    real waiting.
+    """
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
 
 
 #: A fixture panel snapshot (the documented Feature 16 route shape):
@@ -340,13 +360,20 @@ async def test_coordinator_entities_read_the_api_snapshot(hass, make_entry) -> N
     await async_unload_entry(hass, entry)
 
 
-async def test_coordinator_failed_fetch_marks_unavailable(hass, make_entry) -> None:
-    """A failed fetch (transport failure or non-2xx — both typed) is a
-    FAILED refresh pass: the update pass converts the typed error to
-    UpdateFailed (the exception HA's coordinator machinery records as a
-    failed pass, chaining the typed error as ``__cause__``), the refresh
-    records the failure instead of raising, and data keeps its last
-    good value."""
+async def test_coordinator_failed_fetch_marks_unavailable(
+    hass, make_entry, monkeypatch
+) -> None:
+    """A failed fetch (transport failure or non-2xx — both typed) PAST
+    the staleness threshold is a FAILED refresh pass: the update pass
+    converts the typed error to UpdateFailed (the exception HA's
+    coordinator machinery records as a failed pass, chaining the typed
+    error as ``__cause__``), the refresh records the failure instead of
+    raising, and data keeps its last good value.  (Within the threshold
+    the last-good cache serves instead — the staleness tests below.)"""
+    import custom_components.nestquest.coordinator as coordinator_module
+
+    clock = FakeMonotonic()
+    monkeypatch.setattr(coordinator_module, "_monotonic", clock)
     error = NestQuestApiError(
         "NestQuest API GET /api/v1/panel/snapshot failed with HTTP 503",
         status=503,
@@ -359,8 +386,11 @@ async def test_coordinator_failed_fetch_marks_unavailable(hass, make_entry) -> N
     assert coordinator.data is not None
     assert coordinator.last_update_success is True
 
-    # The next pass hits the scripted failure: the update pass converts
-    # the typed error to UpdateFailed, with the typed error chained.
+    # The next pass hits the scripted failure AFTER the cache went
+    # stale — one second past the shipped 900 s default threshold: the
+    # update pass converts the typed error to UpdateFailed, with the
+    # typed error chained.
+    clock.now += DEFAULT_SNAPSHOT_STALENESS + 1
     with pytest.raises(UpdateFailed, match="HTTP 503") as excinfo:
         await coordinator._async_update_data()
     assert isinstance(excinfo.value.__cause__, NestQuestApiError)
@@ -374,6 +404,163 @@ async def test_coordinator_failed_fetch_marks_unavailable(hass, make_entry) -> N
     assert coordinator.data.children[0].child_name == "Ada"
     assert isinstance(coordinator.last_exception, UpdateFailed)
     assert isinstance(coordinator.last_exception.__cause__, NestQuestApiError)
+
+
+async def test_coordinator_serves_cached_snapshot_within_staleness(
+    hass, make_entry, monkeypatch, caplog
+) -> None:
+    """API down WITHIN the staleness threshold: the failed fetch serves
+    the last-good cache — the pass succeeds with the SAME snapshot, so
+    ``last_update_success`` stays True (entities remain available) and
+    the outage is logged as a clear warning, never silently."""
+    import custom_components.nestquest.coordinator as coordinator_module
+
+    clock = FakeMonotonic()
+    monkeypatch.setattr(coordinator_module, "_monotonic", clock)
+    error = NestQuestApiError(
+        "NestQuest API GET /api/v1/panel/snapshot failed with HTTP 503",
+        status=503,
+    )
+    # Setup's first refresh consumes the good snapshot; the two test
+    # passes hit the scripted failure.
+    client = StubSnapshotClient(FIXTURE_SNAPSHOT, error, error)
+    _entry, coordinator = await _wire_entry(
+        hass,
+        make_entry,
+        client,
+        options={CONF_UPDATE_INTERVAL: 300, CONF_SNAPSHOT_STALENESS: 900},
+    )
+    # The successful first pass cached the snapshot (stamped at the
+    # fake clock's start).
+    first = coordinator.data
+    assert first is not None
+    assert coordinator.last_update_success is True
+
+    # The API goes down 900 s after that success — exactly the
+    # threshold, still WITHIN the inclusive window: the pass serves the
+    # cached snapshot instead of failing.
+    clock.now += 900
+    with caplog.at_level(
+        logging.WARNING, logger="custom_components.nestquest"
+    ):
+        await coordinator.async_refresh()
+    assert coordinator.last_update_success is True
+    assert coordinator.data is first
+    assert coordinator.data.children[0].child_name == "Ada"
+    # The fetch WAS attempted (and failed) — the cache is a fallback,
+    # not a replacement for polling.
+    assert client.calls == 2
+    assert any(
+        "last-good" in record.getMessage() for record in caplog.records
+    )
+
+
+async def test_coordinator_recovers_without_reload_after_outage(
+    hass, make_entry, monkeypatch
+) -> None:
+    """The full outage arc: within the threshold the cache serves, past
+    it the entities go unavailable, and when the API comes back the
+    next pass succeeds with the FRESH snapshot, re-arms the cache, and
+    the entities recover — without any config-entry reload."""
+    import custom_components.nestquest.coordinator as coordinator_module
+
+    clock = FakeMonotonic()
+    monkeypatch.setattr(coordinator_module, "_monotonic", clock)
+    outage = NestQuestApiError(
+        "NestQuest API GET /api/v1/panel/snapshot failed with HTTP 503",
+        status=503,
+    )
+    post_recovery_outage = NestQuestApiError(
+        "NestQuest API GET /api/v1/panel/snapshot failed with HTTP 502",
+        status=502,
+    )
+    fresh = {**FIXTURE_SNAPSHOT, "cycle_day": 4}
+    client = StubSnapshotClient(
+        FIXTURE_SNAPSHOT, outage, outage, fresh, post_recovery_outage
+    )
+    _entry, coordinator = await _wire_entry(
+        hass,
+        make_entry,
+        client,
+        options={CONF_UPDATE_INTERVAL: 300, CONF_SNAPSHOT_STALENESS: 900},
+    )
+    first = coordinator.data
+    assert first.cycle_day == 3
+
+    # Within the threshold: the outage serves the cache.
+    clock.now += 300
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is True
+    assert coordinator.data is first
+
+    # Past the threshold: the outage fails the pass (unavailable).
+    clock.now += 901
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is False
+
+    # The API returns: the next pass succeeds with the fresh snapshot
+    # and no reload was involved anywhere.
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is True
+    fresh_data = coordinator.data
+    assert fresh_data.cycle_day == 4
+    assert hass.registry.reloaded == []
+
+    # The success re-armed the cache with the FRESH stamp: another
+    # outage within the threshold serves the new snapshot now, not the
+    # pre-outage one.
+    clock.now += 300
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is True
+    assert coordinator.data is fresh_data
+    assert client.calls == 5
+
+
+async def test_setup_creates_coordinator_with_configured_staleness(
+    hass, make_entry
+) -> None:
+    """The staleness threshold rides the entry options into the
+    coordinator, alongside the update interval."""
+    entry = wire_entry_to_registry(
+        make_entry(
+            options={CONF_UPDATE_INTERVAL: 60, CONF_SNAPSHOT_STALENESS: 600}
+        ),
+        hass.registry,
+    )
+    assert await async_setup_entry(hass, entry) is True
+    coordinator = entry.runtime_data.coordinator
+    assert coordinator._staleness_seconds == 600
+
+
+async def test_setup_staleness_below_interval_falls_back_to_default(
+    hass, make_entry
+) -> None:
+    """A stored threshold below the update interval (a raw hand-edited
+    option) never reaches the coordinator as-is: it falls back to the
+    shipped default, which still spans the configured interval."""
+    entry = wire_entry_to_registry(
+        make_entry(
+            options={CONF_UPDATE_INTERVAL: 600, CONF_SNAPSHOT_STALENESS: 60}
+        ),
+        hass.registry,
+    )
+    assert await async_setup_entry(hass, entry) is True
+    coordinator = entry.runtime_data.coordinator
+    assert coordinator._staleness_seconds == DEFAULT_SNAPSHOT_STALENESS
+
+
+async def test_coordinator_staleness_floor_never_below_interval(hass) -> None:
+    """A threshold below the interval falls back to whichever of
+    default/interval is larger, so the cache can always span at least
+    one failed poll (here the interval exceeds the shipped default)."""
+    coordinator = NestQuestCoordinator(
+        hass,
+        entry_id="floor",
+        api_client=StubSnapshotClient(),
+        update_interval_seconds=1800,
+        staleness_seconds=60,
+    )
+    assert coordinator._staleness_seconds == 1800
 
 
 async def test_failed_first_refresh_does_not_crash_setup(
