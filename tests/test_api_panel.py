@@ -236,7 +236,15 @@ class _PanelRunner:
         self, db_path: str, panel_token: str = PANEL_TOKEN
     ) -> None:
         self.app = create_app(
-            ApiConfig(db_path=db_path, panel_token=panel_token)
+            ApiConfig(
+                db_path=db_path,
+                panel_token=panel_token,
+                oidc_issuer="https://authentik.example.com/application/o/nestquest/",
+                oidc_audience="nestquest-api",
+                oidc_jwks_url=(
+                    "https://authentik.example.com/application/o/nestquest/jwks/"
+                ),
+            )
         )
 
     async def __aenter__(self) -> tuple["_PanelRunner", httpx.AsyncClient]:
@@ -311,6 +319,9 @@ def test_from_env_reads_panel_token() -> None:
         {
             "NESTQUEST_DB_PATH": "/data/nq.db",
             "NESTQUEST_PANEL_TOKEN": "panel-token",
+            "NESTQUEST_OIDC_ISSUER": "https://idp.example.com/issuer/",
+            "NESTQUEST_OIDC_AUDIENCE": "nestquest-api",
+            "NESTQUEST_OIDC_JWKS_URL": "https://idp.example.com/jwks/",
         }
     )
     assert cfg.panel_token == "panel-token"
@@ -319,7 +330,14 @@ def test_from_env_reads_panel_token() -> None:
 def test_from_env_requires_panel_token_when_missing() -> None:
     """A missing panel token raises ConfigError (no silent default)."""
     with pytest.raises(ConfigError):
-        ApiConfig.from_env({"NESTQUEST_DB_PATH": "/data/nq.db"})
+        ApiConfig.from_env(
+            {
+                "NESTQUEST_DB_PATH": "/data/nq.db",
+                "NESTQUEST_OIDC_ISSUER": "https://idp.example.com/issuer/",
+                "NESTQUEST_OIDC_AUDIENCE": "nestquest-api",
+                "NESTQUEST_OIDC_JWKS_URL": "https://idp.example.com/jwks/",
+            }
+        )
 
 
 def test_from_env_requires_panel_token_when_empty() -> None:
@@ -329,6 +347,9 @@ def test_from_env_requires_panel_token_when_empty() -> None:
             {
                 "NESTQUEST_DB_PATH": "/data/nq.db",
                 "NESTQUEST_PANEL_TOKEN": "   ",
+                "NESTQUEST_OIDC_ISSUER": "https://idp.example.com/issuer/",
+                "NESTQUEST_OIDC_AUDIENCE": "nestquest-api",
+                "NESTQUEST_OIDC_JWKS_URL": "https://idp.example.com/jwks/",
             }
         )
 

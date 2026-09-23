@@ -69,11 +69,21 @@ class _AppRunner:
     """
 
     def __init__(self, db_path: str) -> None:
-        # The token value is irrelevant to these tests (the health
-        # route is unauthenticated); it just satisfies the required
-        # field — the panel token's own tests live in test_api_panel.py.
+        # The token and OIDC values are irrelevant to these tests (the
+        # health route is unauthenticated); they just satisfy the
+        # required fields — the panel token's own tests live in
+        # test_api_panel.py and the OIDC settings' in
+        # test_api_admin_auth.py.
         self.app = create_app(
-            ApiConfig(db_path=db_path, panel_token="health-runner-token")
+            ApiConfig(
+                db_path=db_path,
+                panel_token="health-runner-token",
+                oidc_issuer="https://authentik.example.com/application/o/nestquest/",
+                oidc_audience="nestquest-api",
+                oidc_jwks_url=(
+                    "https://authentik.example.com/application/o/nestquest/jwks/"
+                ),
+            )
         )
 
     async def __aenter__(self) -> httpx.AsyncClient:
@@ -107,6 +117,9 @@ def test_from_env_returns_set_value() -> None:
         {
             "NESTQUEST_DB_PATH": "/data/nq.db",
             "NESTQUEST_PANEL_TOKEN": "panel-token",
+            "NESTQUEST_OIDC_ISSUER": "https://idp.example.com/issuer/",
+            "NESTQUEST_OIDC_AUDIENCE": "nestquest-api",
+            "NESTQUEST_OIDC_JWKS_URL": "https://idp.example.com/jwks/",
         }
     )
     assert cfg.db_path == "/data/nq.db"
@@ -295,10 +308,16 @@ _NO_HA_SCRIPT = textwrap.dedent(
     # Build the app (the lifespan is NOT run here, so the path is never
     # opened — it just needs to be a non-empty string to satisfy the
     # fail-fast config check).  Use a temp path so nothing is created;
-    # the panel token value is irrelevant to this import-only check.
-    app = create_app(ApiConfig(db_path=str(
-        Path(tempfile.gettempdir()) / "nq-noha-buildonly.db"
-    ), panel_token="noha-import-token"))
+    # the token and OIDC values are irrelevant to this import-only check.
+    app = create_app(ApiConfig(
+        db_path=str(Path(tempfile.gettempdir()) / "nq-noha-buildonly.db"),
+        panel_token="noha-import-token",
+        oidc_issuer="https://authentik.example.com/application/o/nestquest/",
+        oidc_audience="nestquest-api",
+        oidc_jwks_url=(
+            "https://authentik.example.com/application/o/nestquest/jwks/"
+        ),
+    ))
     assert app is not None
 
     print("API NO-HA IMPORT OK")

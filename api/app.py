@@ -12,6 +12,11 @@ exposes the two endpoints every later task depends on:
   (service-token protected; see :mod:`api.routes_panel`, whose router
   carries the shared :func:`api.dependencies.require_panel_token`
   check).
+- ``GET /api/v1/admin/ping`` — the admin plane's auth probe, protected
+  by the Authentik OIDC JWT check (see :mod:`api.routes_admin`, whose
+  router carries the shared :func:`api.auth.require_admin_jwt`
+  dependency; the JWKS document it verifies against is cached on
+  ``app.state.jwks_cache``).
 - ``GET /docs`` — FastAPI's auto-served OpenAPI document (Swagger UI);
   ``/openapi.json`` is the raw schema.  No extra wiring is needed;
   FastAPI serves both by default.
@@ -37,9 +42,11 @@ from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
 
+from api.auth import JwksCache
 from api.config import ApiConfig
 from api.database import DatabaseState, make_database
 from api.events import TransitionPublisher
+from api.routes_admin import router as admin_router
 from api.routes_panel import router as panel_router
 
 
@@ -90,10 +97,16 @@ def create_app(config: ApiConfig | None = None) -> FastAPI:
     )
 
     # The resolved config rides on app.state so the reusable route
-    # dependencies (the panel service-token check) read the configured
-    # values from the app rather than module state.
+    # dependencies (the panel service-token check, the admin JWT check)
+    # read the configured values from the app rather than module state.
     app.state.config = cfg
+    # The admin plane's ONE per-app JWKS cache: fetched from the
+    # configured provider on first use, then reused until its TTL
+    # lapses (see api.auth.JwksCache).  Tests replace it with a
+    # stub-backed cache so no request ever leaves the process.
+    app.state.jwks_cache = JwksCache(cfg.oidc_jwks_url)
     app.include_router(panel_router)
+    app.include_router(admin_router)
 
     @app.get("/health", summary="Service health")
     async def health() -> dict[str, str]:
