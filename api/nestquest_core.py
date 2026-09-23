@@ -161,13 +161,38 @@ core_dao_presence = importlib.import_module(
     f"{_CORE_MODULE_NAME}.dao_presence"
 )
 
+#: The materialization walk (``core.materialize.materialize``,
+#: ``regenerate_for_definition``, ``regenerate_for_child``) the admin
+#: plane's regenerate route calls — the same walk the integration's
+#: config/presence changes trigger.
+core_materialize = importlib.import_module(f"{_CORE_MODULE_NAME}.materialize")
+
+#: The core constants module (``core.const.DEFAULT_HORIZON_DAYS``) the
+#: regenerate route sizes the household rolling horizon with.
+core_const = importlib.import_module(f"{_CORE_MODULE_NAME}.const")
+
+#: The typed child DAO (``core.dao_children.ChildrenDao.get``) the
+#: regenerate route reads a child's existence with before delegating.
+core_dao_children = importlib.import_module(
+    f"{_CORE_MODULE_NAME}.dao_children"
+)
+
+#: The typed definition DAO (``core.dao_rules.QuestDefinitionsDao.get``)
+#: the regenerate route reads a definition's existence with before
+#: delegating.
+core_dao_rules = importlib.import_module(f"{_CORE_MODULE_NAME}.dao_rules")
+
 __all__ = [
     "core",
     "core_children",
     "core_completion",
+    "core_const",
+    "core_dao_children",
     "core_dao_presence",
+    "core_dao_rules",
     "core_db",
     "core_events",
+    "core_materialize",
     "core_migrations",
     "core_presence",
     "core_presence_management",

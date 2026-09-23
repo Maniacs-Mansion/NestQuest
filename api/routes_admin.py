@@ -59,6 +59,39 @@ layer the HA services share, so the two planes cannot drift:
   design) and regenerates that override's child.  It answers
   ``{"status": "ok"}``.
 
+The uncomplete and regenerate routes (task da0226b3) follow the same
+pattern over :mod:`nestquest_core.completion` and
+:mod:`nestquest_core.materialize`:
+
+- ``POST /instances/{instance_id}/uncomplete`` reverses ONE completion:
+  the handler takes the actor from the VERIFIED JWT (``actor_source``
+  ``'user'`` with ``actor_user_id`` = the token's ``sub`` — the D-008
+  user-actor shape, so the reversal is attributed to the admin who
+  called it) and calls :func:`nestquest_core.completion.uncomplete_instance`.
+  The append-only discipline lives in the core: a reversal APPENDS an
+  ``uncompleted`` event after the original ``completed`` row — the
+  original is never edited or deleted — and the instance's derived
+  state (recomputed from the latest event) returns to ``open``.  On an
+  ACTUAL reversal (``CompletionResult.appended`` True) the route
+  publishes the ``nestquest_quest_uncompleted`` transition through
+  :func:`api.transitions.publish_quest_uncompleted` (the payload built
+  by the core builder); an already-open no-op publishes nothing.  The
+  response carries the derived ``state`` and whether THIS call
+  ``appended``.
+- ``POST /regenerate`` re-materializes the rolling horizon through the
+  same core path the integration's config/presence changes use.  The
+  body names ONE scope: ``household`` (the default —
+  :func:`nestquest_core.materialize.materialize` over
+  ``[today, today + const.DEFAULT_HORIZON_DAYS]``, the core's default
+  horizon; the API config carries no horizon knob of its own),
+  ``definition`` (:func:`nestquest_core.materialize.regenerate_for_definition`
+  — deletes the definition's open future instances and re-runs the
+  walk), or ``child``
+  (:func:`nestquest_core.materialize.regenerate_for_child`).
+  The upsert is idempotent, so re-running never duplicates an
+  instance.  The response carries the scope, the scoped id (if any)
+  and the core's upsert ``count``.
+
 Error mapping (every children, quest-definition and presence route,
 deliberately narrow):
 
@@ -94,6 +127,20 @@ deliberately narrow):
   :func:`_raise_presence_override_error`, keyed on the
   ``override_id:`` prefix the core's unknown-id error carries (the
   same convention as the quest-definition 404).
+- The UNCOMPLETE route maps the core completion layer's unknown-
+  ``instance_id`` error (prefixed ``instance_id:``, the same
+  convention the panel complete route keys on) to 404; every other
+  core ``ValueError`` — a rejected actor shape, which a verified token
+  without a usable ``sub`` claim produces — is 422: the credential
+  authenticated but the reversal it asks for names no subject to
+  attribute.  Anything ELSE re-raises: no unexpected failure is
+  swallowed into a 4xx.
+- The REGENERATE route's only 404s are the unknown scope ids, decided
+  by ONE existence read (the definitions/children DAO ``get``) BEFORE
+  any core call — the core's regenerate path itself takes no existence
+  stance.  Every core ``ValueError`` (a rejected horizon, a malformed
+  date — unreachable from this body model, but mapped anyway) is 422;
+  anything else re-raises.
 
 PATCH edit semantics: the body model's fields are optional and only
 SUPPLIED fields are forwarded (``model_dump(exclude_unset=True)``), so
@@ -104,15 +151,22 @@ silently ignored.
 """
 from __future__ import annotations
 
-from typing import Annotated, NoReturn
+import datetime
+from typing import Annotated, Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 
+from api import transitions as api_transitions
 from api.auth import require_admin
 from api.database import DatabaseState
 from api.nestquest_core import (
     core_children,
+    core_completion,
+    core_const,
+    core_dao_children,
+    core_dao_rules,
+    core_materialize,
     core_presence,
     core_presence_management,
     core_quest_definitions,
@@ -395,6 +449,83 @@ class AdminPresenceOverrideResponse(BaseModel):
     note: str | None
 
 
+class AdminUncompleteResponse(BaseModel):
+    """The result of ``POST /api/v1/admin/instances/{id}/uncomplete``.
+
+    ``state`` is the instance's derived state AFTER the reversal —
+    ``open``, or ``missed`` when it is past due — and ``appended``
+    reports whether THIS call appended the reversal event (``False``
+    for an already-open no-op).
+    """
+
+    instance_id: int
+    state: str
+    appended: bool
+
+
+class AdminRegenerateRequest(BaseModel):
+    """The body of ``POST /api/v1/admin/regenerate``.
+
+    ONE scope per request: ``household`` (the default) re-materializes
+    every active definition over the rolling horizon; ``definition``
+    and ``child`` scope the rebuild to one id.  The model enforces the
+    scope/id pairing so the handler never has to guess: an id without
+    its scope, a scope without its id, or a zero/negative id is a
+    validation error (422) before any handler code runs.
+    """
+
+    scope: Literal["household", "definition", "child"] = "household"
+    definition_id: int | None = None
+    child_id: int | None = None
+
+    @field_validator("definition_id", "child_id")
+    @classmethod
+    def _positive(cls, value: int | None) -> int | None:
+        """Reject zero and negative ids with a validation error."""
+        if value is not None and value < 1:
+            raise ValueError(
+                "definition_id and child_id must be positive integers"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _scope_matches_ids(self) -> "AdminRegenerateRequest":
+        """Reject an id that does not belong to the requested scope."""
+        if self.scope == "household":
+            if self.definition_id is not None or self.child_id is not None:
+                raise ValueError(
+                    "scope 'household' takes no definition_id or child_id"
+                )
+        elif self.scope == "definition":
+            if self.definition_id is None:
+                raise ValueError("scope 'definition' requires definition_id")
+            if self.child_id is not None:
+                raise ValueError("scope 'definition' must not carry child_id")
+        else:
+            if self.child_id is None:
+                raise ValueError("scope 'child' requires child_id")
+            if self.definition_id is not None:
+                raise ValueError(
+                    "scope 'child' must not carry definition_id"
+                )
+        return self
+
+
+class AdminRegenerateResponse(BaseModel):
+    """What a regenerate request rebuilt.
+
+    ``scope`` echoes the request; ``definition_id``/``child_id`` carry
+    the scoped id (both ``None`` for the household); ``count`` is the
+    number of instances the core walk upserted — the core's idempotent
+    count, so a re-run refreshes rows in place and never duplicates.
+    """
+
+    scope: str
+    definition_id: int | None
+    child_id: int | None
+    count: int
+
+
 #: 404 detail for a child id the core layer reports as non-existent.
 _CHILD_NOT_FOUND_DETAIL = "Child not found"
 
@@ -476,6 +607,56 @@ def _raise_presence_override_error(error: ValueError) -> NoReturn:
             status_code=404, detail=_PRESENCE_OVERRIDE_NOT_FOUND_DETAIL
         ) from error
     raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+#: 404 detail for an instance id the core layer reports as non-existent.
+_QUEST_INSTANCE_NOT_FOUND_DETAIL = "Quest instance not found"
+
+
+def _raise_instance_error(error: ValueError) -> NoReturn:
+    """Map a core completion ``ValueError`` onto 404 or 422 and raise it.
+
+    The uncomplete route's mapping, keyed the same way the panel
+    complete route keys its 404: the core names a missing instance by
+    prefixing its error with ``instance_id:``
+    (:func:`nestquest_core.completion.uncomplete_instance` on an
+    unknown id), and that one case is this route's 404.  Every other
+    ``ValueError`` — a rejected actor shape, which a verified token
+    without a usable ``sub`` claim produces — is 422 with the core's
+    message as the detail.  The route catches ONLY ``ValueError``, so
+    an unexpected failure propagates untouched.
+    """
+    if str(error).startswith("instance_id:"):
+        raise HTTPException(
+            status_code=404, detail=_QUEST_INSTANCE_NOT_FOUND_DETAIL
+        ) from error
+    raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+def _raise_regenerate_error(error: ValueError) -> NoReturn:
+    """Map a core materialization ``ValueError`` onto 422 and raise it.
+
+    The regenerate route's 404s are decided BEFORE the core call (the
+    handler's own existence reads of the scoped id), so every
+    ``ValueError`` that survives to here is a rejected argument — a
+    malformed horizon or date the core refuses before any write — and
+    is 422 with the core's message as the detail.  Nothing else is
+    caught: an unexpected failure re-raises rather than becoming a 4xx.
+    """
+    raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+def _local_now() -> datetime.datetime:
+    """Return the API host's local time as ONE timezone-aware clock read.
+
+    Same discipline as the panel route's clock read: a single
+    ``now().astimezone()`` read anchors the household-local date the
+    regenerate horizon and the uncomplete stamp derive from, so the
+    calendar date can never disagree inside one request.  Kept as a
+    module function so tests pin the instant the same way the panel
+    route's ``_local_now`` is pinned.
+    """
+    return datetime.datetime.now().astimezone()
 
 
 def _rule_from_request(rule: AdminRuleRequest) -> core_recurrence.ScheduleRule:
@@ -940,6 +1121,177 @@ async def admin_delete_presence_override(
     except ValueError as error:
         _raise_presence_override_error(error)
     return {"status": "ok"}
+
+
+@router.post(
+    "/instances/{instance_id}/uncomplete",
+    summary="Reverse one completion (append a reversal event)",
+    response_model=AdminUncompleteResponse,
+)
+async def admin_uncomplete_instance(
+    instance_id: int,
+    request: Request,
+    claims: Annotated[dict[str, object], Depends(require_admin)],
+) -> AdminUncompleteResponse:
+    """Reverse one completion; the original event is never touched.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  ``claims`` is the SAME
+    verified-claims dict that dependency produced (FastAPI's
+    per-request dependency cache), and the reversal is attributed to
+    it: ``actor_source="user"`` with ``actor_user_id`` = the token's
+    ``sub`` — the D-008 user-actor shape, ``actor_child_id`` never
+    sent — so the completion log records WHICH admin reversed it.
+
+    Thin adapter: ONE timezone-aware clock read (:func:`_local_now`)
+    and ONE :func:`nestquest_core.completion.uncomplete_instance` call
+    — the append-only discipline (a reversal APPENDS an ``uncompleted``
+    event after the original ``completed`` row, which is never edited
+    or deleted), the already-open no-op and the derived-state
+    recomputation all live in the core layer.
+
+    On an ACTUAL reversal (``CompletionResult.appended`` True) the
+    route publishes the ``nestquest_quest_uncompleted`` transition on
+    the SSE stream through
+    :func:`api.transitions.publish_quest_uncompleted` (the payload is
+    built by the core builder, never hand-built here; fan-out is
+    fire-and-forget, see api/events.py).  An already-open no-op
+    (``appended`` False) publishes nothing.
+
+    Response: the derived ``state`` after the reversal — ``open``, or
+    ``missed`` when the instance is past due — and whether THIS call
+    ``appended``.  Error mapping (:func:`_raise_instance_error`): an
+    unknown instance is 404; every other core ``ValueError`` is 422.
+    """
+    state: DatabaseState = request.app.state.db
+    database = state.database
+    now = _local_now()
+    sub = claims.get("sub")
+    try:
+        result = await core_completion.uncomplete_instance(
+            database,
+            instance_id,
+            actor_source="user",
+            actor_user_id=sub if isinstance(sub, str) else None,
+            now=now,
+        )
+    except ValueError as error:
+        _raise_instance_error(error)
+    if result.appended:
+        # An ACTUAL reversal: announce the transition once.  A no-op
+        # (already open) publishes nothing.
+        await api_transitions.publish_quest_uncompleted(
+            database, instance_id, request.app.state.publisher
+        )
+    return AdminUncompleteResponse(
+        instance_id=instance_id,
+        state=str(result),
+        appended=result.appended,
+    )
+
+
+@router.post(
+    "/regenerate",
+    summary="Re-materialize the rolling horizon for one scope",
+    response_model=AdminRegenerateResponse,
+)
+async def admin_regenerate(
+    body: AdminRegenerateRequest, request: Request
+) -> AdminRegenerateResponse:
+    """Re-materialize the rolling horizon for the requested scope.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter over the SAME
+    materialization path the integration's config/presence changes
+    trigger, one scope per request:
+
+    - ``household`` (the default): ONE
+      :func:`nestquest_core.materialize.materialize` call over
+      ``[today, today + const.DEFAULT_HORIZON_DAYS]`` — the core's
+      default horizon, which sizes the window here because the API
+      config carries no horizon knob of its own.  The walk is an
+      idempotent upsert: re-running refreshes rows in place and never
+      duplicates an instance.
+    - ``definition``: ONE existence read
+      (:class:`~nestquest_core.dao_rules.QuestDefinitionsDao.get` — an
+      unknown id is 404 BEFORE any core call, which the core's
+      regenerate path itself takes no stance on), then
+      :func:`nestquest_core.materialize.regenerate_for_definition`.
+    - ``child``: the same shape through
+      :class:`~nestquest_core.dao_children.ChildrenDao.get` and
+      :func:`nestquest_core.materialize.regenerate_for_child`.
+
+    The ONE clock read (:func:`_local_now`) threads the household-local
+    ``today`` into every core call so the walk's no-past guard and the
+    delete cutoff share one anchor.  Every core call returns the
+    upsert ``count``, which the response passes through.  Error
+    mapping (:func:`_raise_regenerate_error`): every core
+    ``ValueError`` is 422; the scope-id 404s are decided above.
+    """
+    state: DatabaseState = request.app.state.db
+    database = state.database
+    today = _local_now().date()
+
+    if body.scope == "household":
+        end_date = today + datetime.timedelta(
+            days=core_const.DEFAULT_HORIZON_DAYS
+        )
+        try:
+            count = await core_materialize.materialize(
+                database,
+                today.isoformat(),
+                end_date.isoformat(),
+                today=today,
+            )
+        except ValueError as error:
+            _raise_regenerate_error(error)
+        return AdminRegenerateResponse(
+            scope="household", definition_id=None, child_id=None,
+            count=count,
+        )
+
+    if body.scope == "definition":
+        definition_id = body.definition_id
+        # The request model's scope/id consistency validator already
+        # guarantees the id for this scope; this only narrows the type.
+        assert definition_id is not None
+        definition = await core_dao_rules.QuestDefinitionsDao(
+            database
+        ).get(definition_id)
+        if definition is None:
+            raise HTTPException(
+                status_code=404, detail=_QUEST_DEFINITION_NOT_FOUND_DETAIL
+            )
+        try:
+            count = await core_materialize.regenerate_for_definition(
+                database, definition_id, today=today
+            )
+        except ValueError as error:
+            _raise_regenerate_error(error)
+        return AdminRegenerateResponse(
+            scope="definition",
+            definition_id=definition_id,
+            child_id=None,
+            count=count,
+        )
+
+    child_id = body.child_id
+    # Same model guarantee as the definition scope above.
+    assert child_id is not None
+    child = await core_dao_children.ChildrenDao(database).get(child_id)
+    if child is None:
+        raise HTTPException(status_code=404, detail=_CHILD_NOT_FOUND_DETAIL)
+    try:
+        count = await core_materialize.regenerate_for_child(
+            database, child_id, today=today
+        )
+    except ValueError as error:
+        _raise_regenerate_error(error)
+    return AdminRegenerateResponse(
+        scope="child", definition_id=None, child_id=child_id, count=count
+    )
 
 
 __all__ = ["router"]
