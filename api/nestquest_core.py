@@ -107,4 +107,19 @@ core: ModuleType = _load_core()
 core_db = importlib.import_module(f"{_CORE_MODULE_NAME}.db")
 core_migrations = importlib.import_module(f"{_CORE_MODULE_NAME}.migrations")
 
-__all__ = ["core", "core_db", "core_migrations"]
+#: The panel snapshot builder and its payload shaper
+#: (``core.snapshot.build_snapshot`` / ``instance_payload``) — the pure
+#: assembly the panel routes call.
+core_snapshot = importlib.import_module(f"{_CORE_MODULE_NAME}.snapshot")
+
+#: The explicit settings object (``core.settings.NestQuestSettings``)
+#: the snapshot builder's ``settings`` parameter takes.
+core_settings = importlib.import_module(f"{_CORE_MODULE_NAME}.settings")
+
+__all__ = [
+    "core",
+    "core_db",
+    "core_migrations",
+    "core_snapshot",
+    "core_settings",
+]
