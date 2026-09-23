@@ -30,11 +30,22 @@ swallowed.  There are NO retries and the client logs nothing: refresh
 cadence is the coordinator's concern (the next task), and the panel
 token is a secret that must never reach a log line or an error
 message — the error texts name the method, path, and status only.
+
+The panel plane's SSE event stream (``GET /api/v1/panel/events``) is
+exposed by :meth:`NestQuestApiClient.stream_events` — an async
+generator yielding ``(event_type, payload)`` per Server-Sent Events
+frame (``event: <type>`` / ``data: <json>`` lines separated by a blank
+line).  Opening the stream gets the same one-timeout, typed-error
+contract as every other call; reading it has NO body-wide timeout (a
+healthy stream is long-lived — the subscription manager owns
+reconnection and backoff).
 """
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -51,6 +62,7 @@ if TYPE_CHECKING:
 __all__ = [
     "COMPLETE_INSTANCE_PATH",
     "DEFAULT_TIMEOUT_SECONDS",
+    "EVENTS_PATH",
     "NestQuestApiError",
     "NestQuestApiClient",
     "SNAPSHOT_PATH",
@@ -61,6 +73,10 @@ __all__ = [
 
 #: The panel plane's snapshot route (Feature 16).
 SNAPSHOT_PATH = "/api/v1/panel/snapshot"
+
+#: The panel plane's SSE event-stream route (Feature 16): each
+#: transition arrives as an ``event: <type>`` / ``data: <json>`` frame.
+EVENTS_PATH = "/api/v1/panel/events"
 
 #: The panel plane's completion route template (Feature 16); the
 #: ``{instance_id}`` placeholder is filled per call.
@@ -229,6 +245,121 @@ class NestQuestApiClient:
         return await self._request_json(
             "POST", path, json_body={"actor_child_id": actor_child_id}
         )
+
+    async def stream_events(
+        self,
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """Yield ``(event_type, payload)`` for every panel SSE frame.
+
+        Opens ``GET /api/v1/panel/events`` with the Bearer credential
+        and parses the Server-Sent Events framing the API service
+        emits: ``event: <type>`` and ``data: <json>`` lines closed by a
+        blank line (one frame per transition event; a frame's ``data``
+        may span several ``data:`` lines, joined with newlines — the
+        standard SSE rule).  Line splits across chunk boundaries are
+        buffered, so frames are parsed correctly whatever chunking the
+        transport produces.
+
+        Opening the stream carries the SAME one-timeout, typed-error
+        contract as every other call: a non-2xx response raises
+        :class:`NestQuestApiError` with its status and a transport
+        failure (connection refused, DNS, the open timing out) raises
+        one with ``status=None`` and the original error chained.  The
+        reading loop itself has NO timeout — a healthy stream is
+        long-lived — but any failure raised from the transport
+        mid-stream raises typed as well, so the consumer can reconnect.
+        A frame whose ``data`` is not valid JSON is a protocol failure
+        and raises typed, carrying the response status it arrived
+        with.  Cancellation is never converted: closing the generator
+        (``aclose``, i.e. the consumer's task being cancelled) stops
+        cleanly and closes the underlying response in every path.
+        """
+        url = f"{self._base_url}{EVENTS_PATH}"
+        headers = {"Authorization": f"Bearer {self._panel_token}"}
+        # Opening the response gets ONE request timeout, exactly like
+        # ``_request_json``; the read loop below runs WITHOUT one — a
+        # body-wide timeout would kill a healthy long-lived stream.
+        # The response context manager is entered manually (not via
+        # ``async with``) because the block must span the yields below;
+        # the ``finally`` closes it on EVERY exit path.
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                stream_cm = self._session.request(
+                    "GET", url, headers=headers, json=None
+                )
+                response = await stream_cm.__aenter__()
+        except asyncio.CancelledError:
+            # Cancellation is never converted (see ``_request_json``).
+            raise
+        except NestQuestApiError:
+            raise
+        except Exception as err:
+            raise NestQuestApiError(
+                f"NestQuest API GET {EVENTS_PATH} transport failure: {err}",
+                status=None,
+            ) from err
+
+        status = response.status
+        if not 200 <= status < 300:
+            await self._close_stream(stream_cm)
+            raise NestQuestApiError(
+                f"NestQuest API GET {EVENTS_PATH} failed with HTTP {status}",
+                status=status,
+            )
+
+        try:
+            event_type: str | None = None
+            data_lines: list[str] = []
+            buffer = ""
+            async for chunk in response:
+                if isinstance(chunk, (bytes, bytearray)):
+                    chunk = chunk.decode("utf-8")
+                buffer += chunk
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    if line.startswith("event:"):
+                        event_type = line[len("event:"):].strip()
+                    elif line.startswith("data:"):
+                        data_lines.append(line[len("data:"):].strip())
+                    elif not line and event_type is not None:
+                        # A blank line ends the frame.  A trailing
+                        # incomplete frame (stream ends without its
+                        # closing blank line) is discarded, per the
+                        # SSE spec's treatment of incomplete events.
+                        try:
+                            payload = json.loads("\n".join(data_lines))
+                        except ValueError as err:
+                            raise NestQuestApiError(
+                                f"NestQuest API GET {EVENTS_PATH} "
+                                f"delivered a malformed SSE frame: {err}",
+                                status=status,
+                            ) from err
+                        yield event_type, payload
+                        event_type = None
+                        data_lines = []
+        except asyncio.CancelledError:
+            raise
+        except NestQuestApiError:
+            raise
+        except Exception as err:
+            raise NestQuestApiError(
+                f"NestQuest API GET {EVENTS_PATH} transport failure: {err}",
+                status=None,
+            ) from err
+        finally:
+            await self._close_stream(stream_cm)
+
+    @staticmethod
+    async def _close_stream(stream_cm: Any) -> None:
+        """Close an opened streaming response context manager.
+
+        Works for aiohttp's response context manager (whose
+        ``__aexit__`` is a coroutine) and for test stubs that return
+        either a coroutine or a plain value.
+        """
+        result = stream_cm.__aexit__(None, None, None)
+        if inspect.isawaitable(result):
+            await result
 
     async def _request_json(
         self,
