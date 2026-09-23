@@ -4,9 +4,11 @@ Registration is domain-scoped and happens once (see
 :func:`async_register_services`); handlers resolve a live database at
 call time through the injected ``find_runtime`` callable.  Permission
 checks are Feature 09 later tasks — this module only validates payload
-shape and forwards to the Feature 03/06/08 business layers (and the
-presence DAOs).  ``export_history_csv`` is registered with a schema but
-raises until Feature 13.  ``regenerate`` is supplied by the caller so
+shape and forwards to the Feature 03/06/08 business layers (the
+presence writes included, through :mod:`.presence_management` — the
+ONE implementation the API admin plane shares).
+``export_history_csv`` is registered with a schema but raises until
+Feature 13.  ``regenerate`` is supplied by the caller so
 the Feature 07 handler stays the one in ``__init__``.
 """
 from __future__ import annotations
@@ -22,6 +24,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from . import children as children_layer
 from . import completion as completion_layer
+from . import presence_management as presence_management_layer
 from . import quest_definitions as quest_definitions_layer
 from .const import (
     DOMAIN,
@@ -39,11 +42,8 @@ from .const import (
     SERVICE_UNCOMPLETE_QUEST,
     SERVICE_UPDATE_QUEST_DEFINITION,
 )
-from .dao_presence import PresenceOverridesDao, PresenceSchedulesDao
 from .events import fire_quest_completed, fire_quest_uncompleted
-from .materialize import regenerate_for_child
 from .permissions import permission_gate
-from .presence import PresenceSchedule
 from .recurrence import ScheduleRule
 from .service_policy import SERVICE_POLICY
 
@@ -405,21 +405,12 @@ def _set_presence_pattern(
     async def _handler(call: Any) -> None:
         runtime = _require_runtime(hass, find_runtime)
         data = call.data
-        schedule = PresenceSchedule(
+        await presence_management_layer.set_presence_schedule(
+            runtime.database,
             data["child_id"],
             data["cycle_length_weeks"],
             data["anchor_date"],
             data["pattern"],
-        )
-        await PresenceSchedulesDao(runtime.database).upsert_by_child(
-            schedule.child_id,
-            schedule.cycle_length_weeks,
-            schedule.anchor_date.isoformat(),
-            schedule.encode(),
-        )
-        await regenerate_for_child(
-            runtime.database,
-            schedule.child_id,
             **_generation_kwargs(hass, runtime),
         )
 
@@ -432,16 +423,13 @@ def _create_presence_override(
     async def _handler(call: Any) -> None:
         runtime = _require_runtime(hass, find_runtime)
         data = call.data
-        await PresenceOverridesDao(runtime.database).create(
+        await presence_management_layer.create_presence_override(
+            runtime.database,
             data["child_id"],
             data["start_date"],
             data["end_date"],
             data["is_present"],
             note=data.get("note"),
-        )
-        await regenerate_for_child(
-            runtime.database,
-            data["child_id"],
             **_generation_kwargs(hass, runtime),
         )
 
@@ -453,17 +441,9 @@ def _delete_presence_override(
 ) -> ServiceHandler:
     async def _handler(call: Any) -> None:
         runtime = _require_runtime(hass, find_runtime)
-        dao = PresenceOverridesDao(runtime.database)
-        override_id = call.data["override_id"]
-        override = await dao.get(override_id)
-        if override is None:
-            raise HomeAssistantError(
-                f"override_id: presence override {override_id} does not exist"
-            )
-        await dao.delete(override_id)
-        await regenerate_for_child(
+        await presence_management_layer.delete_presence_override(
             runtime.database,
-            override.child_id,
+            call.data["override_id"],
             **_generation_kwargs(hass, runtime),
         )
 

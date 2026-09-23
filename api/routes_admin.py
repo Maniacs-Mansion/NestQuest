@@ -35,8 +35,32 @@ through the API: the core's edit path takes no assignees.  The edit
 route forwards only SUPPLIED fields (``exclude_unset``), like the
 children edit.
 
-Error mapping (every children and quest-definition route, deliberately
-narrow):
+The presence routes follow the same pattern over
+:mod:`nestquest_core.presence_management` — the ONE presence write
+layer the HA services share, so the two planes cannot drift:
+
+- ``PUT /children/{child_id}/presence-schedule`` sets (UPSERTS) the
+  child's repeating schedule: the body's ``cycle_length_weeks``,
+  ``anchor_date`` and ``pattern`` go straight into ONE
+  :class:`~nestquest_core.presence.PresenceSchedule` (the model
+  validates cycle length, the strict anchor date and the pattern's
+  week coverage at construction), the core upserts by child (setting
+  again REPLACES the one schedule a child can have) and regenerates
+  the child's future instances; the response is the STORED schedule
+  decoded back through the model.
+- ``POST /presence-overrides`` creates one date-range override: the
+  body becomes ONE :class:`~nestquest_core.presence.PresenceOverride`
+  (the model validates the dates, ``end >= start``, the real bool and
+  the note), the core creates it — rejecting a range that overlaps the
+  same child's existing override — and regenerates; the response is
+  the stored record with its ``id``.
+- ``DELETE /presence-overrides/{override_id}`` deletes one override
+  (children are never hard-deleted; overrides are deletable by
+  design) and regenerates that override's child.  It answers
+  ``{"status": "ok"}``.
+
+Error mapping (every children, quest-definition and presence route,
+deliberately narrow):
 
 - Malformed input the body model or the path parser rejects (a missing
   or wrong-typed field, a non-integer child or definition id) is
@@ -55,10 +79,21 @@ narrow):
   ``rule_type``, a shape-missing field such as a weekly rule without
   weekdays, a malformed date, a forbidden field), a bad window name or
   due time, a rejected window or assignee list (empty, duplicate,
-  wrong-typed) — is mapped to 422: the body was well-formed JSON but
+  wrong-typed); a rejected presence schedule or override (bad cycle
+  length, a pattern not covering the cycle's weeks, a malformed or
+  inverted date range, an override overlapping the same child's
+  existing one) — is mapped to 422: the body was well-formed JSON but
   semantically invalid, the same failure class Pydantic reports.  The
   core rejects these BEFORE any write, so a 422 never leaves a
   half-applied change behind.
+- A non-existent CHILD on a presence route (setting a schedule or
+  creating an override for an unknown id) is mapped to 404 through the
+  SAME :func:`_raise_child_error` the children routes use — the
+  message reads ``child N does not exist``.  A non-existent OVERRIDE
+  on the delete route is mapped to 404 through
+  :func:`_raise_presence_override_error`, keyed on the
+  ``override_id:`` prefix the core's unknown-id error carries (the
+  same convention as the quest-definition 404).
 
 PATCH edit semantics: the body model's fields are optional and only
 SUPPLIED fields are forwarded (``model_dump(exclude_unset=True)``), so
@@ -78,6 +113,8 @@ from api.auth import require_admin
 from api.database import DatabaseState
 from api.nestquest_core import (
     core_children,
+    core_presence,
+    core_presence_management,
     core_quest_definitions,
     core_recurrence,
 )
@@ -294,6 +331,70 @@ class AdminQuestDefinitionActiveRequest(BaseModel):
     is_active: bool
 
 
+class AdminPresenceScheduleRequest(BaseModel):
+    """The body of ``PUT /api/v1/admin/children/{child_id}/presence-schedule``.
+
+    The shape of :class:`~nestquest_core.presence.PresenceSchedule` —
+    nothing more.  ``pattern`` maps each cycle week index (JSON object
+    keys, coerced to ints by the model) to that week's present weekdays
+    (Monday=0); every week of the cycle must be covered, which the
+    PRESENCE MODEL enforces at construction, not this shape.  A week
+    with an empty list means absent every day of that week.
+    """
+
+    cycle_length_weeks: int
+    anchor_date: str
+    pattern: dict[int, list[int]]
+
+
+class AdminPresenceScheduleResponse(BaseModel):
+    """A child's repeating presence schedule as the admin plane serializes it.
+
+    The stored schedule decoded back through
+    :meth:`nestquest_core.presence.PresenceSchedule.decode`: each
+    pattern week is the sorted list of present weekdays, and the child
+    has exactly ONE schedule (setting again replaces it).
+    """
+
+    child_id: int
+    cycle_length_weeks: int
+    anchor_date: str
+    pattern: dict[int, list[int]]
+
+
+class AdminPresenceOverrideCreateRequest(BaseModel):
+    """The body of ``POST /api/v1/admin/presence-overrides``.
+
+    The shape of :class:`~nestquest_core.presence.PresenceOverride` —
+    the strict ISO dates, the ``end_date >= start_date`` order, the
+    real ``is_present`` bool and the optional note are ALL enforced by
+    the model's constructor, which the route builds directly from this
+    body; this model only guards the SHAPE.
+    """
+
+    child_id: int
+    start_date: str
+    end_date: str
+    is_present: bool
+    note: str | None = None
+
+
+class AdminPresenceOverrideResponse(BaseModel):
+    """One presence override as the admin plane serializes it.
+
+    Mirrors
+    :class:`~nestquest_core.dao_presence.PresenceOverrideRecord` — the
+    ``id`` is the handle the DELETE route takes.
+    """
+
+    id: int
+    child_id: int
+    start_date: str
+    end_date: str
+    is_present: bool
+    note: str | None
+
+
 #: 404 detail for a child id the core layer reports as non-existent.
 _CHILD_NOT_FOUND_DETAIL = "Child not found"
 
@@ -355,6 +456,28 @@ def _raise_quest_definition_error(error: ValueError) -> NoReturn:
     raise HTTPException(status_code=422, detail=str(error)) from error
 
 
+#: 404 detail for an override id the core layer reports as non-existent.
+_PRESENCE_OVERRIDE_NOT_FOUND_DETAIL = "Presence override not found"
+
+
+def _raise_presence_override_error(error: ValueError) -> NoReturn:
+    """Map a core presence ``ValueError`` from the DELETE route onto 404/422.
+
+    The mapping mirrors :func:`_raise_quest_definition_error`: the core
+    names a missing override by prefixing its error with
+    ``override_id:`` (an unknown id), and that one case is this route's
+    404.  Every other ``ValueError`` — a non-integer id the path
+    parser's ``int`` already makes unreachable — becomes 422.  The
+    schedule and override-CREATE routes do NOT use this mapper: their
+    only 404 is an unknown CHILD, mapped by :func:`_raise_child_error`.
+    """
+    if str(error).startswith("override_id:"):
+        raise HTTPException(
+            status_code=404, detail=_PRESENCE_OVERRIDE_NOT_FOUND_DETAIL
+        ) from error
+    raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 def _rule_from_request(rule: AdminRuleRequest) -> core_recurrence.ScheduleRule:
     """Build the core ScheduleRule from the request's ``rule`` object.
 
@@ -395,6 +518,34 @@ def _quest_definition_response(
             )
             for window in bundle.windows
         ],
+    )
+
+
+def _presence_schedule_response(
+    schedule: core_presence.PresenceSchedule,
+) -> AdminPresenceScheduleResponse:
+    """Serialize one decoded core PresenceSchedule into the payload."""
+    return AdminPresenceScheduleResponse(
+        child_id=schedule.child_id,
+        cycle_length_weeks=schedule.cycle_length_weeks,
+        anchor_date=schedule.anchor_date.isoformat(),
+        pattern={
+            week: sorted(days) for week, days in schedule.pattern.items()
+        },
+    )
+
+
+def _presence_override_response(
+    record: core_presence_management.PresenceOverrideRecord,
+) -> AdminPresenceOverrideResponse:
+    """Serialize one core PresenceOverrideRecord into the payload."""
+    return AdminPresenceOverrideResponse(
+        id=record.id,
+        child_id=record.child_id,
+        start_date=record.start_date,
+        end_date=record.end_date,
+        is_present=record.is_present,
+        note=record.note,
     )
 
 
@@ -679,6 +830,116 @@ async def admin_set_quest_definition_active(
     except ValueError as error:
         _raise_quest_definition_error(error)
     return _quest_definition_response(bundle)
+
+
+@router.put(
+    "/children/{child_id}/presence-schedule",
+    summary="Set a child's repeating presence schedule",
+    response_model=AdminPresenceScheduleResponse,
+)
+async def admin_set_presence_schedule(
+    child_id: int, body: AdminPresenceScheduleRequest, request: Request
+) -> AdminPresenceScheduleResponse:
+    """Set (upsert) a child's repeating presence schedule.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: the body model
+    carries the shape, and the cycle-length, anchor-date and
+    pattern-coverage policies all live in the
+    :class:`~nestquest_core.presence.PresenceSchedule` constructor the
+    core builds the schedule with — setting again REPLACES the child's
+    one schedule, and the core regenerates the child's future instances
+    so they track the new presence.  Errors are mapped by
+    :func:`_raise_child_error`: an unknown child is 404, a rejected
+    schedule 422.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        schedule = await core_presence_management.set_presence_schedule(
+            state.database,
+            child_id,
+            body.cycle_length_weeks,
+            body.anchor_date,
+            body.pattern,
+        )
+    except ValueError as error:
+        _raise_child_error(error)
+    return _presence_schedule_response(schedule)
+
+
+@router.post(
+    "/presence-overrides",
+    summary="Create a date-range presence override",
+    status_code=201,
+    response_model=AdminPresenceOverrideResponse,
+)
+async def admin_create_presence_override(
+    body: AdminPresenceOverrideCreateRequest, request: Request
+) -> AdminPresenceOverrideResponse:
+    """Create one date-range presence override and return it with its id.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: the body model
+    carries the shape, and the date/order/bool/note policies live in
+    the :class:`~nestquest_core.presence.PresenceOverride` constructor
+    while the same-child no-overlap policy lives in the core's create
+    path — which then regenerates the child's future instances so an
+    absent range removes them and a present range restores them.  The
+    response carries the stored ``id``, the handle
+    ``DELETE /presence-overrides/{id}`` takes.
+
+    Errors are mapped by :func:`_raise_child_error`: an unknown child
+    is 404; a rejected override (malformed or inverted dates, an
+    overlapping range) is 422.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        record = await core_presence_management.create_presence_override(
+            state.database,
+            body.child_id,
+            body.start_date,
+            body.end_date,
+            body.is_present,
+            note=body.note,
+        )
+    except ValueError as error:
+        _raise_child_error(error)
+    return _presence_override_response(record)
+
+
+@router.delete(
+    "/presence-overrides/{override_id}",
+    summary="Delete a presence override",
+)
+async def admin_delete_presence_override(
+    override_id: int, request: Request
+) -> dict[str, str]:
+    """Delete one presence override; children are never hard-deleted.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: the id goes
+    straight to
+    :func:`nestquest_core.presence_management.delete_presence_override`,
+    which looks the override up first (an unknown id is refused BEFORE
+    any delete), removes it and regenerates ITS child's future
+    instances — the id, never a caller-supplied child, decides which
+    child's presence is rebuilt.  On success the route answers
+    ``{"status": "ok"}``.
+
+    Error mapping (:func:`_raise_presence_override_error`): an unknown
+    override id is 404; every other core ``ValueError`` is 422.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        await core_presence_management.delete_presence_override(
+            state.database, override_id
+        )
+    except ValueError as error:
+        _raise_presence_override_error(error)
+    return {"status": "ok"}
 
 
 __all__ = ["router"]
