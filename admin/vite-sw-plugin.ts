@@ -10,6 +10,18 @@ import type { Plugin } from "vite";
 
 export const REVISION_MARKER = "__NQ_BUILD_REVISION__";
 const PRECACHE_PLACEHOLDER = "const PRECACHE_ASSETS = [];";
+// Unhashed files sw.js precaches by fixed URL, relative to the build output.
+export const STATIC_PRECACHE_FILES = [
+  "manifest.webmanifest",
+  "icons/icon-192.png",
+  "icons/icon-512.png",
+  "icons/icon-maskable-512.png",
+];
+
+export interface PrecacheFile {
+  path: string;
+  bytes: string | Uint8Array;
+}
 
 // Every same-origin URL an index.html loads via <script src> or <link href>,
 // normalised to an absolute path, in document order and without duplicates.
@@ -24,17 +36,34 @@ export function extractShellAssets(indexHtml: string): string[] {
   return [...new Set(urls)];
 }
 
+// Hash of every precached file, sorted by path; each entry is length-prefixed
+// so no two different file sets hash the same concatenation.
+export function computeRevision(files: PrecacheFile[]): string {
+  const hash = createHash("sha256");
+  for (const { path, bytes } of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+    const data = typeof bytes === "string" ? Buffer.from(bytes, "utf8") : bytes;
+    hash.update(`${path}\0${data.byteLength}\0`).update(data);
+  }
+  return hash.digest("hex").slice(0, 12);
+}
+
 // Returns swSource with the precache list and the build revision filled in.
-export function injectServiceWorker(indexHtml: string, swSource: string): string {
+// The revision covers index.html (and so the hashed bundles it names), the
+// sw.js source and the bytes of every unhashed static file it precaches.
+export function injectServiceWorker(
+  indexHtml: string,
+  swSource: string,
+  staticFiles: PrecacheFile[],
+): string {
   if (!swSource.includes(PRECACHE_PLACEHOLDER) || !swSource.includes(REVISION_MARKER)) {
     throw new Error("sw.js is missing the PRECACHE_ASSETS placeholder or revision marker");
   }
   const assets = extractShellAssets(indexHtml);
-  const revision = createHash("sha256")
-    .update(indexHtml)
-    .update(swSource)
-    .digest("hex")
-    .slice(0, 12);
+  const revision = computeRevision([
+    { path: "index.html", bytes: indexHtml },
+    { path: "sw.js", bytes: swSource },
+    ...staticFiles,
+  ]);
   return swSource
     .replace(PRECACHE_PLACEHOLDER, `const PRECACHE_ASSETS = ${JSON.stringify(assets)};`)
     .replaceAll(REVISION_MARKER, revision);
@@ -51,7 +80,14 @@ export function serviceWorkerInjectPlugin(): Plugin {
     writeBundle() {
       const swPath = resolve(outDir, "sw.js");
       const indexHtml = readFileSync(resolve(outDir, "index.html"), "utf8");
-      writeFileSync(swPath, injectServiceWorker(indexHtml, readFileSync(swPath, "utf8")));
+      const staticFiles = STATIC_PRECACHE_FILES.map((path) => ({
+        path,
+        bytes: readFileSync(resolve(outDir, path)),
+      }));
+      writeFileSync(
+        swPath,
+        injectServiceWorker(indexHtml, readFileSync(swPath, "utf8"), staticFiles),
+      );
     },
   };
 }

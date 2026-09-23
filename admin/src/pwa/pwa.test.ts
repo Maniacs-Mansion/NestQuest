@@ -2,7 +2,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { REVISION_MARKER, injectServiceWorker } from "../../vite-sw-plugin";
+import {
+  REVISION_MARKER,
+  STATIC_PRECACHE_FILES,
+  injectServiceWorker,
+} from "../../vite-sw-plugin";
 import { registerServiceWorker } from "./register";
 
 const adminRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -245,10 +249,17 @@ const referencedAssets = (html: string) =>
     .filter((url) => url.origin === "https://admin.test")
     .map((url) => url.href);
 
+// The unhashed files the build hashes into the revision, read from public/.
+const staticFiles = STATIC_PRECACHE_FILES.map((path) => ({
+  path,
+  bytes: readFileSync(publicPath(`/${path}`)),
+}));
+const revisionOf = (src: string) => /const REVISION = "([0-9a-f]+)";/.exec(src)?.[1];
+
 describe("build-time service worker injection", () => {
   it("precaches every asset the cached index.html references on install (PWA-001)", async () => {
     const html = builtIndexHtml("Ab12Cd34");
-    const built = injectServiceWorker(html, swSource);
+    const built = injectServiceWorker(html, swSource, staticFiles);
     const sw = loadServiceWorker(async (url) =>
       new FakeResponse(url.endsWith("/index.html") ? html : `net:${url}`),
     built);
@@ -272,20 +283,41 @@ describe("build-time service worker injection", () => {
   });
 
   it("derives a new revision for different index.html content (PWA-002)", () => {
-    const a = injectServiceWorker(builtIndexHtml("aaaa1111"), swSource);
-    const b = injectServiceWorker(builtIndexHtml("bbbb2222"), swSource);
-    const revisionOf = (src: string) => /const REVISION = "([0-9a-f]+)";/.exec(src)?.[1];
+    const a = injectServiceWorker(builtIndexHtml("aaaa1111"), swSource, staticFiles);
+    const b = injectServiceWorker(builtIndexHtml("bbbb2222"), swSource, staticFiles);
 
     expect(a).not.toContain(REVISION_MARKER);
     expect(b).not.toContain(REVISION_MARKER);
     expect(revisionOf(a)).toMatch(/^[0-9a-f]{12}$/);
     expect(revisionOf(b)).toMatch(/^[0-9a-f]{12}$/);
     expect(revisionOf(a)).not.toBe(revisionOf(b));
-    expect(injectServiceWorker(builtIndexHtml("aaaa1111"), swSource)).toBe(a);
+    expect(injectServiceWorker(builtIndexHtml("aaaa1111"), swSource, staticFiles)).toBe(a);
+  });
+
+  it("derives a new revision when only a precached static file changes (PWA-002)", () => {
+    const html = builtIndexHtml("aaaa1111");
+    const base = revisionOf(injectServiceWorker(html, swSource, staticFiles));
+    const withChanged = (path: string) =>
+      staticFiles.map((f) =>
+        f.path === path ? { path, bytes: Buffer.concat([f.bytes, Buffer.from([0])]) } : f,
+      );
+
+    expect(revisionOf(injectServiceWorker(html, swSource, [...staticFiles].reverse()))).toBe(base);
+    for (const path of STATIC_PRECACHE_FILES) {
+      const changed = revisionOf(injectServiceWorker(html, swSource, withChanged(path)));
+      expect(changed, path).toMatch(/^[0-9a-f]{12}$/);
+      expect(changed, path).not.toBe(base);
+    }
+  });
+
+  it("hashes every unhashed URL sw.js precaches (PWA-002)", () => {
+    const shellUrls = [...swSource.matchAll(/^\s*"(\/[^"]*)",$/gm)].map((m) => m[1]);
+    const fixed = shellUrls.filter((url) => url !== "/" && url !== "/index.html");
+    expect(fixed.map((url) => url.slice(1)).sort()).toEqual([...STATIC_PRECACHE_FILES].sort());
   });
 
   it("names both caches after the build revision (PWA-002)", async () => {
-    const built = injectServiceWorker(builtIndexHtml("aaaa1111"), swSource);
+    const built = injectServiceWorker(builtIndexHtml("aaaa1111"), swSource, staticFiles);
     const revision = /const REVISION = "([0-9a-f]+)";/.exec(built)![1];
     const sw = loadServiceWorker(async (url) => new FakeResponse(`net:${url}`), built);
 
@@ -298,11 +330,11 @@ describe("build-time service worker injection", () => {
   });
 
   it("fails fast when sw.js lacks the placeholders", () => {
-    expect(() => injectServiceWorker(builtIndexHtml("x"), "const SHELL_URLS = [];")).toThrow();
+    expect(() => injectServiceWorker(builtIndexHtml("x"), "const SHELL_URLS = [];", staticFiles)).toThrow();
   });
 
   it("activation deletes only stale nestquest-admin caches (PWA-003)", async () => {
-    const built = injectServiceWorker(builtIndexHtml("aaaa1111"), swSource);
+    const built = injectServiceWorker(builtIndexHtml("aaaa1111"), swSource, staticFiles);
     const sw = loadServiceWorker(async (url) => new FakeResponse(`net:${url}`), built);
     for (const name of [
       "nestquest-admin-shell-old",
