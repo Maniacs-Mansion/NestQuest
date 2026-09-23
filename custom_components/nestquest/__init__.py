@@ -282,9 +282,10 @@ async def _run_horizon_materialization(
     The walk itself runs through :func:`~.materialize.materialize`, whose DB
     access is executor-only.
 
-    This is the ONE generation path: the startup backfill, the daily rollover
-    listener and the ``regenerate`` service all funnel through it, so there is
-    no duplicated materialization logic.  ``settings`` (REQUIRED — there is no
+    This is the ONE generation path inside the integration: the
+    startup backfill and the daily rollover listener both funnel
+    through it, so there is no duplicated materialization logic.
+    ``settings`` (REQUIRED — there is no
     silent default; every caller already passes the entry's validated
     :class:`NestQuestSettings`) carries the configured ``horizon_days``.  The
     window itself comes from :meth:`settings.horizon_window` so the helper is
@@ -326,13 +327,10 @@ def _register_day_rollover_listener(
 def _find_live_runtime_data(hass: HomeAssistant) -> NestQuestRuntimeData | None:
     """Return a live runtime record with a connected database, or None.
 
-    The domain-global services (e.g. ``regenerate``) have no database of
-    their own; they resolve whichever config entry's runtime data is
-    currently live at call time, so none of them can hold a stale handle
-    to a closed connection after another entry unloads.  The record also
-    carries that entry's validated ``settings`` (e.g. the configured
-    horizon) so service handlers read horizon days off it rather than
-    re-reading HA config.
+    The domain-global service (the panel completion proxy) has no
+    database of its own; it resolves whichever config entry's runtime
+    data is currently live at call time, so it cannot hold a stale
+    handle to a closed connection after another entry unloads.
     """
     for runtime_data in hass.data.get(DOMAIN, {}).values():
         database = getattr(runtime_data, "database", None)
@@ -341,39 +339,17 @@ def _find_live_runtime_data(hass: HomeAssistant) -> NestQuestRuntimeData | None:
     return None
 
 
-def _make_regenerate_handler(hass: HomeAssistant):
-    """Return the Feature 07 ``regenerate`` handler closed over ``hass``."""
-
-    async def _regenerate(_call: Any) -> None:
-        runtime_data = _find_live_runtime_data(hass)
-        if runtime_data is None:
-            _LOGGER.warning(
-                "NestQuest regenerate requested but no config entry has a "
-                "live database; ignoring"
-            )
-            return
-        await _run_horizon_materialization(
-            hass, runtime_data.database, runtime_data.settings
-        )
-
-    return _regenerate
-
-
 def _register_services(hass: HomeAssistant) -> None:
-    """Register domain-global NestQuest services once.
+    """Register the domain-global NestQuest service once.
 
-    Services are DOMAIN-global — registered exactly once (guarded by
-    ``has_service`` on regenerate) and NOT bound to any config entry —
-    so each handler resolves the currently-live database at call time
+    The service is DOMAIN-global — registered exactly once (guarded by
+    ``has_service``) and NOT bound to any config entry — so the panel
+    completion proxy resolves the currently-live runtime at call time
     and a name collision or duplicate setup is impossible.  Removal is
     handled by the unload path only once the LAST entry is removed
     (see :func:`_deregister_services`).
     """
-    async_register_services(
-        hass,
-        find_runtime=_find_live_runtime_data,
-        regenerate_handler=_make_regenerate_handler(hass),
-    )
+    async_register_services(hass, find_runtime=_find_live_runtime_data)
 
 
 def _deregister_services(hass: HomeAssistant) -> None:
@@ -483,8 +459,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Backfill any days the daily listener missed while the integration
         # was off (or freshly installed): run the one idempotent walk over
         # [today, today + horizon_days] once at setup, using the entry's
-        # configured horizon.  This runs through the SAME path as the daily
-        # listener and regenerate service.
+        # configured horizon.  This runs through the SAME path as the
+        # daily listener.
         await _run_horizon_materialization(hass, database, settings)
         # The missed sweep runs at startup too (Feature 11): if HA was
         # down at the rollover time, the previous night's still-open

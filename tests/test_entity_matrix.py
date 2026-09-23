@@ -22,7 +22,7 @@ from custom_components.nestquest.children import (
     list_children,
     set_child_active,
 )
-from custom_components.nestquest.completion import derive_state
+from custom_components.nestquest.completion import derive_state, uncomplete_instance
 from custom_components.nestquest.const import (
     CONF_ADMIN_USER_IDS,
     DOMAIN,
@@ -30,7 +30,9 @@ from custom_components.nestquest.const import (
     EVENT_QUEST_COMPLETED,
     EVENT_QUEST_UNCOMPLETED,
     SERVICE_COMPLETE_QUEST,
-    SERVICE_UNCOMPLETE_QUEST,
+)
+from custom_components.nestquest.core.events import (
+    build_quest_uncompleted_events,
 )
 from custom_components.nestquest.dao_instances import QuestInstancesDao
 from custom_components.nestquest.materialize import materialize
@@ -174,14 +176,29 @@ async def test_entity_and_event_matrix(hass, make_entry) -> None:
     )
 
     # --- Reversing one quest fires the uncompleted event exactly once
-    # and restores the owed counts.
-    await hass.services.call(
-        DOMAIN,
-        SERVICE_UNCOMPLETE_QUEST,
-        {"instance_id": instances[0].id, "actor": "user"},
-        context={"user_id": "admin-1"},
+    # and restores the owed counts.  The HA ``uncomplete_quest``
+    # service is gone (the API service's admin route is the reversal
+    # path): drive the core completion layer it calls, publish the
+    # uncompleted transition the way the API does, and deliver it
+    # through the SSE subscription.
+    reversal = await uncomplete_instance(
+        entry.runtime_data.database,
+        instances[0].id,
+        actor_source="user",
+        actor_user_id="admin-1",
     )
+    assert reversal.appended is True
+    client = coordinator.api_client
+    client.published_frames.extend(
+        await build_quest_uncompleted_events(
+            entry.runtime_data.database, instances[0].id
+        )
+    )
+    await refire_api_transitions(hass, entry, client)
     assert len(hass.bus.fired(EVENT_QUEST_UNCOMPLETED)) == 1
+    # The reversal no longer carries an immediate local refresh: the
+    # coordinator's next poll picks the restored counts up.
+    await coordinator.async_refresh()
     assert _sensor(hass, ada.id, "all_done").is_on is False
     assert _sensor(hass, ada.id, "quests_remaining_today").native_value == 1
 

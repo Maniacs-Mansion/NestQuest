@@ -20,40 +20,25 @@ TIME_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 PLATFORMS: list[str] = ["sensor", "binary_sensor"]
 
 # Home Assistant bus events (design/ENTITIES-AND-SERVICES.md §3).  The
-# panel and admin cards listen for these; Feature 10 fires completed,
-# uncompleted, and child_day_complete from the service paths, and
-# Feature 11's nightly sweep fires quest_missed.
+# panel and admin cards listen for these; since Feature 18 the
+# completed/uncompleted/day-complete transitions are published by the
+# API service on its SSE stream and re-fired on the bus by the
+# integration's subscription, and Feature 11's nightly sweep fires
+# quest_missed.
 EVENT_QUEST_COMPLETED = "nestquest_quest_completed"
 EVENT_QUEST_UNCOMPLETED = "nestquest_quest_uncompleted"
 EVENT_QUEST_MISSED = "nestquest_quest_missed"
 EVENT_CHILD_DAY_COMPLETE = "nestquest_child_day_complete"
 
-#: Canonical domain-global service names (design/ENTITIES-AND-SERVICES.md §2
-#: plus the existing Feature 07 regenerate service).
+#: Canonical domain-global service name (design/ENTITIES-AND-SERVICES.md §2).
+#: Since Feature 18 only the panel completion service remains: the admin
+#: surface is the PWA and the API service's admin routes, so the former
+#: HA admin services (uncomplete, quest-definition and presence
+#: management, CSV export, child management, regenerate) are gone.
 SERVICE_COMPLETE_QUEST = "complete_quest"
-SERVICE_UNCOMPLETE_QUEST = "uncomplete_quest"
-SERVICE_CREATE_QUEST_DEFINITION = "create_quest_definition"
-SERVICE_UPDATE_QUEST_DEFINITION = "update_quest_definition"
-SERVICE_SET_QUEST_DEFINITION_ACTIVE = "set_quest_definition_active"
-SERVICE_SET_PRESENCE_PATTERN = "set_presence_pattern"
-SERVICE_CREATE_PRESENCE_OVERRIDE = "create_presence_override"
-SERVICE_DELETE_PRESENCE_OVERRIDE = "delete_presence_override"
-SERVICE_EXPORT_HISTORY_CSV = "export_history_csv"
-SERVICE_MANAGE_CHILD = "manage_child"
-SERVICE_REGENERATE = "regenerate"
 
 DOMAIN_SERVICES: tuple[str, ...] = (
     SERVICE_COMPLETE_QUEST,
-    SERVICE_UNCOMPLETE_QUEST,
-    SERVICE_CREATE_QUEST_DEFINITION,
-    SERVICE_UPDATE_QUEST_DEFINITION,
-    SERVICE_SET_QUEST_DEFINITION_ACTIVE,
-    SERVICE_SET_PRESENCE_PATTERN,
-    SERVICE_CREATE_PRESENCE_OVERRIDE,
-    SERVICE_DELETE_PRESENCE_OVERRIDE,
-    SERVICE_EXPORT_HISTORY_CSV,
-    SERVICE_MANAGE_CHILD,
-    SERVICE_REGENERATE,
 )
 
 SQLITE_DB_FILENAME = "nestquest.db"

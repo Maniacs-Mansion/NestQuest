@@ -4,8 +4,10 @@ The transition-event payload construction lives in
 :mod:`custom_components.nestquest.core.events` (extracted in
 task 510c1f78) and is HA-free: it builds and RETURNS the events.  This
 shim keeps the integration's old ``fire_quest_completed`` /
-``fire_quest_uncompleted`` API (the complete/uncomplete service
-handlers call them with ``hass``), reads the HA-local timezone from
+``fire_quest_uncompleted`` API for direct callers — since Feature 18
+the HA service surface no longer fires transition events itself (the
+API service publishes them on its SSE stream and the integration's
+subscription re-fires them) — reads the HA-local timezone from
 ``hass.config.time_zone`` to derive ``today``, asks the core builder
 for the events, and fires each on ``hass.bus`` with the documented
 payloads.  The four blueprints keep working with identical payloads.
