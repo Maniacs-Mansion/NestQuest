@@ -5,3 +5,12 @@ __pycache__/
 .pytest_cache/
 *.metadata.json
 frontend/node_modules/
+
+# Feature 17 (API deployment): local secret config and runtime data
+# are never committed — compose reads deploy/.env; SQLite/WAL sidecar
+# files are container/volume artifacts.
+.env
+**/.env
+*.db
+*.db-wal
+*.db-shm

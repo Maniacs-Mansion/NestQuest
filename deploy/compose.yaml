@@ -1,0 +1,41 @@
+# Compose deployment scaffold for the NestQuest API service (Feature
+# 17).  The SQLite database lives on the NAMED VOLUME ``nestquest-db``
+# mounted at /var/lib/nestquest — recreating the container keeps the
+# household data (``docker compose down`` leaves named volumes alone).
+#
+# Configuration is supplied by the environment: the fixed database
+# path here, and the secret values (panel service token, Authentik
+# OIDC settings) from ``deploy/.env`` — a git-ignored file you create
+# from ``deploy/.env.example`` (placeholder names only; never commit
+# real values).  TLS/reverse proxy, Authentik wiring and network
+# separation are later Feature 17 tasks; the port is bound to
+# localhost only until those land.
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: nestquest-api:latest
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # The SQLite file inside the named volume; fixed, not a secret.
+      NESTQUEST_DB_PATH: /var/lib/nestquest/nestquest.db
+    env_file:
+      # Secret values (NESTQUEST_PANEL_TOKEN, NESTQUEST_OIDC_*); absent
+      # until you create deploy/.env from the example.
+      - path: .env
+        required: false
+    volumes:
+      - nestquest-db:/var/lib/nestquest
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  nestquest-db:

@@ -1,0 +1,27 @@
+# Keep the image build context minimal: only api/ and the bundled
+# custom_components/nestquest/core/ are copied (see the Dockerfile);
+# everything else — VCS state, virtualenvs, tests, the frontend, and
+# any local secrets or database files — never enters the build.
+.git
+.gitignore
+.venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+**/*.db
+**/*.db-wal
+**/*.db-shm
+# Local configuration — never baked into an image.
+.env
+**/.env
+deploy
+design
+docs
+frontend
+orchestration_tests
+scripts
+templates
+tests
+uv.lock
+hacs.json
+*.md
