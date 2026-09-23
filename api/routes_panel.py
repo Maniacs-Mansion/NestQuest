@@ -52,13 +52,22 @@ The same :class:`PanelSnapshotResponse` Pydantic model is the route's
 from __future__ import annotations
 
 import datetime
+import importlib
 
-from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, field_validator
 
 from api.database import DatabaseState
 from api.dependencies import require_panel_token
-from api.nestquest_core import core_snapshot, core_settings
+from api.nestquest_core import (
+    core_completion,
+    core_settings,
+    core_snapshot,
+)
+
+#: The instance DAO, imported on the app's core copy for the
+#: child-mismatch guard on the complete route.
+_dao_instances = importlib.import_module("nestquest_core.dao_instances")
 
 #: All panel-plane routes share this router; the service-token check is
 #: attached HERE so every panel route (current and later) requires it.
@@ -122,6 +131,37 @@ class PanelSnapshotResponse(BaseModel):
     children: list[PanelChildPayload]
 
 
+class PanelCompleteRequest(BaseModel):
+    """The body of ``POST /api/v1/panel/instances/{id}/complete``.
+
+    Matches the panel's ``nestquest.complete_quest`` payload (§2 of
+    design/ENTITIES-AND-SERVICES.md): ``actor_child_id`` is the tapped
+    profile.  A positive integer is required — the core completion
+    layer rejects non-int (and bool) ids anyway, but rejecting them
+    here with 422 keeps the contract visible in the OpenAPI document
+    and fails before any database work.
+    """
+
+    actor_child_id: int
+
+    model_config = {
+        "json_schema_extra": {
+            "description": (
+                "The tapped child profile the completion is "
+                "attributed to (decision 9)."
+            )
+        }
+    }
+
+    @field_validator("actor_child_id")
+    @classmethod
+    def _positive(cls, value: int) -> int:
+        """Reject zero and negative ids with a validation error."""
+        if value < 1:
+            raise ValueError("actor_child_id must be a positive integer")
+        return value
+
+
 def _local_now() -> datetime.datetime:
     """Return the API host's local time as ONE timezone-aware clock read.
 
@@ -178,6 +218,88 @@ async def panel_snapshot(request: Request) -> PanelSnapshotResponse:
             for child in snapshot.children
         ],
     )
+
+
+@router.post(
+    "/instances/{instance_id}/complete",
+    summary="Complete one quest instance",
+    status_code=200,
+)
+async def panel_complete_instance(
+    instance_id: int, body: PanelCompleteRequest, request: Request
+) -> dict[str, str]:
+    """Complete one quest instance as the tapped child profile.
+
+    Requires the panel service token (checked by the router's shared
+    :func:`~api.dependencies.require_panel_token` dependency — the ONE
+    token check; this handler performs NO auth of its own).
+
+    Thin adapter only: resolves the live database off ``app.state.db``,
+    reads ONE timezone-aware clock (:func:`_local_now`), and delegates
+    to :func:`nestquest_core.completion.complete_instance` with
+    ``actor_source="panel"`` and the tapped ``actor_child_id`` — the
+    append/idempotence logic, the lock, and the actor-shape validation
+    all live in the core layer, never here.
+
+    Response and idempotence: ``complete_instance`` returns a
+    :class:`~nestquest_core.completion.CompletionResult` whose
+    ``appended`` flag reports whether THIS call wrote an event; a
+    repeat call for an already-completed instance is a no-op inside
+    the core layer (no duplicate event) and this route still answers
+    ``{"status": "done"}`` either way, so a retried panel tap succeeds.
+
+    Error mapping (deliberately narrow): the ONLY ``ValueError`` mapped
+    to 404 is the unknown-``instance_id`` one, identified by the
+    ``instance_id:`` prefix ``complete_instance`` names the failing
+    field with.  Every other ``ValueError`` (an invalid actor shape,
+    which the body model and the panel actor contract already make
+    unreachable) re-raises to the framework's 500 — nothing else is
+    turned into a 404 or a 500 of our own making.
+
+    Child mismatch: ``complete_instance`` verifies the tapped
+    ``actor_child_id`` exists but does NOT check it is the child the
+    instance belongs to.  The route performs that check here (one
+    ``QuestInstancesDao.get_by_id`` read) and answers 404 when the
+    instance's ``child_id`` differs — completing another child's quest
+    from the wrong profile must not succeed, and 404 (not 403) keeps
+    the instance's existence from leaking to a wrong-profile tap.
+    """
+    state: DatabaseState = request.app.state.db
+    database = state.database
+
+    # Child-mismatch guard (see docstring): the instance must belong to
+    # the tapped profile before the completion layer is entered.
+    instance = await _dao_instances.QuestInstancesDao(database).get_by_id(
+        instance_id
+    )
+    if instance is not None and instance.child_id != body.actor_child_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Quest instance not found for this child",
+        )
+
+    try:
+        result = await core_completion.complete_instance(
+            database,
+            instance_id,
+            actor_source="panel",
+            actor_child_id=body.actor_child_id,
+            now=_local_now(),
+        )
+    except ValueError as error:
+        message = str(error)
+        if message.startswith("instance_id:"):
+            # complete_instance names the field in its ValueError:
+            # "instance_id: quest instance N does not exist".
+            raise HTTPException(
+                status_code=404,
+                detail="Quest instance not found",
+            ) from error
+        raise
+    # The derived state is "done" in both the appended and no-op cases;
+    # ``result.appended`` distinguishes them for callers that care —
+    # the panel route returns the same success either way.
+    return {"status": str(result)}
 
 
 __all__ = ["router"]
