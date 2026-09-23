@@ -238,16 +238,16 @@ async def test_due_today_payload_omits_missed_for_panel_includes_for_admin(
     entry, coordinator, (ada, bo, cory) = await _setup_seeded_entry(
         hass, make_entry
     )
-    import custom_components.nestquest.coordinator as coordinator_module
+    import custom_components.nestquest.core.snapshot as snapshot_module
 
     tomorrow = _today() + datetime.timedelta(days=1)
-    real_derive_state = coordinator_module.derive_state
+    real_derive_state = snapshot_module.derive_state
 
     def _derive_against_pinned_future(instance, latest, today):
         return real_derive_state(instance, latest, tomorrow)
 
     monkeypatch.setattr(
-        coordinator_module, "derive_state", _derive_against_pinned_future
+        snapshot_module, "derive_state", _derive_against_pinned_future
     )
     await coordinator.async_refresh()
 

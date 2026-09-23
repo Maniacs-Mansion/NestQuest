@@ -186,18 +186,18 @@ async def test_entity_and_event_matrix(hass, make_entry) -> None:
     original_refresh = coordinator._async_update_data
 
     async def _future_dated_refresh():
-        import custom_components.nestquest.coordinator as coordinator_module
+        import custom_components.nestquest.core.snapshot as snapshot_module
 
-        real_derive = coordinator_module.derive_state
+        real_derive = snapshot_module.derive_state
 
         def _derive(instance, latest, today):
             return real_derive(instance, latest, today + datetime.timedelta(days=1))
 
-        coordinator_module.derive_state = _derive
+        snapshot_module.derive_state = _derive
         try:
             return await original_refresh()
         finally:
-            coordinator_module.derive_state = real_derive
+            snapshot_module.derive_state = real_derive
 
     coordinator._async_update_data = _future_dated_refresh
     await coordinator.async_refresh()
