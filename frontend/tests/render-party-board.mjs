@@ -3,10 +3,13 @@
  *
  * Usage: node render-party-board.mjs < spec.json
  *
- * The spec JSON carries {bundle, tag, config, hass}; stdout receives one JSON
- * object {plates, html} where plates is the ordered plate list the shadow DOM
- * renders (name + present/away/unknown kind). The Python panel tests drive
- * this harness so the assertions run against the exact bundle HACS ships.
+ * The spec JSON carries {bundle, tag, config, hass, url?, click_plate?};
+ * stdout receives one JSON object {plates, tappable, location, html} where
+ * plates is the ordered plate list the shadow DOM renders (name +
+ * present/away/unknown kind), tappable the plate names rendered as tappable
+ * <button> plates, and location the window pathname after the optional plate
+ * tap. The Python panel tests drive this harness so the assertions run
+ * against the exact bundle HACS ships.
  */
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -15,7 +18,7 @@ import { JSDOM } from "jsdom";
 const spec = JSON.parse(readFileSync(0, "utf8"));
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
-  url: "http://homeassistant.local/nestquest/board",
+  url: spec.url ?? "http://homeassistant.local/nestquest/board",
   pretendToBeVisual: true,
 });
 
@@ -31,6 +34,10 @@ for (const key of Object.getOwnPropertyNames(dom.window)) {
   }
 }
 globalThis.window = dom.window;
+// The card navigates by dispatching new Event("location-changed") on this
+// window; jsdom's EventTarget rejects Node's own global Event class, so the
+// jsdom Event must shadow it for the dispatched event to be delivered.
+globalThis.Event = dom.window.Event;
 
 await import(pathToFileURL(spec.bundle).href);
 
@@ -40,9 +47,10 @@ element.hass = spec.hass;
 document.body.appendChild(element);
 await element.updateComplete;
 
-const plates = [
+const plateNodes = [
   ...element.shadowRoot.querySelectorAll(".plates .plate"),
-].map((plate) => ({
+];
+const plates = plateNodes.map((plate) => ({
   name: plate.querySelector(".name")?.textContent?.trim() ?? "",
   kind: plate.classList.contains("unknown")
     ? "unknown"
@@ -50,7 +58,23 @@ const plates = [
       ? "away"
       : "present",
 }));
+const tappable = plateNodes
+  .filter((plate) => plate.tagName === "BUTTON")
+  .map((plate) => plate.querySelector(".name")?.textContent?.trim() ?? "");
 
-const payload = JSON.stringify({ plates, html: element.shadowRoot.innerHTML });
+if (spec.click_plate !== undefined) {
+  const plate = plateNodes.find(
+    (candidate) =>
+      candidate.querySelector(".name")?.textContent?.trim() === spec.click_plate
+  );
+  plate?.click();
+}
+
+const payload = JSON.stringify({
+  plates,
+  tappable,
+  location: window.location.pathname,
+  html: element.shadowRoot.innerHTML,
+});
 await new Promise((resolve) => process.stdout.write(payload, () => resolve()));
 process.exit(0);

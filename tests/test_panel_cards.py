@@ -6,10 +6,12 @@ spirit as test_frontend.py. They cover the states decided in
 design/PANEL-EMPTY-STATES.md and PANEL-SPEC.md, and guard the kid-facing
 bundles against ever gaining a parent-only service call.
 
-The party board additionally has render tests: they drive
-frontend/tests/render-party-board.mjs, which imports the built bundle into a
-jsdom window and reports the ordered plates the shadow DOM renders, so the
-zero-config discovery contract is asserted against the bundle HACS ships.
+The cards additionally have render tests: they drive the jsdom harnesses in
+frontend/tests — render-party-board.mjs imports the built bundle into a
+jsdom window and reports the ordered plates the shadow DOM renders plus
+where a crest tap navigates, and render-quest-log.mjs reports where the
+quest log's idle return navigates — so the zero-config discovery and
+navigation contracts are asserted against the bundle HACS ships.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ PARTY_BOARD = FRONTEND_CARDS_DIR / "party-board.ts"
 QUEST_LOG = FRONTEND_CARDS_DIR / "quest-log.ts"
 BUNDLE_PATH = REPO_ROOT / "custom_components" / "nestquest" / "www" / "nestquest-cards.js"
 RENDER_HARNESS = FRONTEND_DIR / "tests" / "render-party-board.mjs"
+QUEST_LOG_HARNESS = FRONTEND_DIR / "tests" / "render-quest-log.mjs"
 STRATEGY_HARNESS = FRONTEND_DIR / "tests" / "render-strategy.mjs"
 STRATEGY_SOURCE = FRONTEND_DIR / "src" / "strategy.ts"
 
@@ -234,13 +237,20 @@ def _three_child_states() -> dict:
     }
 
 
-def _render_party_board(config: dict, states: dict) -> dict:
+def _render_party_board(
+    config: dict,
+    states: dict,
+    url: str | None = None,
+    click_plate: str | None = None,
+) -> dict:
     """Render the built bundle's party board and return its plates.
 
     Drives frontend/tests/render-party-board.mjs: the harness imports
     the committed bundle (the artifact HACS ships) into a jsdom window,
-    mounts the card with the given config and hass snapshot, and prints
-    the ordered plates its shadow DOM renders.
+    mounts the card with the given config and hass snapshot, optionally
+    taps the named plate, and prints the ordered plates its shadow DOM
+    renders, which of them are tappable buttons, and the pathname after
+    the optional tap.
     """
     assert BUNDLE_PATH.is_file(), "bundle missing: run cd frontend && npm run build"
     assert RENDER_HARNESS.is_file()
@@ -250,6 +260,10 @@ def _render_party_board(config: dict, states: dict) -> dict:
         "config": config,
         "hass": {"config": {"time_zone": "UTC"}, "states": states},
     }
+    if url is not None:
+        spec["url"] = url
+    if click_plate is not None:
+        spec["click_plate"] = click_plate
     completed = subprocess.run(
         ["node", str(RENDER_HARNESS)],
         input=json.dumps(spec),
@@ -446,3 +460,99 @@ def test_strategy_config_overrides_still_apply() -> None:
     assert result["views"][0]["cards"][0]["quest_log_path"] == root
     for view in result["views"][1:]:
         assert view["cards"][0]["board_path"] == root
+
+
+# --- Navigation tests (strategy-computed paths under jsdom) -------------------
+
+
+def _render_quest_log(
+    config: dict,
+    states: dict,
+    url: str,
+    idle_ms: int | None = None,
+) -> dict:
+    """Render the built bundle's quest log and report its location.
+
+    Drives frontend/tests/render-quest-log.mjs: the harness imports the
+    committed bundle (the artifact HACS ships) into a jsdom window at
+    ``url`` — the card resolves its child from the pathname's last
+    segment — waits the optional idle window, and prints the pathname
+    and the rendered title.
+    """
+    assert BUNDLE_PATH.is_file(), "bundle missing: run cd frontend && npm run build"
+    assert QUEST_LOG_HARNESS.is_file()
+    spec = {
+        "bundle": str(BUNDLE_PATH),
+        "url": url,
+        "config": config,
+        "hass": {"config": {"time_zone": "UTC"}, "states": states},
+    }
+    if idle_ms is not None:
+        spec["idle_ms"] = idle_ms
+    completed = subprocess.run(
+        ["node", str(QUEST_LOG_HARNESS)],
+        input=json.dumps(spec),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, (
+        f"quest-log harness failed: {completed.stderr}"
+    )
+    return json.loads(completed.stdout)
+
+
+def test_present_crest_tap_navigates_to_the_child_quest_log() -> None:
+    """Tapping a present crest pushes <dashboard root>/<slug>: the exact
+    URL the strategy computed for that child's quest log view (the log
+    then resolves its child from the path's last segment)."""
+    generated = _generate_dashboard(
+        {}, _three_child_states(), url="http://homeassistant.local/nestquest"
+    )
+    board_config = generated["views"][0]["cards"][0]
+    result = _render_party_board(
+        board_config,
+        _three_child_states(),
+        url="http://homeassistant.local/nestquest",
+        click_plate="Ada",
+    )
+    # Only the present adventurers' plates are tappable buttons.
+    assert result["tappable"] == ["Ada", "Cory"]
+    assert result["location"] == "/nestquest/ada"
+
+
+def test_away_plate_does_not_navigate() -> None:
+    """Bo is away today: his plate is not a button, and tapping it leaves
+    the URL at the dashboard root — away adventurers cannot open a log."""
+    generated = _generate_dashboard(
+        {}, _three_child_states(), url="http://homeassistant.local/nestquest"
+    )
+    board_config = generated["views"][0]["cards"][0]
+    result = _render_party_board(
+        board_config,
+        _three_child_states(),
+        url="http://homeassistant.local/nestquest",
+        click_plate="Bo",
+    )
+    assert "Bo" not in result["tappable"]
+    assert result["location"] == "/nestquest"
+
+
+def test_quest_log_idle_return_navigates_to_the_board() -> None:
+    """After the idle window the quest log returns to the board using the
+    strategy-computed board_path (the dashboard root) — and it resolved
+    Ada from the URL's last segment first.  ``idle_return_seconds`` is
+    set by hand because the card's 40-second default is too slow for a
+    test; the strategy never generates that knob."""
+    generated = _generate_dashboard(
+        {}, _three_child_states(), url="http://homeassistant.local/nestquest"
+    )
+    log_config = {**generated["views"][1]["cards"][0], "idle_return_seconds": 1}
+    result = _render_quest_log(
+        log_config,
+        _three_child_states(),
+        url="http://homeassistant.local/nestquest/ada",
+        idle_ms=2000,
+    )
+    assert result["headline"] == "Ada's Quest Log"
+    assert result["location"] == "/nestquest"
