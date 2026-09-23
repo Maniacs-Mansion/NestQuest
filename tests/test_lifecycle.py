@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +15,7 @@ from custom_components.nestquest.const import (
 from custom_components.nestquest.dashboard import (
     DASHBOARD_STRATEGY_TYPE,
     DASHBOARD_URL_PATH,
+    async_register_dashboard,
 )
 
 
@@ -23,29 +23,86 @@ def _wire(entry, registry):
     return wire_entry_to_registry(entry, registry)
 
 
-class FakeDashboardsCollection:
-    """Stand-in for the Lovelace dashboards collection.
+class FakeDashboardStore:
+    """Stand-in for a per-dashboard CONTENT manager (LovelaceStorage).
 
-    Records ``async_create_item`` calls the way the real collection
-    would persist them, so tests can assert exactly what the setup path
-    registered — and that a reload registers nothing more.
+    In the real API the dashboard CONFIG (the strategy reference) is
+    saved through THIS manager's ``async_save``, NOT through the
+    metadata collection — so every strategy-save assertion reads here.
     """
 
-    def __init__(self, items=None):
+    def __init__(self) -> None:
+        self.saved: list[dict] = []
+        self.config: dict | None = None
+
+    async def async_save(self, config: dict) -> None:
+        self.saved.append(dict(config))
+        self.config = dict(config)
+
+
+class FakeDashboardsCollection:
+    """Stand-in mirroring the REAL Lovelace dashboards API shapes.
+
+    Faithful to ``homeassistant/components/lovelace`` +
+    ``helpers/collection.py``: ``async_items()`` is a SYNC ``@callback``
+    (ObservableCollection.async_items returns list(data.values())),
+    ``async_create_item`` IS async, and — mirroring lovelace's
+    ``storage_dashboard_changed`` listener — a successful create
+    registers a fresh CONTENT manager under
+    ``hass.data["lovelace"]["dashboards"][url_path]``, which is where
+    the dashboard config is then saved.  Records ``async_create_item``
+    calls so tests can assert exactly what the setup path registered —
+    and that a reload registers nothing more.
+    """
+
+    def __init__(self, hass, items=None) -> None:
+        self.hass = hass
         self.items = list(items or [])
         self.created: list[dict] = []
+        #: url_path -> content manager, mirroring the real listener's
+        # registrations (pre-existing items included).
+        self.stores: dict[str, FakeDashboardStore] = {}
 
-    async def async_items(self):
+    def async_items(self):
+        """SYNC, like the real ``ObservableCollection.async_items``."""
         return list(self.items)
 
     async def async_create_item(self, item_config: dict) -> None:
+        # The real collection awaits validation and change notification
+        # around the item insertion; yield first so two concurrent
+        # callers without a single-flight guard would BOTH get here.
+        await asyncio.sleep(0)
         self.created.append(dict(item_config))
         self.items.append(dict(item_config))
+        self.stores[item_config["url_path"]] = FakeDashboardStore()
+        self.hass.data["lovelace"]["dashboards"][item_config["url_path"]] = (
+            self.stores[item_config["url_path"]]
+        )
 
 
-def _install_dashboard_collection(hass, items=None) -> FakeDashboardsCollection:
-    collection = FakeDashboardsCollection(items)
-    hass.data["lovelace"] = SimpleNamespace(dashboards=collection)
+def _install_dashboard_collection(
+    hass, items=None
+) -> FakeDashboardsCollection:
+    """Install the REAL-API-shaped lovelace surfaces on the hass stub.
+
+    Mirrors what lovelace's ``async_setup`` leaves behind in storage
+    mode: ``hass.data["lovelace"]`` is a DICT with the metadata
+    collection under ``dashboards_collection`` and the per-url_path
+    CONTENT managers under ``dashboards``.  Any pre-existing item gets
+    a content manager, exactly as lovelace's change listener would
+    have registered one when the dashboard was created.
+    """
+    collection = FakeDashboardsCollection(hass, items)
+    hass.data["lovelace"] = {
+        "mode": "storage",
+        "dashboards": {},
+        "dashboards_collection": collection,
+    }
+    for item in collection.items:
+        url_path = item.get("url_path")
+        store = FakeDashboardStore()
+        collection.stores[url_path] = store
+        hass.data["lovelace"]["dashboards"][url_path] = store
     return collection
 
 
@@ -305,52 +362,76 @@ async def test_unload_shuts_coordinator_even_when_listener_removal_raises() -> N
 
 
 async def test_setup_creates_the_panel_dashboard(hass, make_entry) -> None:
-    """A fresh install gets the storage-mode strategy dashboard, with the
-    stable url_path, a title/icon, sidebar visibility and no YAML."""
+    """A fresh install gets the storage-mode strategy dashboard via the
+    REAL two-step Lovelace sequence: the METADATA (url_path, title,
+    icon, sidebar, single-word allowance — nothing else: the real
+    create schema rejects unknown keys like ``strategy``) through the
+    collection, then the dashboard CONFIG (the strategy reference)
+    through the fresh dashboard's content manager."""
     collection = _install_dashboard_collection(hass)
     entry = _wire(make_entry(), hass.registry)
     assert await async_setup_entry(hass, entry) is True
+    # Step 1: the metadata create through the collection.
     assert len(collection.created) == 1
     created = collection.created[0]
     assert created["url_path"] == DASHBOARD_URL_PATH
-    assert created["mode"] == "storage"
-    assert created["strategy"] == {"type": DASHBOARD_STRATEGY_TYPE}
     assert created["title"]
     assert created["show_in_sidebar"] is True
+    assert created["allow_single_word"] is True
     assert "icon" in created
+    # The create payload carries METADATA only: a ``strategy`` key is
+    # rejected by the real collection's create schema (the silent
+    # no-op the first implementation shipped).
+    assert "strategy" not in created
+    assert "mode" not in created
+    # Step 2: the strategy CONFIG saved through the content manager
+    # the create registered, with the custom strategy type.
+    store = hass.data["lovelace"]["dashboards"][DASHBOARD_URL_PATH]
+    assert store is collection.stores[DASHBOARD_URL_PATH]
+    assert store.saved == [{"strategy": {"type": DASHBOARD_STRATEGY_TYPE}}]
+    assert store.config == {"strategy": {"type": DASHBOARD_STRATEGY_TYPE}}
 
 
 async def test_setup_reload_does_not_duplicate_the_dashboard(
     hass, make_entry
 ) -> None:
     """A reload (or a second entry) must not create a second dashboard:
-    the one under the stable url_path is reused as-is."""
+    the one under the stable url_path is reused as-is — BOTH steps are
+    skipped, so the strategy config is not re-saved either."""
     collection = _install_dashboard_collection(hass)
     entry = _wire(make_entry(), hass.registry)
     assert await async_setup_entry(hass, entry) is True
     assert len(collection.created) == 1
+    store = hass.data["lovelace"]["dashboards"][DASHBOARD_URL_PATH]
+    assert len(store.saved) == 1
     # A reload: setup again on the same hass (the reload cycle) —
     # the existing dashboard must be left alone.
     await async_unload_entry(hass, entry)
     assert await async_setup_entry(hass, entry) is True
     assert len(collection.created) == 1
+    assert len(store.saved) == 1
     # And a second entry on the same install.
     other = _wire(make_entry(entry_id="other"), hass.registry)
     assert await async_setup_entry(hass, other) is True
     assert len(collection.created) == 1
+    assert len(store.saved) == 1
 
 
 async def test_setup_leaves_an_existing_user_dashboard_alone(
     hass, make_entry
 ) -> None:
     """A dashboard already occupying the stable url_path — the user's
-    own — is never overwritten, deleted or duplicated."""
+    own — is never overwritten, deleted or duplicated: no metadata
+    create AND no strategy save against its content manager."""
     users_dashboard = {"url_path": DASHBOARD_URL_PATH, "title": "My Board"}
     collection = _install_dashboard_collection(hass, items=[users_dashboard])
     entry = _wire(make_entry(), hass.registry)
     assert await async_setup_entry(hass, entry) is True
     assert collection.created == []
     assert collection.items[0] is users_dashboard
+    users_store = hass.data["lovelace"]["dashboards"][DASHBOARD_URL_PATH]
+    assert users_store.saved == []
+    assert users_store.config is None
 
 
 async def test_setup_succeeds_without_the_dashboards_collection(
@@ -376,8 +457,63 @@ async def test_setup_survives_a_failing_dashboards_collection(
         async def async_create_item(self, item_config):
             raise PermissionError("not an admin")
 
-    collection = _RefusingCollection()
-    hass.data["lovelace"] = SimpleNamespace(dashboards=collection)
+    collection = _RefusingCollection(hass)
+    hass.data["lovelace"] = {
+        "mode": "storage",
+        "dashboards": {},
+        "dashboards_collection": collection,
+    }
     entry = _wire(make_entry(), hass.registry)
     assert await async_setup_entry(hass, entry) is True
     assert collection.created == []
+
+
+async def test_setup_survives_a_failing_content_manager_save(
+    hass, make_entry
+) -> None:
+    """A content manager that refuses the config save after the
+    metadata create succeeded (storage write failure) logs a warning
+    and setup still succeeds — the dashboard exists, the strategy
+    simply was not persisted through it."""
+    class _RefusingStore(FakeDashboardStore):
+        async def async_save(self, config):
+            raise OSError("disk full")
+
+    class _StorelessCreateCollection(FakeDashboardsCollection):
+        async def async_create_item(self, item_config):
+            await asyncio.sleep(0)
+            self.created.append(dict(item_config))
+            self.items.append(dict(item_config))
+            self.stores[item_config["url_path"]] = _RefusingStore()
+            self.hass.data["lovelace"]["dashboards"][
+                item_config["url_path"]
+            ] = self.stores[item_config["url_path"]]
+
+    collection = _StorelessCreateCollection(hass)
+    hass.data["lovelace"] = {
+        "mode": "storage",
+        "dashboards": {},
+        "dashboards_collection": collection,
+    }
+    entry = _wire(make_entry(), hass.registry)
+    assert await async_setup_entry(hass, entry) is True
+    assert len(collection.created) == 1
+    store = hass.data["lovelace"]["dashboards"][DASHBOARD_URL_PATH]
+    assert store.saved == []
+
+
+async def test_concurrent_registrations_create_the_dashboard_once(hass) -> None:
+    """Two CONCURRENT registrations (the race two entry setups run)
+    must produce exactly ONE dashboard: the single-flight guard makes
+    the second caller's exists-check run after the first caller's
+    create completed, so it skips both steps.  The fake's create
+    yields before recording, so without the guard both callers would
+    pass the exists-check and the dashboard would be created twice."""
+    collection = _install_dashboard_collection(hass)
+    results = await asyncio.gather(
+        async_register_dashboard(hass),
+        async_register_dashboard(hass),
+    )
+    assert results == [True, True]
+    assert len(collection.created) == 1
+    assert len(collection.stores[DASHBOARD_URL_PATH].saved) == 1
