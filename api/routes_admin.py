@@ -116,6 +116,29 @@ owns every rule so the two routes cannot drift:
   a ``Content-Disposition`` attachment filename and the documented,
   stable header row (Admin spec §5 event-row fields).
 
+The settings routes (task 2b3de7e5) follow the same pattern over
+:mod:`nestquest_core.settings_store` — the API's OWN durable settings
+store.  The API now OWNS settings in the database (a validated JSON
+document in the existing ``nestquest_meta_state`` key/value table); the
+integration's Home-Assistant config-entry options remain a temporary,
+SEPARATE source until Feature 18 wires the client to the API — the two
+are deliberately not unified here:
+
+- ``GET /settings`` returns the current effective settings: all ten
+  documented fields (the rolling horizon, the day rollover time, the
+  notify target, the three notification times and the four enable
+  toggles) — the defaults on a fresh database.
+- ``PATCH /settings`` updates ONLY the supplied fields: the body is a
+  JSON object of settings field names to new values, passed STRAIGHT
+  to :func:`nestquest_core.settings_store.update_settings` — the
+  unknown-field rejection, the per-field validation (the core settings
+  validators: a positive int, strict ``HH:MM`` strings, real booleans)
+  and the validate-everything-before-write atomicity all live in the
+  core, so a rejected update never changes the stored settings.  A
+  JSON ``null`` value resets its field to the default (the settings
+  module's uniform None-as-absent rule).  The response is the updated
+  effective settings, the same shape ``GET`` returns.
+
 Error mapping (every children, quest-definition and presence route,
 deliberately narrow):
 
@@ -174,6 +197,13 @@ deliberately narrow):
   invalid, the same failure class Pydantic reports.  Only
   ``ValueError`` is caught, so an unexpected failure re-raises rather
   than becoming a 4xx.
+- The SETTINGS routes have no path ids either, so they have no 404
+  case: a body that is not a JSON object is FastAPI's 422 before any
+  handler code runs, and every core ``ValueError`` — an unknown field
+  or an invalid value, each naming the offending field, raised BEFORE
+  any write so the stored settings are never half-changed — is 422
+  (:func:`_raise_settings_error`).  Only ``ValueError`` is caught, so
+  an unexpected failure re-raises rather than becoming a 4xx.
 
 PATCH edit semantics: the body model's fields are optional and only
 SUPPLIED fields are forwarded (``model_dump(exclude_unset=True)``), so
@@ -205,6 +235,8 @@ from api.nestquest_core import (
     core_presence_management,
     core_quest_definitions,
     core_recurrence,
+    core_settings,
+    core_settings_store,
 )
 
 #: All admin-plane routes share this router; the ONE admin dependency
@@ -601,6 +633,27 @@ class AdminHistoryResponse(BaseModel):
     rows: list[AdminHistoryRow]
 
 
+class AdminSettingsResponse(BaseModel):
+    """The effective settings as the admin plane serializes them.
+
+    Mirrors the core :class:`~nestquest_core.settings.NestQuestSettings`
+    — all TEN documented fields, resolved (every absent stored field
+    already fell back to its default in the core).  The same shape both
+    the GET and the PATCH route answer with.
+    """
+
+    horizon_days: int
+    day_rollover_time: str
+    notify_target: str
+    morning_summary_time: str
+    afternoon_reminder_time: str
+    end_of_day_report_time: str
+    morning_summary_enabled: bool
+    afternoon_reminder_enabled: bool
+    end_of_day_report_enabled: bool
+    celebration_enabled: bool
+
+
 #: 404 detail for a child id the core layer reports as non-existent.
 _CHILD_NOT_FOUND_DETAIL = "Child not found"
 
@@ -732,6 +785,20 @@ def _raise_history_error(error: ValueError) -> NoReturn:
     message as the detail.  Only ``ValueError`` is caught by the
     handlers, so an unexpected failure re-raises rather than becoming a
     4xx.
+    """
+    raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+def _raise_settings_error(error: ValueError) -> NoReturn:
+    """Map a core settings-store ``ValueError`` onto 422 and raise it.
+
+    The settings routes have no path ids either, so they have no 404
+    case: every ``ValueError`` that survives to here is a rejected
+    change — an unknown field or an invalid value, each raised by the
+    core naming the offending field BEFORE any write, so the stored
+    settings are never half-changed — and is 422 with the core's
+    message as the detail.  Only ``ValueError`` is caught, so an
+    unexpected failure re-raises rather than becoming a 4xx.
     """
     raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -1401,6 +1468,29 @@ def _history_row_response(row: core_history.HistoryRow) -> AdminHistoryRow:
     )
 
 
+def _settings_response(
+    settings: core_settings.NestQuestSettings,
+) -> AdminSettingsResponse:
+    """Serialize one core NestQuestSettings into the documented payload.
+
+    Explicit field-by-field (not ``dataclasses.asdict``) so the payload
+    stays pinned to the ten documented fields even if the core
+    dataclass later grows another one.
+    """
+    return AdminSettingsResponse(
+        horizon_days=settings.horizon_days,
+        day_rollover_time=settings.day_rollover_time,
+        notify_target=settings.notify_target,
+        morning_summary_time=settings.morning_summary_time,
+        afternoon_reminder_time=settings.afternoon_reminder_time,
+        end_of_day_report_time=settings.end_of_day_report_time,
+        morning_summary_enabled=settings.morning_summary_enabled,
+        afternoon_reminder_enabled=settings.afternoon_reminder_enabled,
+        end_of_day_report_enabled=settings.end_of_day_report_enabled,
+        celebration_enabled=settings.celebration_enabled,
+    )
+
+
 @router.get(
     "/history",
     summary="Query the completion history for one filter and range",
@@ -1487,6 +1577,62 @@ async def admin_history_csv(
             "Content-Disposition": f'attachment; filename="{filename}"'
         },
     )
+
+
+@router.get(
+    "/settings",
+    summary="Read the effective settings",
+    response_model=AdminSettingsResponse,
+)
+async def admin_get_settings(request: Request) -> AdminSettingsResponse:
+    """Return the current effective settings (all ten documented fields).
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: ONE
+    :func:`nestquest_core.settings_store.load_settings` call — the API
+    owns settings in the database (the integration's HA options remain
+    a temporary separate source until Feature 18 wires the client to
+    the API), and the stored-document decode, the per-field validation
+    and the defaults-for-absent-fields fallback all live in the core.
+    A corrupt stored document never fails the read: the core falls
+    back to the defaults (per field where possible).
+    """
+    state: DatabaseState = request.app.state.db
+    settings = await core_settings_store.load_settings(state.database)
+    return _settings_response(settings)
+
+
+@router.patch(
+    "/settings",
+    summary="Update the supplied settings fields",
+    response_model=AdminSettingsResponse,
+)
+async def admin_update_settings(
+    changes: dict[str, object], request: Request
+) -> AdminSettingsResponse:
+    """Update the supplied settings fields and return the new state.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: the body — a
+    JSON object of settings field names to new values — goes STRAIGHT
+    to :func:`nestquest_core.settings_store.update_settings`, which
+    rejects an unknown field, resolves each supplied field through the
+    core settings validators (a JSON ``null`` resets its field to the
+    default) and merges onto the current effective settings only after
+    every value has validated — so a rejected update never changes the
+    stored settings.  Every core ``ValueError`` is 422
+    (:func:`_raise_settings_error`); anything else re-raises.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        settings = await core_settings_store.update_settings(
+            state.database, changes
+        )
+    except ValueError as error:
+        _raise_settings_error(error)
+    return _settings_response(settings)
 
 
 __all__ = ["router"]
