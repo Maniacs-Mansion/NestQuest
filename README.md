@@ -174,8 +174,23 @@ is simply a Home Assistant client.
    Assistant user it may also reach other permitted Home Assistant entities
    and services.
 
-2. **Build a dashboard with only the NestQuest panel cards.** Create a
-   Lovelace dashboard whose **URL slug is `nestquest`** (Settings →
+2. **Build a dashboard with only the NestQuest panel cards.** The
+   recommended path is the **zero-config dashboard strategy**: create a
+   Lovelace dashboard whose URL slug is `nestquest` with
+
+   ```yaml
+   strategy:
+     type: custom:nestquest-party
+   ```
+
+   and no views of your own — the strategy generates the party-board and
+   quest-log views (each already in Panel layout) from the household
+   roster at render time. Optional `url_path` and `weather_entity` keys
+   may sit beside `strategy:`. The manual instructions below describe
+   building the two views by hand if you prefer not to use the strategy.
+
+   **Manual alternative:** create a Lovelace dashboard whose **URL slug
+   is `nestquest`** (Settings →
    Dashboards → Edit → URL slug). A functional panel needs **two** views
    in that dashboard, each with its own card config from
    `design/ENTITIES-AND-SERVICES.md` §4. Give the views these exact URL
