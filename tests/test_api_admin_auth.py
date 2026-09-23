@@ -49,7 +49,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from api.app import create_app
-from api.auth import JwksCache
+from api.auth import ADMIN_GROUP, JwksCache
 from api.config import ApiConfig, ConfigError
 
 #: The configured OIDC settings the test apps run with (values a real
@@ -66,6 +66,16 @@ SUBJECT = "admin-user-1"
 
 #: The uniform 401 detail every rejection must carry.
 REJECTION_DETAIL = "Missing or invalid admin credentials"
+
+#: The 403 detail for the panel service token on an admin route.
+PANEL_TOKEN_REJECTION_DETAIL = (
+    "This credential type is not accepted for admin access"
+)
+
+#: The 403 detail for a valid JWT without the admin group.
+FORBIDDEN_DETAIL = (
+    "Admin access requires membership in the nestquest-admins group"
+)
 
 
 def _generate_key() -> rsa.RSAPrivateKey:
@@ -163,10 +173,20 @@ def _make_token(
     sub: str = SUBJECT,
     expires_in: int | None = 300,
     nbf_in: int | None = -1,
+    groups: object = (ADMIN_GROUP,),
 ) -> str:
-    """Mint one RS256 JWT the way Authentik would (its claims, our key)."""
+    """Mint one RS256 JWT the way Authentik would (its claims, our key).
+
+    ``groups`` defaults to the admin group (what a real admin user's
+    token carries); tests pass a different value — or ``None`` for NO
+    groups claim at all — to prove the group gate rejects it.
+    """
     now = int(time.time())
     claims: dict[str, object] = {"iss": iss, "aud": aud, "sub": sub, "iat": now}
+    if groups is not None:
+        claims["groups"] = (
+            list(groups) if isinstance(groups, (list, tuple)) else groups
+        )
     if nbf_in is not None:
         claims["nbf"] = now + nbf_in
     if expires_in is not None:
@@ -789,3 +809,108 @@ def test_from_env_requires_oidc_setting(env_var: str) -> None:
     env[env_var] = "   "
     with pytest.raises(ConfigError):
         ApiConfig.from_env(env)
+
+
+# --- the nestquest-admins group gate (task 0f2afb29) -------------------------
+
+
+async def test_admin_jwt_with_group_returns_200(
+    admin_client: httpx.AsyncClient,
+) -> None:
+    """A valid JWT whose groups claim names nestquest-admins returns 200."""
+    response = await admin_client.get(
+        "/api/v1/admin/ping",
+        headers={"Authorization": f"Bearer {_make_token()}"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "sub": SUBJECT}
+
+
+async def test_non_admin_jwt_is_forbidden(
+    admin_client: httpx.AsyncClient,
+) -> None:
+    """A valid JWT WITHOUT nestquest-admins in groups returns 403."""
+    token = _make_token(groups=("some-other-group",))
+    response = await admin_client.get(
+        "/api/v1/admin/ping",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == FORBIDDEN_DETAIL
+
+
+async def test_empty_groups_is_forbidden(
+    admin_client: httpx.AsyncClient,
+) -> None:
+    """A valid JWT with an EMPTY groups list returns 403."""
+    token = _make_token(groups=())
+    response = await admin_client.get(
+        "/api/v1/admin/ping",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("groups", ["nestquest-admins", None])
+async def test_malformed_groups_is_forbidden(
+    admin_client: httpx.AsyncClient, groups: object
+) -> None:
+    """A valid JWT with a non-list (or missing) groups claim returns 403.
+
+    Even a plain STRING naming the group is not enough — the claim must
+    be a list, so a token crafted with a scalar ``groups`` cannot pass.
+    """
+    token = _make_token(groups=groups)
+    response = await admin_client.get(
+        "/api/v1/admin/ping",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == FORBIDDEN_DETAIL
+
+
+async def test_panel_service_token_is_refused_outright(
+    temp_db_path: str,
+) -> None:
+    """The panel service token on an admin route is 403, never a JWT.
+
+    403 (not the uniform 401) proves the credential was refused as a
+    TYPE, not run through JWT verification — and the JWKS fetcher is
+    never called, proving it was not treated as a token to verify.
+    """
+    runner = _AdminRunner(temp_db_path, _jwks_for(ADMIN_KEY, KID))
+    async with runner as client:
+        response = await client.get(
+            "/api/v1/admin/ping",
+            headers={"Authorization": "Bearer admin-test-panel-token"},
+        )
+    assert response.status_code == 403
+    assert response.json()["detail"] == PANEL_TOKEN_REJECTION_DETAIL
+    assert runner.fetch.calls == 0
+
+
+async def test_admin_router_is_wired_through_require_admin(
+    temp_db_path: str,
+) -> None:
+    """The admin router's dependency IS the one require_admin dependency.
+
+    The router-level dependency list carries
+    :func:`api.auth.require_admin`, so every admin route (current and
+    later) inherits the service-token refusal and the group gate.
+    """
+    from api.auth import require_admin
+    from api.routes_admin import router as admin_router
+
+    dependencies = [d.dependency for d in admin_router.dependencies]
+    assert require_admin in dependencies
+
+    # Behavioral proof: the probe returns 200 for an admin JWT through
+    # the same dependency.
+    runner = _AdminRunner(temp_db_path, _jwks_for(ADMIN_KEY, KID))
+    async with runner as client:
+        response = await client.get(
+            "/api/v1/admin/ping",
+            headers={"Authorization": f"Bearer {_make_token()}"},
+        )
+    assert response.status_code == 200
+

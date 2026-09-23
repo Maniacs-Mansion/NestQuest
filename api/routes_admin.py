@@ -2,17 +2,17 @@
 
 The admin plane (``/api/v1/admin/*``, D-012) serves the admin PWA.
 Every route on :data:`router` requires a valid Authentik OIDC JWT
-through the ONE reusable dependency :func:`api.auth.require_admin_jwt`
-(declared once at the router level, so each later admin route added to
-this router inherits the check).
+whose ``groups`` claim names ``nestquest-admins``, through the ONE
+reusable dependency :func:`api.auth.require_admin` (declared once at
+the router level, so each later admin route added to this router
+inherits the check).  The panel service token is refused outright on
+this plane (403), never treated as a JWT.
 
 This task is the AUTH probe only: the ping route is a thin adapter
 that performs NO business logic and NO auth of its own — it reuses the
 router's already-verified claims (FastAPI caches a dependency's result
 per request, so the check runs exactly once) and returns the status
-plus the token's subject.  Authorization — membership in the
-``nestquest-admins`` group — is the NEXT task, layered onto
-:func:`api.auth.require_admin_jwt` so every admin route inherits it.
+plus the token's subject.
 """
 from __future__ import annotations
 
@@ -21,13 +21,15 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from api.auth import require_admin_jwt
+from api.auth import require_admin
 
-#: All admin-plane routes share this router; the JWT check is attached
-#: HERE so every admin route (current and later) requires it.
+#: All admin-plane routes share this router; the ONE admin dependency
+#: (service-token refusal + JWT verification + nestquest-admins group
+#: gate) is attached HERE so every admin route (current and later)
+#: requires it.
 router = APIRouter(
     prefix="/api/v1/admin",
-    dependencies=[Depends(require_admin_jwt)],
+    dependencies=[Depends(require_admin)],
 )
 
 
@@ -42,14 +44,14 @@ class AdminPingResponse(BaseModel):
 
 @router.get("/ping", summary="Admin plane probe")
 async def admin_ping(
-    claims: Annotated[dict[str, object], Depends(require_admin_jwt)],
+    claims: Annotated[dict[str, object], Depends(require_admin)],
 ) -> AdminPingResponse:
-    """Return 200 for a verified admin JWT (the plane's smoke probe).
+    """Return 200 for a verified JWT naming the nestquest-admins group.
 
-    Requires a valid Authentik JWT (checked by the router's shared
-    :func:`~api.auth.require_admin_jwt` dependency — the ONE token
-    check; this handler performs NO auth of its own).  ``claims`` is
-    the SAME verified-claims dict that dependency produced (FastAPI's
+    Requires a valid Authentik JWT with the admin group (checked by the
+    router's shared :func:`~api.auth.require_admin` dependency — the
+    ONE check; this handler performs NO auth of its own).  ``claims``
+    is the SAME verified-claims dict that dependency produced (FastAPI's
     per-request dependency cache), so the token is verified exactly
     once per request.
     """
