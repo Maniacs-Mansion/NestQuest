@@ -15,22 +15,26 @@ from custom_components.nestquest import config_flow
 from custom_components.nestquest import options_flow
 from custom_components.nestquest.const import (
     CONF_ADMIN_USER_IDS,
-    CONF_DAY_ROLLOVER_TIME,
-    CONF_HORIZON_DAYS,
-    CONF_PANEL_IDLE_TIMEOUT,
-    CONF_UPDATE_INTERVAL,
     CONF_AFTERNOON_REMINDER_ENABLED,
     CONF_AFTERNOON_REMINDER_TIME,
+    CONF_API_BASE_URL,
     CONF_CELEBRATION_ENABLED,
+    CONF_DAY_ROLLOVER_TIME,
     CONF_END_OF_DAY_REPORT_ENABLED,
     CONF_END_OF_DAY_REPORT_TIME,
+    CONF_HORIZON_DAYS,
     CONF_MORNING_SUMMARY_ENABLED,
     CONF_MORNING_SUMMARY_TIME,
     CONF_NOTIFY_TARGET,
+    CONF_PANEL_IDLE_TIMEOUT,
+    CONF_PANEL_TOKEN,
+    CONF_UPDATE_INTERVAL,
+    DEFAULT_API_BASE_URL,
     DEFAULT_AFTERNOON_REMINDER_TIME,
     DEFAULT_AUTOMATION_ENABLED,
     DEFAULT_END_OF_DAY_REPORT_TIME,
     DEFAULT_MORNING_SUMMARY_TIME,
+    DEFAULT_PANEL_TOKEN,
     DEFAULT_UPDATE_INTERVAL,
     DEFAULT_DAY_ROLLOVER_TIME,
     DEFAULT_HORIZON_DAYS,
@@ -49,8 +53,9 @@ VALID_INPUT = {
 }
 
 #: What a schema-validated submit produces from a bare VALID_INPUT on a
-#: fresh entry: the Feature 10 refresh interval and the Feature 11
-#: notification section fill from their defaults.
+#: fresh entry: the Feature 10 refresh interval, the Feature 11
+#: notification section, and the Feature 18 API connection fill from
+#: their defaults.
 FULL_INPUT = {
     **VALID_INPUT,
     CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
@@ -62,6 +67,8 @@ FULL_INPUT = {
     CONF_AFTERNOON_REMINDER_ENABLED: DEFAULT_AUTOMATION_ENABLED,
     CONF_END_OF_DAY_REPORT_ENABLED: DEFAULT_AUTOMATION_ENABLED,
     CONF_CELEBRATION_ENABLED: DEFAULT_AUTOMATION_ENABLED,
+    CONF_API_BASE_URL: DEFAULT_API_BASE_URL,
+    CONF_PANEL_TOKEN: DEFAULT_PANEL_TOKEN,
 }
 
 
@@ -259,6 +266,8 @@ def test_options_flow_schema_applies_stored_defaults() -> None:
         CONF_AFTERNOON_REMINDER_ENABLED: True,
         CONF_END_OF_DAY_REPORT_ENABLED: True,
         CONF_CELEBRATION_ENABLED: True,
+        CONF_API_BASE_URL: DEFAULT_API_BASE_URL,
+        CONF_PANEL_TOKEN: DEFAULT_PANEL_TOKEN,
         CONF_ADMIN_USER_IDS: [],
     }
 
@@ -272,6 +281,9 @@ def test_options_flow_schema_coerces_field_types() -> None:
     assert validators[CONF_HORIZON_DAYS] is int
     assert validators[CONF_DAY_ROLLOVER_TIME] is str
     assert validators[CONF_PANEL_IDLE_TIMEOUT] is int
+    # The Feature 18 API connection fields are free-text strings.
+    assert validators[CONF_API_BASE_URL] is str
+    assert validators[CONF_PANEL_TOKEN] is str
 
 
 @pytest.mark.parametrize("bad_horizon", [0, -5])
@@ -326,8 +338,10 @@ def test_options_flow_rejects_invalid_idle_timeout(bad_timeout) -> None:
     assert result["errors"] == {CONF_PANEL_IDLE_TIMEOUT: "invalid"}
 
 
-def test_options_flow_creates_entry_with_four_keys() -> None:
-    """A valid submit creates an entry with exactly the four validated keys."""
+def test_options_flow_creates_entry_with_validated_keys() -> None:
+    """A valid submit creates an entry with exactly the validated keys
+    (the legacy settings plus every later section's keys, filled from
+    defaults where the raw submit omitted them)."""
     flow = _make_flow(_make_entry())
     result = _run(flow.async_step_init(dict(VALID_INPUT)))
     assert result["type"] == "create_entry"
@@ -799,3 +813,91 @@ def test_options_flow_no_hard_coded_personal_target_in_source() -> None:
     assert const.__dict__.get("DEFAULT_NOTIFY_TARGET", "") == ""
     form = _run(_make_flow(_make_entry()).async_step_init(None))
     assert form["data_schema"]({})[CONF_NOTIFY_TARGET] == ""
+
+
+# ---------------------------------------------------------------------------
+# Panel-plane API connection section (Feature 18)
+# ---------------------------------------------------------------------------
+
+
+def test_options_flow_api_section_defaults_saved() -> None:
+    """A bare submit saves the API connection defaults: the const base
+    URL and an EMPTY panel token (no token is ever invented)."""
+    flow = _make_flow(_make_entry())
+    result = _run(flow.async_step_init(dict(VALID_INPUT)))
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_API_BASE_URL] == DEFAULT_API_BASE_URL
+    assert result["data"][CONF_PANEL_TOKEN] == ""
+
+
+def test_options_flow_api_base_url_must_be_full_http_url() -> None:
+    """Scheme-less, host-less, empty, and non-string base URLs reject
+    with a field error — the same rule the client's constructor
+    enforces, so a malformed URL fails at the form, not at the first
+    request."""
+    flow = _make_flow(_make_entry())
+    for bad_url in ("api.lan:8000", "http://", "", "   ", 42):
+        result = _run(
+            flow.async_step_init(
+                {**VALID_INPUT, CONF_API_BASE_URL: bad_url}
+            )
+        )
+        assert result["type"] == "form"
+        assert result["errors"] == {CONF_API_BASE_URL: "invalid_url"}
+
+
+def test_options_flow_panel_token_validation() -> None:
+    """The EMPTY token is valid (the API connection is simply not
+    configured yet); padded and non-string values reject — a padded
+    paste would fail the token check at request time instead."""
+    flow = _make_flow(_make_entry())
+    result = _run(
+        flow.async_step_init({**VALID_INPUT, CONF_PANEL_TOKEN: ""})
+    )
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_PANEL_TOKEN] == ""
+
+    for bad_token in ("  secret  ", "   ", 42):
+        flow = _make_flow(_make_entry())
+        result = _run(
+            flow.async_step_init(
+                {**VALID_INPUT, CONF_PANEL_TOKEN: bad_token}
+            )
+        )
+        assert result["type"] == "form"
+        assert result["errors"] == {CONF_PANEL_TOKEN: "invalid"}
+
+
+def test_options_flow_api_section_stored_values_round_trip() -> None:
+    """Stored API settings are the form's defaults and a raw legacy
+    submit without them keeps the stored values."""
+    entry = _make_entry(
+        options={
+            **VALID_INPUT,
+            CONF_API_BASE_URL: "http://panel.lan:8443",
+            CONF_PANEL_TOKEN: "stored-token",
+        }
+    )
+    flow = _make_flow(entry)
+    form = _run(flow.async_step_init(None))
+    schema_defaults = form["data_schema"]({})
+    assert schema_defaults[CONF_API_BASE_URL] == "http://panel.lan:8443"
+    assert schema_defaults[CONF_PANEL_TOKEN] == "stored-token"
+
+    # A raw submit carrying only the legacy keys keeps the stored
+    # API connection settings.
+    result = _run(flow.async_step_init(dict(VALID_INPUT)))
+    assert result["type"] == "create_entry"
+    assert result["data"][CONF_API_BASE_URL] == "http://panel.lan:8443"
+    assert result["data"][CONF_PANEL_TOKEN] == "stored-token"
+
+
+def test_options_flow_strings_cover_api_section(
+    strings: dict, translations_en: dict
+) -> None:
+    """Both string files name the API fields and the URL error."""
+    data = strings["options"]["step"]["init"]["data"]
+    for key in (CONF_API_BASE_URL, CONF_PANEL_TOKEN):
+        assert data.get(key), f"Missing field name for '{key}'"
+    assert strings["options"]["errors"]["invalid_url"]
+    assert translations_en["options"] == strings["options"]
