@@ -2,7 +2,10 @@
 
 These tests exercise the NestQuest API's admin plane against the ASGI
 app with httpx, using a locally generated RSA key pair and a stubbed
-JWKS fetcher — NO network access:
+JWKS fetcher — NO network access.  That harness (the key pairs, the
+JWKS builder, the token minting and the app runner) is shared with the
+other admin-plane route tests in :mod:`tests.admin_jwt_harness`; this
+module imports it and proves the auth CONTRACT itself:
 
 - ``GET /api/v1/admin/ping`` requires a valid Authentik OIDC JWT: a
   request with NO ``Authorization`` header and a MALFORMED header
@@ -41,28 +44,24 @@ import asyncio
 import base64
 import json
 import time
-from pathlib import Path
 
 import httpx
-import jwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric import rsa
 
-from api.app import create_app
-from api.auth import ADMIN_GROUP, JwksCache
+from api.auth import JwksCache
 from api.config import ApiConfig, ConfigError
-
-#: The configured OIDC settings the test apps run with (values a real
-#: deployment would get from the NESTQUEST_OIDC_* environment vars).
-ISSUER = "https://authentik.example.com/application/o/nestquest/"
-AUDIENCE = "nestquest-api"
-JWKS_URL = "https://authentik.example.com/application/o/nestquest/jwks/"
-
-#: The ``kid`` the test tokens carry, matching the JWKS entry.
-KID = "admin-test-key-1"
-
-#: The subject a valid token authenticates as.
-SUBJECT = "admin-user-1"
+from tests.admin_jwt_harness import (
+    ADMIN_KEY,
+    AUDIENCE,
+    ISSUER,
+    JWKS_URL,
+    KID,
+    OTHER_KEY,
+    SUBJECT,
+    AdminRunner as _AdminRunner,
+    jwks_for as _jwks_for,
+    make_token as _make_token,
+)
 
 #: The uniform 401 detail every rejection must carry.
 REJECTION_DETAIL = "Missing or invalid admin credentials"
@@ -76,53 +75,6 @@ PANEL_TOKEN_REJECTION_DETAIL = (
 FORBIDDEN_DETAIL = (
     "Admin access requires membership in the nestquest-admins group"
 )
-
-
-def _generate_key() -> rsa.RSAPrivateKey:
-    """Generate one local RSA key pair (no network, no fixtures)."""
-    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
-
-
-#: The key pair whose PUBLIC half the stubbed JWKS publishes — tokens
-#: signed with it verify; the second pair below proves they don't when
-#: signed otherwise.
-ADMIN_KEY = _generate_key()
-OTHER_KEY = _generate_key()
-
-
-def _b64url_uint(value: int) -> str:
-    """Base64url-encode a non-negative integer (no padding), per JWK."""
-    raw = value.to_bytes((value.bit_length() + 7) // 8, "big")
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-
-
-def _jwks_for(private_key: rsa.RSAPrivateKey, kid: str) -> dict[str, object]:
-    """Build a JWKS document publishing ``private_key``'s public half."""
-    numbers = private_key.public_key().public_numbers()
-    return {
-        "keys": [
-            {
-                "kty": "RSA",
-                "use": "sig",
-                "alg": "RS256",
-                "kid": kid,
-                "n": _b64url_uint(numbers.n),
-                "e": _b64url_uint(numbers.e),
-            }
-        ]
-    }
-
-
-class _StubbedFetch:
-    """A JWKS fetcher stub: returns a fixed document, counts calls."""
-
-    def __init__(self, document: dict[str, object]) -> None:
-        self.document = document
-        self.calls = 0
-
-    async def __call__(self, url: str) -> dict[str, object]:
-        self.calls += 1
-        return self.document
 
 
 class _FailingFetch:
@@ -164,41 +116,6 @@ class _FailThenServe:
         return self.document
 
 
-def _make_token(
-    signing_key: rsa.RSAPrivateKey = ADMIN_KEY,
-    *,
-    kid: str | None = KID,
-    iss: str = ISSUER,
-    aud: object = AUDIENCE,
-    sub: str = SUBJECT,
-    expires_in: int | None = 300,
-    nbf_in: int | None = -1,
-    groups: object = (ADMIN_GROUP,),
-) -> str:
-    """Mint one RS256 JWT the way Authentik would (its claims, our key).
-
-    ``groups`` defaults to the admin group (what a real admin user's
-    token carries); tests pass a different value — or ``None`` for NO
-    groups claim at all — to prove the group gate rejects it.
-    """
-    now = int(time.time())
-    claims: dict[str, object] = {"iss": iss, "aud": aud, "sub": sub, "iat": now}
-    if groups is not None:
-        claims["groups"] = (
-            list(groups) if isinstance(groups, (list, tuple)) else groups
-        )
-    if nbf_in is not None:
-        claims["nbf"] = now + nbf_in
-    if expires_in is not None:
-        claims["exp"] = now + expires_in
-    headers: dict[str, str] = {}
-    if kid is not None:
-        headers["kid"] = kid
-    return jwt.encode(
-        claims, signing_key, algorithm="RS256", headers=headers
-    )
-
-
 def _token_with_header(
     header: dict[str, object], payload: dict[str, object]
 ) -> str:
@@ -224,79 +141,6 @@ def _verified_payload() -> dict[str, object]:
         "exp": now + 300,
         "nbf": now - 1,
     }
-
-
-class _AdminRunner:
-    """Run the app's lifespan around an httpx AsyncClient.
-
-    Same pattern as test_api_health.py's ``_AppRunner``: httpx's ASGI
-    transport does not run the lifespan, so it is driven explicitly and
-    shut down in ``__aexit__``'s finally block even on failure.
-
-    The app's JWKS cache is replaced (before the lifespan runs) with
-    one built around a counting stub fetcher, so verification goes
-    through the REAL cache logic but never the network.
-    """
-
-    def __init__(
-        self,
-        db_path: str,
-        jwks_document: dict[str, object],
-        *,
-        ttl_seconds: float | None = None,
-        backoff_seconds: float | None = None,
-        kid_refetch_seconds: float | None = None,
-    ) -> None:
-        self.app = create_app(
-            ApiConfig(
-                db_path=db_path,
-                panel_token="admin-test-panel-token",
-                oidc_issuer=ISSUER,
-                oidc_audience=AUDIENCE,
-                oidc_jwks_url=JWKS_URL,
-            )
-        )
-        self.fetch = _StubbedFetch(jwks_document)
-        cache_kwargs: dict[str, float] = {}
-        if ttl_seconds is not None:
-            cache_kwargs["ttl_seconds"] = ttl_seconds
-        if backoff_seconds is not None:
-            cache_kwargs["backoff_seconds"] = backoff_seconds
-        if kid_refetch_seconds is not None:
-            cache_kwargs["kid_refetch_seconds"] = kid_refetch_seconds
-        self.app.state.jwks_cache = JwksCache(
-            JWKS_URL, fetcher=self.fetch, **cache_kwargs
-        )
-
-    async def __aenter__(self) -> httpx.AsyncClient:
-        self._lifespan = self.app.router.lifespan_context(self.app)
-        await self._lifespan.__aenter__()
-        self._client = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=self.app),
-            base_url="http://testserver",
-        )
-        return await self._client.__aenter__()
-
-    async def __aexit__(self, *exc) -> None:
-        try:
-            await self._client.__aexit__(*exc)
-        finally:
-            await self._lifespan.__aexit__(*exc)
-
-
-@pytest.fixture
-def temp_db_path(tmp_path: Path) -> str:
-    """A fresh per-test SQLite path under pytest's tmp_path."""
-    return str(tmp_path / "nestquest.db")
-
-
-@pytest.fixture
-async def admin_client(
-    temp_db_path: str,
-) -> httpx.AsyncClient:
-    """An app client whose provider publishes the admin test key."""
-    async with _AdminRunner(temp_db_path, _jwks_for(ADMIN_KEY, KID)) as client:
-        yield client
 
 
 # --- the happy path -------------------------------------------------------

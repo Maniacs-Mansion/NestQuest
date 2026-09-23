@@ -33,7 +33,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+
+from tests.admin_jwt_harness import ADMIN_KEY, KID, AdminRunner, jwks_for
 
 # ---------------------------------------------------------------------------
 # Homeassistant module provisioning (explicitly mock-only).
@@ -954,3 +957,24 @@ def freeze_nestquest_clock(
     )
     monkeypatch.setattr(nestquest, "datetime", fake_module)
     return frozen, requested
+
+
+# ---------------------------------------------------------------------------
+# Admin-plane API fixtures (shared by the admin-plane test modules).
+#
+# The local-key/stubbed-JWKS harness itself lives in
+# :mod:`tests.admin_jwt_harness` (imported by name, the same pattern as
+# tests.blueprint_helpers); these fixtures hand its runner to every test
+# module in tests/ without re-declaring it.
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def temp_db_path(tmp_path: Path) -> str:
+    """A fresh per-test SQLite path under pytest's tmp_path."""
+    return str(tmp_path / "nestquest.db")
+
+
+@pytest.fixture
+async def admin_client(temp_db_path: str) -> httpx.AsyncClient:
+    """An app client whose provider publishes the admin test key."""
+    async with AdminRunner(temp_db_path, jwks_for(ADMIN_KEY, KID)) as client:
+        yield client

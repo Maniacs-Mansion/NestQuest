@@ -124,8 +124,13 @@ core_events = importlib.import_module(f"{_CORE_MODULE_NAME}.events")
 #: the snapshot builder's ``settings`` parameter takes.
 core_settings = importlib.import_module(f"{_CORE_MODULE_NAME}.settings")
 
+#: The children business layer (``core.children.create_child`` et al.)
+#: the admin plane's children routes call.
+core_children = importlib.import_module(f"{_CORE_MODULE_NAME}.children")
+
 __all__ = [
     "core",
+    "core_children",
     "core_completion",
     "core_db",
     "core_events",
