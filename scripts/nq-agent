@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 4 ]]; then
+  echo "usage: nq-agent developer|approver WORKTREE TITLE PROMPT_FILE" >&2
+  exit 64
+fi
+
+role=$1
+worktree=$2
+title=$3
+prompt_file=$4
+case "$role" in developer|approver) ;; *) echo "invalid role: $role" >&2; exit 64 ;; esac
+[[ -d "$worktree" && -f "$prompt_file" ]] || { echo "missing worktree or prompt" >&2; exit 66; }
+
+repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+export OPENCODE_CONFIG_DIR="$repo_dir/.opencode"
+opencode_bin=${OPENCODE_BIN:-/home/overseer/.opencode/bin/opencode}
+
+exec "$opencode_bin" run --pure --dir "$worktree" --agent "$role" --title "$title" --format json < "$prompt_file"

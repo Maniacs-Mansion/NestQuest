@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""Durable, single-owner controller for one NestQuest OpenCode tick at a time."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import signal
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.request
+
+
+DEFAULT_PROJECT = Path("/mnt/ai-storage/projects/NestQuest")
+DEFAULT_STATE = Path.home() / ".local/state/nestquest-controller"
+STATE_RE = re.compile(r"(?m)^ORCHESTRATOR_STATE: (CONTINUE|QUIESCENT|BLOCKED)\s*$")
+MAX_TEXT = 64_000
+MAX_LINE = 4_000_000
+CTXD_PROJECT = "nestquest-house-chaos-coordination"
+CTXD_FILE = "OPENCODE-ORCHESTRATOR-PROMPT.MD"
+
+
+def check_ctxd() -> int:
+    """Use OpenCode's configured endpoint, never an unrelated host DB."""
+    config = json.loads((Path.home() / ".config/opencode/opencode.json").read_text())
+    mcp = config["mcp"]["ctxd"]
+    configured_url = mcp["url"].rstrip("/")
+    if not configured_url.endswith("/mcp"):
+        raise RuntimeError("CTXD MCP URL must end in /mcp")
+    endpoint = configured_url.removesuffix("/mcp")
+    url = f"{endpoint}/projects/{CTXD_PROJECT}/files/{CTXD_FILE}"
+    with urllib.request.urlopen(
+        urllib.request.Request(url, headers=mcp["headers"]), timeout=8
+    ) as response:
+        record = json.load(response)
+    if (
+        record.get("project_id") != CTXD_PROJECT
+        or record.get("file_path") != CTXD_FILE
+        or "CONTROLLER_TICK" not in record.get("content", "")
+    ):
+        raise RuntimeError("CTXD returned the wrong NestQuest prompt")
+    return int(record["version"])
+
+
+def interactive_nestquest_session(
+    project: Path,
+    proc_root: Path = Path("/proc"),
+    database: Path = Path.home() / ".local/share/opencode/opencode.db",
+) -> bool:
+    """Avoid racing a user-owned OpenCode TUI for the same repository."""
+    try:
+        db = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    except sqlite3.Error as error:
+        raise RuntimeError("OpenCode session database is unavailable") from error
+    try:
+        for entry in proc_root.iterdir():
+            if not entry.name.isdecimal() or int(entry.name) == os.getpid():
+                continue
+            try:
+                args = (entry / "cmdline").read_bytes().split(b"\0")
+                args = [a.decode(errors="replace") for a in args if a]
+                if not args or Path(args[0]).name != "opencode":
+                    continue
+                if len(args) > 1 and args[1] in ("run", "debug"):
+                    continue
+                session = None
+                for flag in ("-s", "--session"):
+                    if flag in args and args.index(flag) + 1 < len(args):
+                        session = args[args.index(flag) + 1]
+                        break
+                if session:
+                    row = db.execute("SELECT directory FROM session WHERE id=?", (session,)).fetchone()
+                    if row and Path(row[0]).resolve() == project.resolve():
+                        return True
+                elif "--dir" in args and args.index("--dir") + 1 < len(args):
+                    if Path(args[args.index("--dir") + 1]).resolve() == project.resolve():
+                        return True
+                elif (entry / "cwd").resolve() == project.resolve():
+                    return True
+            except sqlite3.Error as error:
+                raise RuntimeError("OpenCode session lookup failed") from error
+            except TypeError as error:
+                raise RuntimeError("OpenCode session directory is invalid") from error
+            except (OSError, PermissionError):
+                continue
+    finally:
+        db.close()
+    return False
+
+
+def parse_event(raw: str) -> tuple[str | None, str | None]:
+    try:
+        event = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, None
+    if not isinstance(event, dict):
+        return None, None
+    kind = event.get("type")
+    part = event.get("part") or {}
+    if kind == "text" and isinstance(part, dict):
+        return part.get("text"), None
+    if kind == "error":
+        error = event.get("error") or {}
+        known = {"ProviderAuthError", "UnknownError", "MessageOutputLengthError", "MessageAbortedError", "StructuredOutputError", "ContextOverflowError", "APIError"}
+        name = error.get("name") if isinstance(error, dict) else None
+        return None, name if name in known else "OpenCode error"
+    return None, None
+
+
+def run_tick(command: list[str], env: dict[str, str], prompt: str, timeout: int) -> tuple[int, str, str | None]:
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        start_new_session=True,
+    )
+    assert process.stdin is not None and process.stdout is not None
+    try:
+        process.stdin.write(prompt.encode())
+    except BrokenPipeError:
+        pass
+    finally:
+        process.stdin.close()
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    buffer = b""
+    texts: list[str] = []
+    last_error: str | None = None
+    diagnostic_lines = 0
+    try:
+        while selector.get_map():
+            if time.monotonic() >= deadline:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+                return 124, "".join(texts)[-MAX_TEXT:], "controller tick exceeded documented timeout"
+            for key, _ in selector.select(timeout=1):
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    text, error = parse_event(line.decode(errors="replace"))
+                    if not line.lstrip().startswith(b"{"):
+                        diagnostic_lines += 1
+                    if text:
+                        texts.append(text)
+                        if sum(map(len, texts)) > MAX_TEXT:
+                            texts = ["".join(texts)[-MAX_TEXT:]]
+                    if error:
+                        last_error = error
+                if len(buffer) > MAX_LINE:
+                    buffer = b""  # A tool-output event is not a controller verdict.
+        if buffer:
+            text, error = parse_event(buffer.decode(errors="replace"))
+            if text:
+                texts.append(text)
+            if error:
+                last_error = error
+        code = process.wait()
+        if code and last_error is None and diagnostic_lines:
+            last_error = f"OpenCode emitted {diagnostic_lines} non-JSON diagnostic lines"
+        return code, "".join(texts)[-MAX_TEXT:], last_error
+    finally:
+        selector.close()
+        process.stdout.close()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--project", type=Path, default=DEFAULT_PROJECT)
+    parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("--once", action="store_true", help="run only one model turn")
+    parser.add_argument("--check", action="store_true", help="validate paths without calling a model")
+    parser.add_argument("--check-interactive", action="store_true", help="report an open NestQuest TUI without calling a model")
+    parser.add_argument("--tick-timeout", type=int, default=6 * 3600)
+    args = parser.parse_args()
+
+    project = args.project.resolve()
+    control_home = Path(__file__).resolve().parent.parent
+    config_dir = control_home / ".opencode"
+    binary = Path(os.environ.get("OPENCODE_BIN", "/home/overseer/.opencode/bin/opencode"))
+    if not (project.is_dir() and config_dir.is_dir() and binary.is_file()):
+        parser.error("project, agent configuration, or OpenCode binary is missing")
+    if args.check:
+        try:
+            ctxd_version = check_ctxd()
+        except (OSError, KeyError, ValueError, RuntimeError) as error:
+            print(f"CTXD preflight failed: {type(error).__name__}", file=sys.stderr)
+            return 1
+        print(f"ready: project={project} configuration={config_dir} binary={binary} ctxd_prompt_version={ctxd_version}")
+        return 0
+    if args.check_interactive:
+        try:
+            active = interactive_nestquest_session(project)
+        except RuntimeError:
+            print("OpenCode session state unavailable", file=sys.stderr)
+            return 77
+        print("interactive NestQuest session open" if active else "no interactive NestQuest session")
+        return 0
+
+    args.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(args.state_dir, 0o700)
+    with (args.state_dir / "controller.lock").open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("another NestQuest controller is running", file=sys.stderr)
+            return 75
+        command = [str(binary), "run", "--pure", "--dir", str(project), "--agent", "orchestrator", "--format", "json", "--title", "NestQuest controller tick"]
+        env = os.environ.copy()
+        env["OPENCODE_CONFIG_DIR"] = str(config_dir)
+        env["NESTQUEST_CONTROL_HOME"] = str(control_home)
+        failures = 0
+        while True:
+            try:
+                interactive = interactive_nestquest_session(project)
+            except RuntimeError:
+                print("OpenCode session state unavailable; waiting", file=sys.stderr, flush=True)
+                if args.once:
+                    return 77
+                time.sleep(60)
+                continue
+            if interactive:
+                print("interactive NestQuest session still open; waiting", flush=True)
+                if args.once:
+                    return 75
+                time.sleep(60)
+                continue
+            prompt = (
+                "Run one NestQuest controller tick. Read CTXD and Maestro afresh, "
+                "reconcile Git and PR state, then execute the next eligible action. "
+                "Use NESTQUEST_CONTROL_HOME for role launch scripts. "
+                "Return a final ORCHESTRATOR_STATE line as your agent instructions require."
+            )
+            status, answer, error = run_tick(command, env, prompt, args.tick_timeout)
+            states = STATE_RE.findall(answer)
+            state = states[-1] if status == 0 and error is None and states else "ERROR"
+            if state == "CONTINUE":
+                failures = 0
+            elif state == "QUIESCENT":
+                failures = 0
+            elif state == "BLOCKED":
+                failures = 0
+            else:
+                failures += 1
+            summary = {"time": int(time.time()), "state": state, "exit_code": status, "error": error, "failure_count": failures, "answer_tail": answer[-4000:]}
+            target = args.state_dir / "last-run.json"
+            temporary = args.state_dir / "last-run.json.tmp"
+            temporary.write_text(json.dumps(summary, indent=2) + "\n")
+            os.chmod(temporary, 0o600)
+            temporary.replace(target)
+            print(f"tick state={state} exit={status} failures={failures}", flush=True)
+            if args.once:
+                return 0 if state in ("CONTINUE", "QUIESCENT") else 77
+            if state == "BLOCKED" or failures >= 3:
+                print("controller blocked; inspect last-run.json", file=sys.stderr)
+                return 77
+            time.sleep(300 if state == "QUIESCENT" else min(120, 10 * 2**failures))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
