@@ -1,13 +1,23 @@
-# NestQuest controller
+# NestQuest foreground orchestrator
 
-OpenCode 1.18.31 loads the three named agents from `.opencode/agents/`. Their
-models match the current NestQuest CTXD prompt: DeepSeek V4.1
-Flash for controller and approver, GLM 5.3 Flash for development. The
-controller runs one OpenCode turn at a time, then starts a fresh turn based on
-Maestro, CTXD, Git, and pull-request state. Its state file is
-`~/.local/state/nestquest-controller/last-run.json` (mode 0600). A lock allows
-only one controller process. It waits while an interactive OpenCode session is
-open for the NestQuest checkout.
+OpenCode 1.18.32 loads the named agents from `.opencode/agents/`. Their
+models match the current NestQuest CTXD prompt: DeepSeek V4.1 Flash for the
+foreground orchestrator and approver, and GLM 5.3 Flash for development.
+Run orchestration directly from a shell:
+
+```bash
+nq-orchestrate
+nq-orchestrate mission.md
+cat mission.md | nq-orchestrate -
+nq-orchestrate --print-prompt > nestquest-orchestrator.md
+```
+
+The launcher renders the project prompt with the foreground terminal runtime,
+stops the dormant legacy service, refuses immediately when another NestQuest
+TUI is open, and then replaces itself with OpenCode using
+`terminal-orchestrator`. There is no background polling process and no wait
+for a controller tick. Exit or interrupt the TUI to stop the foreground run;
+resume that OpenCode session when a host-forced yield needs continuation.
 
 `scripts/nq-agent` launches developer and approver sessions with fixed agent
 definitions and no `--auto` flag. Headless OpenCode runs use `--pure` so the
@@ -23,30 +33,24 @@ checks the head again afterward, saves
 the output under `/tmp/opencode`, and posts the Gitea approval.
 The approver verifies the reviewed head again before a merge.
 
-The production service uses a stable copy of this configuration and scripts
+The terminal launcher uses a stable copy of this configuration and scripts
 at `/home/overseer/.local/share/nestquest-controller`; it does not depend on
 which task branch is checked out in the primary NestQuest directory. Install
-that copy, run `scripts/nq-controller --check`, and verify all four OpenCode
-agents (orchestrator, developer, approver, cycle-control)
+that copy, run `scripts/nq-controller --check`, and verify the OpenCode
+agents (terminal-orchestrator, developer, and approver)
 with `opencode debug agent <name>` while `OPENCODE_CONFIG_DIR` points at the
-installed `.opencode` directory. Install `deploy/nestquest-controller.service`
-under `~/.config/systemd/user/` and reload the user manager. Its lack of an
-`[Install]` section makes it a manual-only unit; development starts only
-when requested. Copy `deploy/opencode-global-commands/*.md` into
-`~/.config/opencode/commands/` and `.opencode/agents/cycle-control.md` into
-`~/.config/opencode/agents/` for the commands to work from older branches.
-The host has lingering
-enabled for the `overseer` user. The service waits for an open interactive
-NestQuest session to close before starting work.
+installed `.opencode` directory. Install `scripts/nq-orchestrate` in
+`~/.local/bin/`. For the global slash command, also install
+`.opencode/agents/terminal-orchestrator.md` under
+`~/.config/opencode/agents/` and
+`deploy/opencode-global-commands/start-nestquest-development.md` under
+`~/.config/opencode/commands/`. The old `nestquest-controller.service` remains static and
+inactive only for migration safety; foreground launch stops it.
 
-In NestQuest's OpenCode session, use `/start-development`,
-`/stop-development`, or `/development-status`. The matching global
-`/start-nestquest-development`, `/stop-nestquest-development`, and
-`/nestquest-development-status` commands work even while an older branch is
-checked out. Starting the unit in an interactive NestQuest session puts it
-in a waiting state; close that session to let the first controller tick run.
-The commands call `scripts/nq-cycle`; they do not run a developer inside
-the interactive chat.
+Inside an already-open OpenCode TUI, `/start-development` (or the global
+`/start-nestquest-development`) switches to the same foreground
+`terminal-orchestrator` behavior immediately. The shell launcher is the
+preferred entry point when supplying a mission prompt file.
 
 `templates/ORCHESTRATOR-PROMPT.template.md` and
 `templates/nestquest.profile.json` make the current CTXD cycle prompt
@@ -63,11 +67,10 @@ they are not a hard isolation boundary against a process running as that
 account. Strong isolation requires separate OS identities and protected
 credentials for the controller, reviewer, and approver.
 
-A tick has an explicit six-hour timeout. On timeout or an OpenCode error, the
-next tick must reconcile external state before acting. Three consecutive
-failed ticks stop the service. A BLOCKED verdict also stops it. QUIESCENT
-causes a five-minute poll. Neither a feature merge nor a progress report
-stops the controller while eligible work remains.
+The terminal runtime repeatedly executes CONTROLLER_TICK within the foreground
+session. Neither a feature merge nor a progress report ends the run while
+eligible work remains. A host-forced yield returns a continuation checkpoint
+that can be resumed in the same OpenCode session.
 
 Do not put tokens in this repository or in unit files. Existing OpenCode MCP
 connections supply CTXD and Maestro. Rotate those MCP tokens as a coordinated

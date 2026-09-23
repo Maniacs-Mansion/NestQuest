@@ -22,9 +22,8 @@ class CyclePromptTests(unittest.TestCase):
             "RELEASE_BRANCH": "production",
             "CONTROL_HOME": "/opt/examplequest/controller",
             "SERVICE_NAME": "examplequest-controller.service",
-            "START_COMMAND": "/start-examplequest-development",
-            "STOP_COMMAND": "/stop-examplequest-development",
-            "STATUS_COMMAND": "/examplequest-development-status",
+            "PROJECT_ROOT": "/srv/examplequest",
+            "TERMINAL_LAUNCHER": "eq-orchestrate",
             "FEATURE_BRANCH_EXAMPLE": "feature/EQ-17",
         })
         output = RENDER(TEMPLATE, other)
@@ -43,6 +42,14 @@ class CyclePromptTests(unittest.TestCase):
         del other["PROJECT_NAME"]
         with self.assertRaisesRegex(ValueError, "PROJECT_NAME"):
             RENDER(TEMPLATE, other)
+
+    def test_template_contains_only_terminal_runtime(self):
+        output = RENDER(TEMPLATE, PROFILE)
+        self.assertIn("# 27. FOREGROUND TERMINAL RUNTIME", output)
+        self.assertIn("nq-orchestrate", output)
+        self.assertNotIn("# 27. HOST CONTROLLER RUNTIME", output)
+        self.assertNotIn("The persistent user service runs", output)
+        self.assertNotIn("---\n\n---\n\n# 27", output)
 
 
 if __name__ == "__main__":
