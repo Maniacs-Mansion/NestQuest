@@ -1,0 +1,15 @@
+# Runtime dependency manifest for the NestQuest API deployable.
+#
+# The monorepo's pyproject.toml carries fastapi/uvicorn/pyjwt/httpx in
+# the INTEGRATION's dev group only (so the test venv can exercise the
+# API); they are deliberately NOT integration runtime dependencies.
+# Per that manifest's own comment, the API deployable declares its own
+# runtime dependencies HERE — this file is what the container image
+# installs (see the Dockerfile at the repository root).
+#
+# Compatible ranges mirroring the dev group's floors; the API is a
+# server, so these are the only packages its runtime needs.
+fastapi>=0.115
+uvicorn>=0.30
+pyjwt[crypto]>=2.9
+httpx>=0.28
