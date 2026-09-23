@@ -6,7 +6,10 @@ call time through the injected ``find_runtime`` callable.  Permission
 checks are Feature 09 later tasks — this module only validates payload
 shape and forwards to the Feature 03/06/08 business layers (the
 presence writes included, through :mod:`.presence_management` — the
-ONE implementation the API admin plane shares).
+ONE implementation the API admin plane shares).  Since Feature 18 the
+integration is a client of the NestQuest API service, so
+``complete_quest`` proxies to the API's panel complete route through
+the entry's shared API client instead of writing any database.
 ``export_history_csv`` is registered with a schema but raises until
 Feature 13.  ``regenerate`` is supplied by the caller so
 the Feature 07 handler stays the one in ``__init__``.
@@ -26,6 +29,7 @@ from . import children as children_layer
 from . import completion as completion_layer
 from . import presence_management as presence_management_layer
 from . import quest_definitions as quest_definitions_layer
+from .api_client import NestQuestApiError
 from .const import (
     DOMAIN,
     DOMAIN_SERVICES,
@@ -42,7 +46,7 @@ from .const import (
     SERVICE_UNCOMPLETE_QUEST,
     SERVICE_UPDATE_QUEST_DEFINITION,
 )
-from .events import fire_quest_completed, fire_quest_uncompleted
+from .events import fire_quest_uncompleted
 from .permissions import permission_gate
 from .recurrence import ScheduleRule
 from .service_policy import SERVICE_POLICY
@@ -301,22 +305,50 @@ def _complete_quest(
     async def _handler(call: Any) -> None:
         runtime = _require_runtime(hass, find_runtime)
         instance_id = call.data["instance_id"]
-        # ``appended`` is decided under the same lock as the write, so
-        # a concurrent duplicate call (a double tap) can not produce a
-        # second transition event: the loser appends nothing.
-        result = await completion_layer.complete_instance(
-            runtime.database,
-            instance_id,
-            **_actor_kwargs(call),
-        )
-        if result.appended:
-            await fire_quest_completed(
-                hass,
-                runtime.database,
-                instance_id,
-                was_on_time=result.was_on_time,
+        # The panel contract (decision 9): a tap completes as the
+        # tapped child profile, the only actor shape the API's panel
+        # route accepts.  The payload schema is unchanged — the panel
+        # cards call it with instance_id, actor=panel, actor_child_id.
+        actor = _actor_kwargs(call)
+        if actor["actor_source"] != ACTOR_PANEL:
+            raise HomeAssistantError(
+                "nestquest.complete_quest completes through the API's "
+                "panel route as the tapped child profile; actor must "
+                "be 'panel' with actor_child_id"
             )
-            await _refresh_entities(runtime)
+        # The entry's ONE shared API client (built at setup): the
+        # coordinator's snapshot poll, the SSE subscription, and this
+        # proxy all ride the same instance.  An entry with no panel
+        # token runs the unconfigured stub, which has no completion
+        # surface — fail fast with a clear, token-free message.
+        complete_instance = getattr(
+            getattr(runtime.coordinator, "api_client", None),
+            "complete_instance",
+            None,
+        )
+        if complete_instance is None:
+            raise HomeAssistantError(
+                "NestQuest API is not configured; cannot complete a "
+                "quest"
+            )
+        try:
+            await complete_instance(instance_id, actor["actor_child_id"])
+        except NestQuestApiError as err:
+            # The typed API failure surfaces as a service error the
+            # caller sees — never swallowed, never retried here.  The
+            # typed message names method, path, and status only; the
+            # panel token never appears in it.
+            raise HomeAssistantError(
+                f"NestQuest quest completion failed: {err}"
+            ) from err
+        # NO local completion write and NO local event: the API service
+        # emits the transition on its SSE stream and the integration's
+        # subscription re-fires it on the bus — firing it here too
+        # would double-fire.  The immediate refresh keeps the old
+        # behaviour where the sensors reflect the completion the
+        # moment the service call returns instead of waiting for the
+        # poll interval.
+        await _refresh_entities(runtime)
 
     return _with_errors(_handler)
 

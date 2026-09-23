@@ -757,6 +757,16 @@ class LazyLocalSnapshotClient:
     coordinator reconstructs from a byte-identical payload without any
     network or FastAPI machinery.
 
+    ``complete_instance`` bridges the panel complete route the same
+    way (the ``nestquest.complete_quest`` proxy calls it through the
+    API client): it resolves the entry's database and delegates to the
+    SAME core completion the API route delegates to, with the panel
+    actor shape, and answers the route's ``{"status": ...}`` body.
+    Like the real API service it publishes its transition events on
+    the SSE stream — NOT on the Home Assistant bus and NOT from the
+    service handler; tests that assert bus events drive them through
+    the SSE subscription the way production delivers them.
+
     The resolution is LAZY on purpose: the coordinator's factory runs
     mid-setup, before the runtime record exists, so the first refresh
     (and any refresh while the entry is torn down) serves an EMPTY but
@@ -767,6 +777,29 @@ class LazyLocalSnapshotClient:
         self._hass = hass
         self._entry_id = entry_id
         self.calls = 0
+        #: Every ``(instance_id, CompletionResult)`` this stand-in
+        # produced, in call order — tests read ``appended`` /
+        # ``was_on_time`` off these to check the completion verdicts.
+        self.completions = []
+        #: The SSE frames the stand-in published for its completions
+        # (the API service's stream content), drained by
+        #: :func:`refire_api_transitions`.
+        self.published_frames = []
+
+    def _live_runtime(self):
+        """The entry's runtime record, or ``None`` before/after setup."""
+        from custom_components.nestquest.const import DOMAIN as NQ_DOMAIN
+
+        runtime = self._hass.data.get(NQ_DOMAIN, {}).get(self._entry_id)
+        database = getattr(runtime, "database", None)
+        if database is None or not getattr(database, "connected", True):
+            return None
+        return runtime
+
+    def _live_database(self):
+        """The entry's open database, or ``None`` before/after setup."""
+        runtime = self._live_runtime()
+        return None if runtime is None else runtime.database
 
     async def get_snapshot(self):
         import datetime
@@ -776,14 +809,14 @@ class LazyLocalSnapshotClient:
         from custom_components.nestquest.core import snapshot as core_snapshot
 
         self.calls += 1
-        runtime = self._hass.data.get(NQ_DOMAIN, {}).get(self._entry_id)
-        database = getattr(runtime, "database", None)
-        if database is None or not getattr(database, "connected", True):
+        runtime = self._live_runtime()
+        if runtime is None:
             return {
                 "today_iso": datetime.date.today().isoformat(),
                 "cycle_day": 0,
                 "children": [],
             }
+        database = runtime.database
         settings = getattr(runtime, "settings", None)
         # The HA-LOCAL now, the same single clock read the production
         # coordinator used to hand the builder: the hass stub's
@@ -812,6 +845,44 @@ class LazyLocalSnapshotClient:
                 for child in snapshot.children
             ],
         }
+
+    async def complete_instance(self, instance_id: int, actor_child_id: int):
+        """The panel complete route's stand-in: complete through the
+        SAME core completion the route delegates to, panel actor
+        shape, publish the route's SSE transition frames (built by the
+        same core builders, appended completions only — see
+        ``api/routes_panel.py``), and answer the route's
+        ``{"status": ...}`` body."""
+        import datetime
+
+        from custom_components.nestquest.completion import complete_instance
+        from custom_components.nestquest.core import events as core_events
+
+        result = await complete_instance(
+            self._live_database(),
+            instance_id,
+            actor_source="panel",
+            actor_child_id=actor_child_id,
+        )
+        self.completions.append((instance_id, result))
+        if result.appended:
+            # The route publishes the transition the moment the core
+            # write lands (appended completions only), evaluating the
+            # day-complete rule against the API host's local date —
+            # the frames queue here for the SSE stream to carry.
+            event_type, payload = await core_events.build_quest_completed_event(
+                self._live_database(),
+                instance_id,
+                was_on_time=result.was_on_time,
+            )
+            self.published_frames.append((event_type, payload))
+            now = datetime.datetime.now().astimezone()
+            day_complete = await core_events.build_child_day_complete_event(
+                self._live_database(), payload, today=now.date()
+            )
+            if day_complete is not None:
+                self.published_frames.append(day_complete)
+        return {"status": str(result)}
 
 
 @pytest.fixture(autouse=True)
@@ -856,6 +927,59 @@ def set_coordinator_client(entry, client):
 
     coordinator_module._COORDINATOR_CLIENT_OVERRIDES[entry.entry_id] = client
     return client
+
+
+async def refire_api_transitions(hass, entry, client):
+    """Deliver the SSE frames the stand-in client has published so far
+    through the integration's SSE subscription — the production event
+    path.
+
+    Since Feature 18 the ``complete_quest`` service fires no local
+    bus event: the API service builds and publishes the transition
+    frames on its SSE stream, and the integration's subscription
+    (:mod:`custom_components.nestquest.sse`) re-fires each frame on
+    the bus.  This helper streams the frames the stand-in client
+    published (``client.published_frames``) through a real
+    :class:`~custom_components.nestquest.sse.NestQuestEventStream`
+    and waits (bounded) until the bus has re-fired every one of them.
+    """
+    import asyncio
+
+    from custom_components.nestquest.sse import NestQuestEventStream
+
+    frames, client.published_frames = client.published_frames, []
+
+    class _ScriptedStream:
+        """A healthy stream: the frames, then it stays open."""
+
+        def __init__(self, frames) -> None:
+            self._frames = frames
+
+        def stream_events(self):
+            async def _gen():
+                for frame in self._frames:
+                    yield frame
+                await asyncio.Event().wait()
+
+            return _gen()
+
+    before = {etype: len(hass.bus.fired(etype)) for etype, _ in frames}
+    expected = len(frames)
+    manager = NestQuestEventStream(hass, _ScriptedStream(frames))
+    manager.start()
+    try:
+        async with asyncio.timeout(2):
+            while True:
+                delivered = sum(
+                    len(hass.bus.fired(etype)) - before[etype]
+                    for etype, _ in frames
+                )
+                if delivered >= expected:
+                    break
+                await asyncio.sleep(0.01)
+    finally:
+        await manager.stop()
+    return frames
 
 
 class _HassNamespace(SimpleNamespace):

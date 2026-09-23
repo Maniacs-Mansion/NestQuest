@@ -14,7 +14,7 @@ from __future__ import annotations
 import datetime
 import re
 
-from conftest import wire_entry_to_registry
+from conftest import refire_api_transitions, wire_entry_to_registry
 
 from custom_components.nestquest import async_setup_entry
 from custom_components.nestquest.children import (
@@ -154,6 +154,11 @@ async def test_entity_and_event_matrix(hass, make_entry) -> None:
                 "actor_child_id": ada.id,
             },
         )
+    # The transition events arrive over the API's SSE stream (the
+    # subscription re-fires them), never from the service handler.
+    await refire_api_transitions(
+        hass, entry, entry.runtime_data.coordinator.api_client
+    )
     assert len(hass.bus.fired(EVENT_QUEST_COMPLETED)) == 2
     for payload in hass.bus.fired(EVENT_QUEST_COMPLETED):
         assert _TIMESTAMP.match(payload["occurred_at"])
@@ -233,6 +238,10 @@ async def test_payload_schema_matches_the_documented_contract(
             "actor": "panel",
             "actor_child_id": ada.id,
         },
+    )
+    # The completed event arrives over the API's SSE stream.
+    await refire_api_transitions(
+        hass, entry, entry.runtime_data.coordinator.api_client
     )
     payload = hass.bus.fired(EVENT_QUEST_COMPLETED)[0]
     for key, check in (
