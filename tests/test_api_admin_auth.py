@@ -12,9 +12,17 @@ JWKS fetcher — NO network access:
   token returns 200 with the verified subject.
 - Every 401 carries the SAME detail — nothing in the response
   distinguishes which check failed.
+- The token's HEADER is validated BEFORE the JWKS cache is touched: a
+  garbage or non-RS256 token triggers NO fetch at all.
+- A JWKS entry that matches the ``kid`` but carries corrupt key
+  material maps to the same uniform 401.
 - The JWKS document is fetched ONCE through the app's
   :class:`api.auth.JwksCache` and then reused across requests (the
   stub fetcher counts calls); a zero TTL refetches.
+- A JWKS OUTAGE fails fast: after one failed fetch the cache re-raises
+  the fault for the whole backoff window without further fetches, even
+  under a burst of concurrent requests; an unknown ``kid`` forces one
+  TTL-bypassing refetch, throttled to at most one per interval.
 
 ``ApiConfig.from_env`` requires the three OIDC variables
 (``NESTQUEST_OIDC_ISSUER``, ``NESTQUEST_OIDC_AUDIENCE``,
@@ -29,7 +37,9 @@ case signs with a SECOND locally generated key pair.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 import time
 from pathlib import Path
 
@@ -105,6 +115,45 @@ class _StubbedFetch:
         return self.document
 
 
+class _FailingFetch:
+    """A JWKS fetcher stub that always fails, counting the attempts."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, url: str) -> dict[str, object]:
+        self.calls += 1
+        raise httpx.ConnectError("provider unreachable")
+
+
+class _FlakyFetch:
+    """A fetcher that succeeds ONCE, then fails on every later call."""
+
+    def __init__(self, document: dict[str, object]) -> None:
+        self.document = document
+        self.calls = 0
+
+    async def __call__(self, url: str) -> dict[str, object]:
+        self.calls += 1
+        if self.calls == 1:
+            return self.document
+        raise httpx.ConnectError("provider unreachable")
+
+
+class _FailThenServe:
+    """A fetcher that fails the FIRST call, then serves the document."""
+
+    def __init__(self, document: dict[str, object]) -> None:
+        self.document = document
+        self.calls = 0
+
+    async def __call__(self, url: str) -> dict[str, object]:
+        self.calls += 1
+        if self.calls == 1:
+            raise httpx.ConnectError("provider unreachable")
+        return self.document
+
+
 def _make_token(
     signing_key: rsa.RSAPrivateKey = ADMIN_KEY,
     *,
@@ -130,6 +179,33 @@ def _make_token(
     )
 
 
+def _token_with_header(
+    header: dict[str, object], payload: dict[str, object]
+) -> str:
+    """Build a JWT with an EXACT header (bypassing jwt.encode's rules).
+
+    Used to prove header checks (``alg``, ``kid``) happen before the
+    JWKS cache is consulted; the signature segment is never reached.
+    """
+    def part(obj: dict[str, object]) -> str:
+        raw = json.dumps(obj).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    return f"{part(header)}.{part(payload)}.c2lnbmF0dXJl"
+
+
+def _verified_payload() -> dict[str, object]:
+    """Claims that would verify — the header checks fire before them."""
+    now = int(time.time())
+    return {
+        "iss": ISSUER,
+        "aud": AUDIENCE,
+        "sub": SUBJECT,
+        "exp": now + 300,
+        "nbf": now - 1,
+    }
+
+
 class _AdminRunner:
     """Run the app's lifespan around an httpx AsyncClient.
 
@@ -148,6 +224,8 @@ class _AdminRunner:
         jwks_document: dict[str, object],
         *,
         ttl_seconds: float | None = None,
+        backoff_seconds: float | None = None,
+        kid_refetch_seconds: float | None = None,
     ) -> None:
         self.app = create_app(
             ApiConfig(
@@ -162,6 +240,10 @@ class _AdminRunner:
         cache_kwargs: dict[str, float] = {}
         if ttl_seconds is not None:
             cache_kwargs["ttl_seconds"] = ttl_seconds
+        if backoff_seconds is not None:
+            cache_kwargs["backoff_seconds"] = backoff_seconds
+        if kid_refetch_seconds is not None:
+            cache_kwargs["kid_refetch_seconds"] = kid_refetch_seconds
         self.app.state.jwks_cache = JwksCache(
             JWKS_URL, fetcher=self.fetch, **cache_kwargs
         )
@@ -359,6 +441,70 @@ async def test_bad_signature_is_unauthorized(
     assert response.status_code == 401
 
 
+async def test_corrupt_jwks_entry_matching_kid_is_unauthorized(
+    temp_db_path: str,
+) -> None:
+    """A JWKS entry matching the kid but with corrupt key data → 401.
+
+    ``RSAAlgorithm.from_jwk`` raises ValueError/TypeError (NOT a
+    PyJWTError) on such an entry; it must map to the SAME uniform 401,
+    not surface as a server error.
+    """
+    corrupt_jwks: dict[str, object] = {
+        "keys": [
+            {"kty": "RSA", "kid": KID, "n": "AQ", "e": "AQAB"},
+        ]
+    }
+    runner = _AdminRunner(temp_db_path, corrupt_jwks)
+    async with runner as client:
+        response = await client.get(
+            "/api/v1/admin/ping",
+            headers={"Authorization": f"Bearer {_make_token()}"},
+        )
+    assert response.status_code == 401
+    assert response.json()["detail"] == REJECTION_DETAIL
+
+
+# --- the header is checked BEFORE the JWKS cache -----------------------------
+
+
+async def test_garbage_token_triggers_no_jwks_fetch(
+    temp_db_path: str,
+) -> None:
+    """A token that is not a JWT costs NO fetch, lock or provider load."""
+    runner = _AdminRunner(temp_db_path, _jwks_for(ADMIN_KEY, KID))
+    async with runner as client:
+        response = await client.get(
+            "/api/v1/admin/ping",
+            headers={"Authorization": "Bearer not-a-jwt"},
+        )
+    assert response.status_code == 401
+    assert response.json()["detail"] == REJECTION_DETAIL
+    assert runner.fetch.calls == 0
+
+
+async def test_non_rs256_token_triggers_no_jwks_fetch(
+    temp_db_path: str,
+) -> None:
+    """A structurally valid JWT with a non-RS256 alg is 401 pre-cache.
+
+    The header carries a kid pointing at the published key, so ONLY the
+    early alg check can reject it — the fetcher must never be called.
+    """
+    runner = _AdminRunner(temp_db_path, _jwks_for(ADMIN_KEY, KID))
+    token = _token_with_header(
+        {"alg": "HS256", "typ": "JWT", "kid": KID}, _verified_payload()
+    )
+    async with runner as client:
+        response = await client.get(
+            "/api/v1/admin/ping",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 401
+    assert response.json()["detail"] == REJECTION_DETAIL
+    assert runner.fetch.calls == 0
+
+
 # --- the uniform 401 contract -----------------------------------------------
 
 
@@ -429,6 +575,179 @@ async def test_expired_ttl_refetches_the_jwks(temp_db_path: str) -> None:
             )
             assert response.status_code == 200
     assert runner.fetch.calls == 2
+
+
+# --- the JWKS cache under an outage: fail fast, don't amplify ---------------
+
+
+async def test_jwks_outage_fails_fast_during_backoff() -> None:
+    """After one failed fetch, later requests fail fast for the window."""
+    fetch = _FailingFetch()
+    cache = JwksCache(JWKS_URL, fetcher=fetch)
+    for _ in range(4):
+        with pytest.raises(httpx.ConnectError):
+            await cache.get()
+    assert fetch.calls == 1
+
+
+async def test_jwks_outage_burst_calls_the_fetcher_once() -> None:
+    """A burst of concurrent requests costs ONE fetch, not one each.
+
+    The first caller fetches and fails; every other caller — queued on
+    the lock or arriving inside the backoff window — fails fast on the
+    recorded fault without touching the fetcher.
+    """
+    fetch = _FailingFetch()
+    cache = JwksCache(JWKS_URL, fetcher=fetch)
+    results = await asyncio.gather(
+        *(cache.get() for _ in range(6)), return_exceptions=True
+    )
+    assert fetch.calls == 1
+    assert all(
+        isinstance(result, httpx.ConnectError) for result in results
+    )
+
+
+async def test_jwks_backoff_lapses_and_recovers() -> None:
+    """A backoff window is not a lockout: retries resume after it.
+
+    With a zero-length window the very next request retries (and the
+    successful document is then served from the cache), proving a
+    failed state is never cached for good.
+    """
+    document = _jwks_for(ADMIN_KEY, KID)
+    fetch = _FailThenServe(document)
+    cache = JwksCache(JWKS_URL, fetcher=fetch, backoff_seconds=0.0)
+    with pytest.raises(httpx.ConnectError):
+        await cache.get()
+    assert await cache.get() == document
+    assert await cache.get() == document
+    assert fetch.calls == 2
+
+
+async def test_jwks_outage_is_a_server_fault_not_a_401(
+    temp_db_path: str,
+) -> None:
+    """A provider outage propagates as a fault, never as a 401."""
+    runner = _AdminRunner(temp_db_path, _jwks_for(ADMIN_KEY, KID))
+    runner.app.state.jwks_cache = JwksCache(JWKS_URL, fetcher=_FailingFetch())
+    async with runner as client:
+        with pytest.raises(httpx.ConnectError):
+            await client.get(
+                "/api/v1/admin/ping",
+                headers={"Authorization": f"Bearer {_make_token()}"},
+            )
+
+
+# --- the unknown-kid refetch: one forced, bounded attempt --------------------
+
+
+async def test_unknown_kid_refetch_picks_up_a_rotated_key(
+    temp_db_path: str,
+) -> None:
+    """An unmatched kid forces ONE refetch, and the retry can verify.
+
+    The JWKS first publishes a DIFFERENT kid: the token is 401 after
+    exactly two fetches (normal + forced).  When the rotated key lands
+    in the provider's document, the NEXT token forces another refetch
+    that picks it up — the same token verifies WITHOUT waiting out the
+    TTL.
+    """
+    runner = _AdminRunner(
+        temp_db_path, _jwks_for(ADMIN_KEY, "other-key"), kid_refetch_seconds=0.0
+    )
+    token = _make_token()
+    async with runner as client:
+        response = await client.get(
+            "/api/v1/admin/ping",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 401
+        assert response.json()["detail"] == REJECTION_DETAIL
+        assert runner.fetch.calls == 2
+
+        # The rotation lands at the provider (same stub fetcher).
+        runner.fetch.document = _jwks_for(ADMIN_KEY, KID)
+        response = await client.get(
+            "/api/v1/admin/ping",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        assert runner.fetch.calls == 3
+
+
+async def test_unknown_kid_refetch_is_throttled(temp_db_path: str) -> None:
+    """Back-to-back unknown-kid tokens force at most one refetch.
+
+    The interval bounds forced refetches: the second unknown-kid token
+    inside it is served from the cached document (still unmatched →
+    401) with no further fetch.
+    """
+    runner = _AdminRunner(temp_db_path, _jwks_for(ADMIN_KEY, "other-key"))
+    token = _make_token()
+    async with runner as client:
+        for _ in range(2):
+            response = await client.get(
+                "/api/v1/admin/ping",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert response.status_code == 401
+    assert runner.fetch.calls == 2
+
+
+async def test_unknown_kid_refetch_resumes_after_the_interval(
+    temp_db_path: str,
+) -> None:
+    """A lapsed interval allows the next forced refetch again.
+
+    With a zero-length interval every request may force its refetch:
+    the first costs one normal fetch plus one forced (two), and the
+    second — its cached document still fresh — costs just the forced
+    one (three in total), proving the throttle is a bounded interval
+    rather than a permanent lockout.
+    """
+    runner = _AdminRunner(
+        temp_db_path, _jwks_for(ADMIN_KEY, "other-key"), kid_refetch_seconds=0.0
+    )
+    token = _make_token()
+    async with runner as client:
+        for _ in range(2):
+            response = await client.get(
+                "/api/v1/admin/ping",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert response.status_code == 401
+    assert runner.fetch.calls == 3
+
+
+async def test_failed_forced_refetch_propagates_then_fails_fast(
+    temp_db_path: str,
+) -> None:
+    """A failed forced refetch is a fault, and its backoff bounds the rest.
+
+    First request: cache fills (1 fetch), the kid is unmatched, the
+    forced refetch FAILS (2 fetches) and propagates as the server
+    fault.  Second request inside the backoff window: the cached
+    document is served, the match fails, and the token is 401 — with
+    NO third fetch.
+    """
+    runner = _AdminRunner(temp_db_path, _jwks_for(ADMIN_KEY, KID))
+    runner.app.state.jwks_cache = JwksCache(
+        JWKS_URL, fetcher=_FlakyFetch(_jwks_for(ADMIN_KEY, "other-key"))
+    )
+    token = _make_token()
+    async with runner as client:
+        with pytest.raises(httpx.ConnectError):
+            await client.get(
+                "/api/v1/admin/ping",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        response = await client.get(
+            "/api/v1/admin/ping",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 401
+        assert response.json()["detail"] == REJECTION_DETAIL
 
 
 # --- ApiConfig.from_env: the OIDC settings -----------------------------------

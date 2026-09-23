@@ -20,12 +20,20 @@ Every rejection raises the SAME :class:`~fastapi.HTTPException` with
 the same detail — nothing in the response distinguishes which check
 failed.  The check FAILS CLOSED: a missing app config, a malformed or
 missing ``Authorization`` header, a non-RS256 algorithm, an unknown
-``kid``, and any PyJWT verification error all yield the one 401.  A
-JWKS FETCH failure is deliberately NOT mapped to 401: the provider
-being unreachable is a server-side fault (an HTTP 500 surfaces) and
-never poisons the cache, so the plane stays closed while the real
-cause is visible in the server log instead of disguised as a bad
-credential.
+``kid``, and any PyJWT verification error all yield the one 401.
+
+The token's header (``alg``, ``kid``) is parsed and checked BEFORE the
+JWKS cache is consulted, so structurally invalid tokens can never
+amplify load on the provider.  An unknown ``kid`` forces ONE
+TTL-bypassing refetch (throttled, see :class:`JwksCache`) so a rotated
+key is picked up without waiting out the TTL, and a JWKS entry that
+matches the ``kid`` but carries corrupt key material maps to the same
+401.  A JWKS FETCH failure is deliberately NOT mapped to 401: the
+provider being unreachable is a server-side fault (an HTTP 500
+surfaces) and never poisons the cache, so the plane stays closed while
+the real cause is visible in the server log instead of disguised as a
+bad credential; a short backoff window after a failed fetch fails fast
+(re-raising the recorded fault) rather than fetching once per request.
 
 This module validates the TOKEN only — it is authentication, not
 authorization.  Membership in the ``nestquest-admins`` group is the
@@ -35,6 +43,7 @@ claims are already its return value, so no rewrite is needed).
 from __future__ import annotations
 
 import asyncio
+import binascii
 import json
 import time
 from collections.abc import Awaitable, Callable
@@ -65,6 +74,18 @@ _WWW_AUTHENTICATE = {"WWW-Authenticate": "Bearer"}
 #: fetch.  Five minutes bounds how long a rotated-away key keeps
 #: verifying while staying far above a per-request fetch.
 _JWKS_TTL_SECONDS = 300.0
+
+#: Seconds a FAILED JWKS fetch blocks further fetch attempts.  Within
+#: this window after a failure the cache fails fast — it re-raises the
+#: recorded fault instead of touching the provider — so an outage is
+#: never amplified into one fetch per request.
+_JWKS_BACKOFF_SECONDS = 5.0
+
+#: Seconds that must pass before ANOTHER forced (TTL-bypassing) refetch
+#: may run.  An unmatched ``kid`` forces one refetch to pick up rotated
+#: keys; this interval bounds it, so a flood of unknown-``kid`` tokens
+#: cannot turn each request into a provider fetch either.
+_JWKS_KID_REFETCH_SECONDS = 5.0
 
 #: Seconds before the real JWKS fetch gives up on the provider.
 _JWKS_TIMEOUT_SECONDS = 5.0
@@ -101,8 +122,22 @@ class JwksCache:
     — the dependency NEVER fetches per request.  A single fetch is
     shared between concurrent requests via an :class:`asyncio.Lock`
     (double-checked around it), and a failed fetch is never cached, so
-    the next request retries rather than being locked out until the TTL
-    lapses.
+    the next request retries once the backoff window lapses rather than
+    being locked out until the TTL does.
+
+    Two bounds keep the provider out of an amplification loop:
+
+    - ``backoff_seconds``: after a FAILED fetch, :meth:`get` fails fast
+      for this long — re-raising the recorded fault WITHOUT touching
+      the fetcher or even the lock — instead of retrying per request.
+    - ``kid_refetch_seconds``: forced (TTL-bypassing) refetches — the
+      unmatched-``kid`` path — may run at most this often; a forced
+      refetch that is bounded out (or one inside the backoff window)
+      is served from the cached document as-is.
+
+    A successful fetch always clears the backoff; the document itself
+    is still trusted only for ``ttl_seconds`` — nothing is cached
+    indefinitely.
 
     One instance lives on ``app.state.jwks_cache`` (installed by
     :func:`api.app.create_app`); tests replace it with one built around
@@ -114,30 +149,67 @@ class JwksCache:
         url: str,
         *,
         ttl_seconds: float = _JWKS_TTL_SECONDS,
+        backoff_seconds: float = _JWKS_BACKOFF_SECONDS,
+        kid_refetch_seconds: float = _JWKS_KID_REFETCH_SECONDS,
         fetcher: JwksFetcher | None = None,
     ) -> None:
         self._url = url
         self._ttl_seconds = ttl_seconds
+        self._backoff_seconds = backoff_seconds
+        self._kid_refetch_seconds = kid_refetch_seconds
         self._fetcher: JwksFetcher = (
             fetcher if fetcher is not None else _fetch_jwks
         )
         self._document: dict[str, object] | None = None
         self._fetched_at: float | None = None
+        self._failed_until: float | None = None
+        self._last_error: BaseException | None = None
+        self._forced_at: float | None = None
         self._lock = asyncio.Lock()
 
-    async def get(self) -> dict[str, object]:
-        """Return the JWKS document, refetching it if the TTL lapsed."""
-        fresh = self._fresh_document()
-        if fresh is not None:
-            return fresh
-        async with self._lock:
+    async def get(self, *, force: bool = False) -> dict[str, object]:
+        """Return the JWKS document, refetching it if the TTL lapsed.
+
+        With ``force=True`` the TTL is bypassed so an unmatched ``kid``
+        can pick up a rotated key without waiting it out; the forced
+        refetch is itself bounded (see the class docstring): inside the
+        backoff window or the ``kid_refetch_seconds`` interval the
+        cached document is served as-is instead.  A failed fetch is
+        re-raised to the caller (a provider outage is a server fault,
+        never a 401) and starts the backoff window, during which every
+        caller — including forced ones with nothing cached — fails fast
+        on the recorded fault.
+        """
+        if not force:
             fresh = self._fresh_document()
             if fresh is not None:
                 return fresh
-            document = await self._fetcher(self._url)
-            self._document = document
-            self._fetched_at = time.monotonic()
-            return document
+        error = self._backoff_error()
+        if error is not None:
+            # Fail fast OUTSIDE the lock: a request inside the backoff
+            # window must not queue behind an in-flight fetch.
+            if force:
+                document = self._document
+                if document is not None:
+                    return document
+            raise error
+        async with self._lock:
+            if not force:
+                fresh = self._fresh_document()
+                if fresh is not None:
+                    return fresh
+            error = self._backoff_error()
+            if error is not None:
+                if force:
+                    document = self._document
+                    if document is not None:
+                        return document
+                raise error
+            if force and self._refetch_throttled():
+                document = self._document
+                if document is not None:
+                    return document
+            return await self._fetch_locked(force=force)
 
     def _fresh_document(self) -> dict[str, object] | None:
         """The cached document if one exists and is inside its TTL."""
@@ -151,6 +223,48 @@ class JwksCache:
             return document
         return None
 
+    def _backoff_error(self) -> BaseException | None:
+        """The recorded fetch fault while the backoff window is open."""
+        failed_until = self._failed_until
+        last_error = self._last_error
+        if (
+            failed_until is not None
+            and last_error is not None
+            and time.monotonic() < failed_until
+        ):
+            return last_error
+        return None
+
+    def _refetch_throttled(self) -> bool:
+        """Whether a forced refetch ran too recently to run another."""
+        forced_at = self._forced_at
+        return forced_at is not None and (
+            time.monotonic() - forced_at
+        ) < self._kid_refetch_seconds
+
+    async def _fetch_locked(self, *, force: bool) -> dict[str, object]:
+        """Run ONE fetch attempt (caller holds the lock) and record it.
+
+        A failed fetch starts the ``backoff_seconds`` window and is
+        re-raised; a successful one stores the document, restarts the
+        TTL and clears the backoff.  A forced attempt stamps
+        ``_forced_at`` so the ``kid_refetch_seconds`` interval bounds
+        how often forced refetches may run back-to-back.
+        """
+        if force:
+            self._forced_at = time.monotonic()
+        try:
+            document = await self._fetcher(self._url)
+        except Exception as error:
+            self._failed_until = time.monotonic() + self._backoff_seconds
+            self._last_error = error
+            raise
+        self._document = document
+        self._fetched_at = time.monotonic()
+        self._failed_until = None
+        self._last_error = None
+        return document
+
 
 def _reject() -> HTTPException:
     """Build the single 401 the dependency raises for every failure."""
@@ -161,14 +275,18 @@ def _reject() -> HTTPException:
     )
 
 
-def _matching_key(jwks: dict[str, object], kid: str) -> object:
+def _matching_key(jwks: dict[str, object], kid: str) -> object | None:
     """Return the RSA signing key named ``kid`` from the JWKS.
 
     Only ``kty: RSA`` entries are considered (the pinned RS256 scheme
     is asymmetric RSA); anything else — a missing ``keys`` list, no
-    entry with that ``kid`` — raises the one 401 rather than falling
-    back to "some" key.  The key is built through PyJWT's JWKS decoder;
-    malformed key data raises there and is caught by the caller.
+    entry with that ``kid`` — returns ``None`` rather than falling back
+    to "some" key.  The key is built through PyJWT's JWKS decoder, and
+    an entry that MATCHES the ``kid`` but carries corrupt key material
+    (a malformed ``n``/``e`` raises ``ValueError`` — ``binascii.Error``
+    is its subclass — or ``TypeError`` instead of a ``PyJWTError``) is
+    mapped to the one 401 like every other rejection: the caller must
+    never see a half-built key.
     """
     keys = jwks.get("keys")
     if not isinstance(keys, list):
@@ -178,8 +296,17 @@ def _matching_key(jwks: dict[str, object], kid: str) -> object:
             continue
         if entry.get("kid") != kid or entry.get("kty") != "RSA":
             continue
-        return jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(entry))
-    raise _reject()
+        try:
+            return jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(entry))
+        except (
+            jwt.PyJWTError,
+            binascii.Error,
+            ValueError,
+            TypeError,
+            KeyError,
+        ):
+            raise _reject() from None
+    return None
 
 
 async def verify_admin_token(
@@ -198,6 +325,13 @@ async def verify_admin_token(
     ``exp`` is REQUIRED (a token that never expires is never accepted)
     and PyJWT enforces ``nbf`` when the token carries it.
 
+    The token's HEADER (``alg``, ``kid``) is parsed and enforced BEFORE
+    the JWKS cache is consulted, so a structurally invalid token costs
+    no fetch, no lock, no provider load.  When the cached document has
+    no entry for the ``kid``, ONE forced (TTL-bypassing, throttled)
+    refetch is made and the match retried once — a rotated key is
+    picked up without waiting out the TTL — before the 401.
+
     A JWKS fetch failure propagates (see the module docstring): the
     provider being down is a server fault, not a bad credential.
     """
@@ -212,15 +346,26 @@ async def verify_admin_token(
     cache = getattr(request.app.state, "jwks_cache", None)
     if cache is None:
         raise _reject()
-    jwks = await cache.get()
     try:
         header = jwt.get_unverified_header(token)
-        if header.get("alg") != _ALLOWED_ALGORITHM:
-            raise _reject()
-        kid = header.get("kid")
-        if not isinstance(kid, str) or not kid:
-            raise _reject()
+    except jwt.PyJWTError:
+        raise _reject() from None
+    if header.get("alg") != _ALLOWED_ALGORITHM:
+        raise _reject()
+    kid = header.get("kid")
+    if not isinstance(kid, str) or not kid:
+        raise _reject()
+    jwks = await cache.get()
+    try:
         key = _matching_key(jwks, kid)
+        if key is None:
+            # The kid is not in the cached document: force ONE
+            # TTL-bypassing refetch (bounded by the cache) and retry
+            # the match once before rejecting.
+            jwks = await cache.get(force=True)
+            key = _matching_key(jwks, kid)
+            if key is None:
+                raise _reject()
         claims = jwt.decode(
             token,
             key=key,
