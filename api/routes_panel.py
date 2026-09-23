@@ -69,6 +69,7 @@ from api.nestquest_core import (
     core_settings,
     core_snapshot,
 )
+from api import transitions as api_transitions
 
 #: The instance DAO, imported on the app's core copy for the
 #: child-mismatch guard on the complete route.
@@ -283,13 +284,14 @@ async def panel_complete_instance(
             detail="Quest instance not found for this child",
         )
 
+    now = _local_now()
     try:
         result = await core_completion.complete_instance(
             database,
             instance_id,
             actor_source="panel",
             actor_child_id=body.actor_child_id,
-            now=_local_now(),
+            now=now,
         )
     except ValueError as error:
         message = str(error)
@@ -312,6 +314,17 @@ async def panel_complete_instance(
             database, instance_id, was_on_time=result.was_on_time
         )
         request.app.state.publisher.publish(event_type, payload)
+        # THEN evaluate the day-complete rule off the completed event's
+        # payload (the core builder decides when the child's whole day
+        # is cleared — a zero-quest day and a non-today instance never
+        # fire it).  ``today`` comes from the route's single clock read
+        # so the calendar date can never disagree with the completion's.
+        await api_transitions.publish_child_day_complete(
+            database,
+            payload,
+            now.date(),
+            request.app.state.publisher,
+        )
     return {"status": str(result)}
 
 

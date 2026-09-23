@@ -14,7 +14,9 @@ fires nothing), and ``nestquest_child_day_complete`` fires when a
 completion clears the child's whole day (quests were owed and none
 remain — a zero-quest day can never fire it, matching the all-done
 binary sensor's rule).  ``nestquest_quest_missed`` is the documented
-contract Feature 11's nightly sweep fires; nothing here builds it.
+contract Feature 11's nightly sweep fires; :func:`build_quest_missed_event`
+builds it with exactly the payload the sweep hand-builds (§3), so the
+API plane can publish the same shape without re-deriving it.
 
 The completed-event and day-complete-event builders are split so the
 shim can fire ``nestquest_quest_completed`` BEFORE it evaluates the
@@ -50,6 +52,7 @@ from .completion import derive_state
 from .const import (
     EVENT_CHILD_DAY_COMPLETE,
     EVENT_QUEST_COMPLETED,
+    EVENT_QUEST_MISSED,
     EVENT_QUEST_UNCOMPLETED,
 )
 from .dao_children import ChildrenDao
@@ -188,3 +191,20 @@ async def build_quest_uncompleted_events(
     """
     payload = await _instance_payload(database, instance_id, _now_stamp())
     return [(EVENT_QUEST_UNCOMPLETED, payload)]
+
+
+async def build_quest_missed_event(
+    database: NestQuestDatabase, instance_id: int
+) -> tuple[str, dict]:
+    """Build the ``nestquest_quest_missed`` event for one instance.
+
+    The payload mirrors the nightly sweep's hand-built payload exactly
+    (the shared :func:`_instance_payload` shape: ``child_id``,
+    ``child_name``, ``instance_id``, ``quest_title``, ``window``,
+    ``due_date``, ``due_time``, ``occurred_at``), so the API plane's
+    missed path publishes the same event shape the integration's sweep
+    fires.  Like the sweep, this builder never mutates the instance or
+    writes a completion event — it reads only.
+    """
+    payload = await _instance_payload(database, instance_id, _now_stamp())
+    return (EVENT_QUEST_MISSED, payload)
