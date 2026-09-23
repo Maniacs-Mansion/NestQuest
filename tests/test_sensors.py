@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime
 
 import pytest
+from homeassistant.util import slugify
 
 from conftest import StubSnapshotClient, set_coordinator_client, wire_entry_to_registry
 
@@ -637,8 +638,9 @@ async def test_empty_household_publishes_an_empty_roster(
 
 
 def test_slugify_mirrors_home_assistant_entity_id_derivation() -> None:
-    """The slug mirror matches homeassistant.util.slugify for the names
-    children are registered with (verified against HA's own slugify)."""
+    """The roster slugs match homeassistant.util.slugify — the real
+    slugifier HA derives entity ids from, composed with the entity-id
+    length cap the entity registry applies to ``sensor.`` ids."""
     assert _slugify("Ada") == "ada"
     assert _slugify("Mary Jane") == "mary_jane"
     assert _slugify("Mary-Jane") == "mary_jane"
@@ -652,3 +654,52 @@ def test_slugify_mirrors_home_assistant_entity_id_derivation() -> None:
     # The registry caps the entity_id at 64 characters, so the slugged
     # object id alone is capped at 64 - len("sensor.").
     assert _slugify("a" * 80) == "a" * (64 - len("sensor."))
+
+
+def test_slugify_transliterates_non_latin_names_like_home_assistant() -> None:
+    """HA's slugifier transliterates every script through unidecode,
+    so a non-Latin child name slugs to its romanization — never to the
+    ``unknown`` sentinel — and the roster publishes the same slug HA's
+    entity-id derivation produces for that name."""
+    assert _slugify("Дана") == "dana"
+    assert _slugify("京子") == "jing_zi"
+    assert _slugify("Zoë") == "zoe"
+
+
+async def test_non_latin_child_names_resolve_auto_discovery(
+    hass, make_entry
+) -> None:
+    """A non-Latin child name slugs through the real slugifier, so the
+    roster slug IS the object id of the per-child sensor's entity_id
+    and the cards' auto-discovery resolves that child.
+
+    HA derives the per-child entity id from the entity NAME ("NestQuest
+    京子 quests due today") with the same slugifier the roster uses, so
+    the two must agree exactly; the reviewed mirror dropped non-Latin
+    characters (slugging "京子" to "unknown"), so the cards built
+    "sensor.nestquest_unknown_…" ids that no entity had."""
+    payload = _payload(
+        [
+            _child(ADA, "Дана", [_instance(7, ADA)]),
+            _child(BO, "京子", [_instance(8, BO)]),
+        ]
+    )
+    entry, _coordinator, _client = await _setup_entry(hass, make_entry, payload)
+    roster = hass.entities[
+        "nestquest_household_quests_due_today"
+    ].extra_state_attributes["child_roster"]
+    assert roster == [
+        {"child_id": ADA, "name": "Дана", "slug": "dana"},
+        {"child_id": BO, "name": "京子", "slug": "jing_zi"},
+    ]
+    for roster_entry in roster:
+        due_entity = _sensor(hass, roster_entry["child_id"], "quests_due_today")
+        assert due_entity.name == (
+            f"NestQuest {roster_entry['name']} quests due today"
+        )
+        # The entity id HA's registry derives for this entity (from the
+        # same slugifier) embeds exactly the slug the roster publishes:
+        # the card builds sensor.nestquest_<slug>_quests_due_today.
+        assert slugify(due_entity.name) == (
+            f"nestquest_{roster_entry['slug']}_quests_due_today"
+        )

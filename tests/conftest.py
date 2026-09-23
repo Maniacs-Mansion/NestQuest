@@ -24,16 +24,20 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import re
 import sys
 import tempfile
+import unicodedata
 import weakref
 from dataclasses import dataclass
+from html.entities import name2codepoint
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from unidecode import unidecode as _unidecode
 
 from tests.admin_jwt_harness import ADMIN_KEY, KID, AdminRunner, jwks_for
 
@@ -46,6 +50,7 @@ _HA_MODULES = (
     "homeassistant.config_entries",
     "homeassistant.data_entry_flow",
     "homeassistant.exceptions",
+    "homeassistant.util",
     "homeassistant.helpers",
     "homeassistant.helpers.config_validation",
     "homeassistant.helpers.entity",
@@ -94,6 +99,7 @@ for _parent, _child in (
     ("homeassistant", "data_entry_flow"),
     ("homeassistant", "core"),
     ("homeassistant", "exceptions"),
+    ("homeassistant", "util"),
     ("homeassistant", "helpers"),
     ("homeassistant.helpers", "config_validation"),
     ("homeassistant.helpers", "entity"),
@@ -216,6 +222,68 @@ class Unauthorized(HomeAssistantError):
 _exceptions_mock.HomeAssistantError = HomeAssistantError
 _exceptions_mock.ConfigEntryNotReady = ConfigEntryNotReady
 _exceptions_mock.Unauthorized = Unauthorized
+
+
+# ---------------------------------------------------------------------------
+# homeassistant.util.slugify: a faithful stand-in for the real slugifier.
+#
+# Real HA (2024.6) wraps python-slugify's frozen legacy pipeline and answers
+# its "unknown" sentinel when a non-empty name slugs to nothing.  The stub
+# mirrors that pipeline step for step — quotes to dashes, NFKD-normalize,
+# TRANSLITERATE through unidecode (the backend python-slugify's "auto" mode
+# prefers, and a dev dependency here), decode HTML entities, NFKD again,
+# lowercase, drop quotes, fold runs of non-[a-z0-9-] to one dash, collapse
+# and strip dashes, then map dashes to the requested separator — and was
+# verified byte-for-byte against real python-slugify across Latin, Cyrillic,
+# CJK and Greek household-name shapes.  Transliteration is the point: HA
+# derives the per-child entity ids from a name like "京子" as
+# "nestquest_jing_zi_…", so the roster's slugs must transliterate too,
+# never dropping characters into "unknown".  Deliberately NOT truncating:
+# real slugify caps nothing; the entity registry truncates the full
+# entity_id instead.
+# ---------------------------------------------------------------------------
+_HA_QUOTE_PATTERN = re.compile(r"[']+")
+_HA_CHAR_ENTITY_PATTERN = re.compile(r"&(%s);" % "|".join(name2codepoint))
+_HA_DECIMAL_PATTERN = re.compile(r"&#(\d+);")
+_HA_HEX_PATTERN = re.compile(r"&#x([\da-fA-F]+);")
+_HA_NUMBERS_PATTERN = re.compile(r"(?<=\d),(?=\d)")
+_HA_DISALLOWED_CHARS_PATTERN = re.compile(r"[^-a-zA-Z0-9]+")
+_HA_DUPLICATE_DASH_PATTERN = re.compile(r"-{2,}")
+
+
+def _ha_slugify(text: str | None, *, separator: str = "_") -> str:
+    """Faithful homeassistant.util.slugify stand-in (see section above)."""
+    if text == "" or text is None:
+        return ""
+    text = str(text)
+    text = _HA_QUOTE_PATTERN.sub("-", text)
+    text = unicodedata.normalize("NFKD", text)
+    text = _unidecode(text)
+    text = _HA_CHAR_ENTITY_PATTERN.sub(
+        lambda match: chr(name2codepoint[match.group(1)]), text
+    )
+    try:
+        text = _HA_DECIMAL_PATTERN.sub(
+            lambda match: chr(int(match.group(1))), text
+        )
+    except (ValueError, OverflowError):
+        pass
+    try:
+        text = _HA_HEX_PATTERN.sub(
+            lambda match: chr(int(match.group(1), 16)), text
+        )
+    except (ValueError, OverflowError):
+        pass
+    text = unicodedata.normalize("NFKD", text)
+    text = text.lower()
+    text = _HA_QUOTE_PATTERN.sub("", text)
+    text = _HA_NUMBERS_PATTERN.sub("", text)
+    text = _HA_DISALLOWED_CHARS_PATTERN.sub("-", text)
+    text = _HA_DUPLICATE_DASH_PATTERN.sub("-", text).strip("-")
+    return "unknown" if text == "" else text.replace("-", separator)
+
+
+_ha_mock("homeassistant.util").slugify = _ha_slugify
 
 
 @dataclass
