@@ -22,7 +22,6 @@ pytest -q``); it is never meant to run against a real HA install.
 from __future__ import annotations
 
 import asyncio
-import datetime
 import importlib.util
 import inspect
 import sys
@@ -742,160 +741,92 @@ def wire_entry_to_registry(entry, registry: ListenerRegistry):
     return entry
 
 
-class LazyLocalSnapshotClient:
-    """A test client that serves the snapshot built LOCALLY.
+class StubSnapshotClient:
+    """A no-network stand-in for the API client's snapshot surface.
 
-    Feature 18 moved the coordinator's refresh onto the API service's
-    panel snapshot, but most integration tests still seed the local
-    database directly (the DB removal is a later task).  This stub
-    bridges the two: ``get_snapshot`` resolves the entry's runtime
-    record (its database and settings) and runs the SAME pure core
-    builder the API route runs
-    (:func:`~custom_components.nestquest.core.snapshot.build_snapshot`),
-    shaping the payload exactly like ``api/routes_panel.py`` —
-    instances via ``instance_payload(include_missed=False)`` — so the
-    coordinator reconstructs from a byte-identical payload without any
-    network or FastAPI machinery.
-
-    ``complete_instance`` bridges the panel complete route the same
-    way (the ``nestquest.complete_quest`` proxy calls it through the
-    API client): it resolves the entry's database and delegates to the
-    SAME core completion the API route delegates to, with the panel
-    actor shape, and answers the route's ``{"status": ...}`` body.
-    Like the real API service it publishes its transition events on
-    the SSE stream — NOT on the Home Assistant bus and NOT from the
-    service handler; tests that assert bus events drive them through
-    the SSE subscription the way production delivers them.
-
-    The resolution is LAZY on purpose: the coordinator's factory runs
-    mid-setup, before the runtime record exists, so the first refresh
-    (and any refresh while the entry is torn down) serves an EMPTY but
-    valid snapshot; every later refresh reads the seeded database.
+    Answers ``get_snapshot()`` from a scripted queue of outcomes — a
+    payload dict or an exception per call, consumed in order — and
+    records every call.  When the queue is exhausted it re-serves the
+    last outcome, so setup's first refresh and a test's explicit
+    refreshes poll the same scripted state.  Register it (or any
+    scripted client) with :func:`set_coordinator_client` BEFORE setup.
     """
 
-    def __init__(self, hass, entry_id: str) -> None:
-        self._hass = hass
-        self._entry_id = entry_id
+    def __init__(self, *outcomes) -> None:
         self.calls = 0
-        #: Every ``(instance_id, CompletionResult)`` this stand-in
-        # produced, in call order — tests read ``appended`` /
-        # ``was_on_time`` off these to check the completion verdicts.
-        self.completions = []
-        #: The SSE frames the stand-in published for its completions
-        # (the API service's stream content), drained by
-        #: :func:`refire_api_transitions`.
+        self._outcomes = list(outcomes)
+        self._last = outcomes[-1] if outcomes else None
+        #: The SSE frames the stand-in "published" (the API service's
+        # stream content), drained by :func:`refire_api_transitions`.
         self.published_frames = []
 
-    def _live_runtime(self):
-        """The entry's runtime record, or ``None`` before/after setup."""
-        from custom_components.nestquest.const import DOMAIN as NQ_DOMAIN
-
-        runtime = self._hass.data.get(NQ_DOMAIN, {}).get(self._entry_id)
-        database = getattr(runtime, "database", None)
-        if database is None or not getattr(database, "connected", True):
-            return None
-        return runtime
-
-    def _live_database(self):
-        """The entry's open database, or ``None`` before/after setup."""
-        runtime = self._live_runtime()
-        return None if runtime is None else runtime.database
-
     async def get_snapshot(self):
-        import datetime
-        import zoneinfo
-
-        from custom_components.nestquest.const import DOMAIN as NQ_DOMAIN
-        from custom_components.nestquest.core import snapshot as core_snapshot
-
         self.calls += 1
-        runtime = self._live_runtime()
-        if runtime is None:
-            return {
-                "today_iso": datetime.date.today().isoformat(),
-                "cycle_day": 0,
-                "children": [],
-            }
-        database = runtime.database
-        settings = getattr(runtime, "settings", None)
-        # The HA-LOCAL now, the same single clock read the production
-        # coordinator used to hand the builder: the hass stub's
-        # configured time zone, never the host clock.
-        now = datetime.datetime.now(
-            zoneinfo.ZoneInfo(self._hass.config.time_zone)
-        )
-        snapshot = await core_snapshot.build_snapshot(database, settings, now)
-        return {
-            "today_iso": snapshot.today_iso,
-            "cycle_day": snapshot.cycle_day,
-            "children": [
-                {
-                    "child_id": child.child_id,
-                    "child_name": child.child_name,
-                    "present": child.present,
-                    "next_present": child.next_present,
-                    "due_today": child.due_today,
-                    "completed_today": child.completed_today,
-                    "remaining_today": child.remaining_today,
-                    "completion_pct": child.completion_pct,
-                    "instances": core_snapshot.instance_payload(
-                        child.instances, include_missed=False
-                    ),
-                }
-                for child in snapshot.children
-            ],
-        }
+        if not self._outcomes:
+            # Re-serve the last outcome: setup's first refresh and the
+            # test's explicit pass both poll the same scripted state.
+            outcome = self._last
+        else:
+            outcome = self._outcomes.pop(0)
+            self._last = outcome
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
 
-    async def complete_instance(self, instance_id: int, actor_child_id: int):
-        """The panel complete route's stand-in: complete through the
-        SAME core completion the route delegates to, panel actor
-        shape, publish the route's SSE transition frames (built by the
-        same core builders, appended completions only — see
-        ``api/routes_panel.py``), and answer the route's
-        ``{"status": ...}`` body."""
-        import datetime
 
-        from custom_components.nestquest.completion import complete_instance
-        from custom_components.nestquest.core import events as core_events
+class ScriptedPanelClient(StubSnapshotClient):
+    """Snapshot + completion stand-in for the API service's panel plane.
 
-        result = await complete_instance(
-            self._live_database(),
-            instance_id,
-            actor_source="panel",
-            actor_child_id=actor_child_id,
-        )
-        self.completions.append((instance_id, result))
-        if result.appended:
-            # The route publishes the transition the moment the core
-            # write lands (appended completions only), evaluating the
-            # day-complete rule against the API host's local date —
-            # the frames queue here for the SSE stream to carry.
-            event_type, payload = await core_events.build_quest_completed_event(
-                self._live_database(),
-                instance_id,
-                was_on_time=result.was_on_time,
-            )
-            self.published_frames.append((event_type, payload))
-            now = datetime.datetime.now().astimezone()
-            day_complete = await core_events.build_child_day_complete_event(
-                self._live_database(), payload, today=now.date()
-            )
-            if day_complete is not None:
-                self.published_frames.append(day_complete)
-        return {"status": str(result)}
+    Serves the scripted snapshot outcomes (like
+    :class:`StubSnapshotClient`), records ``complete_instance`` calls
+    the way the panel route receives them, optionally fails them the
+    way the client types the failure, and carries the SSE frames the
+    API "published" in ``published_frames`` for
+    :func:`refire_api_transitions` to deliver.  Everything the
+    integration reads over the wire, no network.
+    """
+
+    def __init__(self, *outcomes) -> None:
+        super().__init__(*outcomes)
+        self.complete_calls: list[tuple[int, int]] = []
+        self.published_frames: list[tuple[str, dict]] = []
+        #: When set, the next ``complete_instance`` raises this instead
+        # of succeeding (a typed NestQuestApiError in production).
+        self.fail_complete_with: BaseException | None = None
+
+    async def complete_instance(
+        self, instance_id: int, actor_child_id: int
+    ) -> dict:
+        self.complete_calls.append((instance_id, actor_child_id))
+        if self.fail_complete_with is not None:
+            raise self.fail_complete_with
+        return {"status": "done"}
+
+
+def set_coordinator_client(entry, client):
+    """Register a scripted client for ``entry``'s coordinator factory."""
+    import custom_components.nestquest.coordinator as coordinator_module
+
+    coordinator_module._COORDINATOR_CLIENT_OVERRIDES[entry.entry_id] = client
+    return client
 
 
 @pytest.fixture(autouse=True)
-def coordinator_serves_local_snapshot():
-    """Default every test entry's coordinator to the local-snapshot client.
+def coordinator_client_from_test_override():
+    """Resolve every entry's coordinator client through the test seam.
 
     The integration's setup builds its API client through
-    ``coordinator_client_from_entry``; the fixture swaps that factory
-    for a test one handing out :class:`LazyLocalSnapshotClient` (so
-    DB-seeded tests exercise the coordinator's API path against local
-    data).  Tests that script their own client register it with
-    :func:`set_coordinator_client`, which the factory honours first.
+    ``coordinator_client_from_entry``; this fixture swaps that factory
+    for a test one handing out the client registered with
+    :func:`set_coordinator_client`, or — for an entry with no scripted
+    client — a stub serving an EMPTY but valid household snapshot (the
+    shape the API's panel route returns before any child exists; the
+    real client would need aiohttp, which this mock-only harness does
+    not provide).
     """
+    import datetime
+    import unittest.mock as mock
+
     import custom_components.nestquest as nq_mod
     import custom_components.nestquest.coordinator as coordinator_module
 
@@ -907,9 +838,13 @@ def coordinator_serves_local_snapshot():
         override = _COORDINATOR_CLIENT_OVERRIDES.get(entry.entry_id)
         if override is not None:
             return override
-        return LazyLocalSnapshotClient(hass, entry.entry_id)
-
-    import unittest.mock as mock
+        return StubSnapshotClient(
+            {
+                "today_iso": datetime.date.today().isoformat(),
+                "cycle_day": 0,
+                "children": [],
+            }
+        )
 
     _COORDINATOR_CLIENT_OVERRIDES.clear()
     patcher = mock.patch.object(
@@ -919,14 +854,6 @@ def coordinator_serves_local_snapshot():
     yield
     patcher.stop()
     _COORDINATOR_CLIENT_OVERRIDES.clear()
-
-
-def set_coordinator_client(entry, client):
-    """Register a scripted client for ``entry``'s coordinator factory."""
-    import custom_components.nestquest.coordinator as coordinator_module
-
-    coordinator_module._COORDINATOR_CLIENT_OVERRIDES[entry.entry_id] = client
-    return client
 
 
 async def refire_api_transitions(hass, entry, client):
@@ -1203,42 +1130,6 @@ def make_config_flow_entry():
         return SimpleNamespace(domain=domain, entry_id=entry_id)
 
     return _factory
-
-
-def freeze_nestquest_clock(
-    monkeypatch, instant: datetime.datetime
-) -> tuple[datetime.datetime, list]:
-    """Freeze the integration's ``datetime`` clock to a fixed aware instant.
-
-    Only ``custom_components.nestquest``'s ``datetime`` binding is patched,
-    so the generation path's ``datetime.datetime.now`` reads this instant
-    (localized to whatever time zone it asks for) while every other module
-    and the test harness keep the real clock.  Returns ``(frozen, requested)``
-    where ``frozen`` is the instant normalized to UTC and ``requested`` is
-    the list of ``tzinfo`` objects the code under test passed to ``now`` —
-    so a caller can prove the generation path actually requested the
-    configured HA time zone rather than silently reading UTC.
-    """
-    import custom_components.nestquest as nestquest
-
-    frozen = instant.astimezone(datetime.timezone.utc)
-    requested: list = []
-
-    class _FrozenDatetime(datetime.datetime):
-        @classmethod
-        def now(cls, tz=None):
-            requested.append(tz)
-            if tz is None:
-                return frozen.replace(tzinfo=None)
-            return frozen.astimezone(tz)
-
-    fake_module = SimpleNamespace(
-        datetime=_FrozenDatetime,
-        timedelta=datetime.timedelta,
-        date=datetime.date,
-    )
-    monkeypatch.setattr(nestquest, "datetime", fake_module)
-    return frozen, requested
 
 
 # ---------------------------------------------------------------------------

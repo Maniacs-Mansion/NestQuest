@@ -5,7 +5,7 @@ import datetime
 
 import pytest
 
-from custom_components.nestquest.presence import (
+from custom_components.nestquest.core.presence import (
     MAX_CYCLE_LENGTH_WEEKS,
     PresenceEngine,
     PresenceOverride,

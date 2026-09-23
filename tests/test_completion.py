@@ -8,27 +8,27 @@ import re
 
 import pytest
 
-from custom_components.nestquest.completion import (
+from custom_components.nestquest.core.completion import (
     append_event,
     complete_instance,
     instance_state,
     list_missed_for_child,
     uncomplete_instance,
 )
-from custom_components.nestquest.dao_children import ChildrenDao
-from custom_components.nestquest.dao_instances import (
+from custom_components.nestquest.core.dao_children import ChildrenDao
+from custom_components.nestquest.core.dao_instances import (
     EVENT_COMPLETED,
     EVENT_UNCOMPLETED,
     CompletionEventRecord,
     CompletionEventsDao,
     QuestInstancesDao,
 )
-from custom_components.nestquest.dao_rules import (
+from custom_components.nestquest.core.dao_rules import (
     QuestDefinitionsDao,
     ScheduleRulesDao,
 )
-from custom_components.nestquest.db import NestQuestDatabase
-from custom_components.nestquest.migrations import apply_migrations
+from custom_components.nestquest.core.db import NestQuestDatabase
+from custom_components.nestquest.core.migrations import apply_migrations
 
 
 def _run(coro):
@@ -311,7 +311,7 @@ def test_now_pins_occurred_at_utc(tmp_path) -> None:
 
 
 def test_module_never_exposes_update_or_delete() -> None:
-    import custom_components.nestquest.completion as completion
+    import custom_components.nestquest.core.completion as completion
 
     public = {
         name

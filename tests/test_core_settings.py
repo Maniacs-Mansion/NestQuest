@@ -14,9 +14,9 @@ Covers the contracts from task 4dd8f870 plus the review fixes:
   test feeds the scanner each bypass shape and asserts it flags them.
 - A settings object constructed with NON-default ``horizon_days`` and
   ``day_rollover_time`` drives a materialization whose resulting window
-  matches the non-default horizon — via BOTH the core ``materialize``
-  path and the INTEGRATION path (``_run_horizon_materialization`` +
-  ``_register_day_rollover_listener``).
+  matches the non-default horizon — via the core ``materialize`` path
+  (the integration path it used to share is gone with the integration's
+  database).
 """
 from __future__ import annotations
 
@@ -29,7 +29,6 @@ from typing import Any
 import pytest
 
 import custom_components.nestquest.core as _core_mod
-from conftest import freeze_nestquest_clock
 
 from custom_components.nestquest.const import (
     CONF_AFTERNOON_REMINDER_ENABLED,
@@ -741,7 +740,7 @@ def test_settings_module_has_no_ha_imports() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Materialization over a non-default horizon: core path + integration path.
+# Materialization over a non-default horizon (core path).
 # ---------------------------------------------------------------------------
 
 
@@ -826,87 +825,5 @@ async def test_materialize_over_non_default_horizon(hass, tmp_path) -> None:
         assert await QuestInstancesDao(database).list_by_date_range(
             child.id, beyond, far
         ) == []
-    finally:
-        await database.close()
-
-
-async def test_integration_path_threads_settings(
-    hass, tmp_path, monkeypatch
-) -> None:
-    """The integration path threads ``settings`` through horizon_window + rollover.
-
-    ``_run_horizon_materialization`` calls
-    ``settings.horizon_window(today)`` (so the helper is real and shared,
-    not recomputed inline), and ``_register_day_rollover_listener``
-    registers at ``settings.day_rollover_hour_minute``.  This runs the
-    INTEGRATION path with ``horizon_days=3`` and
-    ``day_rollover_time='03:30'`` and asserts the resulting instance
-    window matches [today, today+3] AND the registered hour/minute are 3/30.
-    """
-    import custom_components.nestquest as nestquest
-    from custom_components.nestquest.core.dao_children import ChildrenDao
-    from custom_components.nestquest.core.dao_instances import (
-        QuestInstancesDao,
-    )
-    from custom_components.nestquest.core.quest_definitions import (
-        create_quest_definition,
-    )
-    from custom_components.nestquest.core.recurrence import (
-        RuleType,
-        ScheduleRule,
-    )
-
-    # Freeze the integration clock so "today" is deterministic (the
-    # hass fixture's config.time_zone is UTC, so 2026-03-01 12:00 UTC
-    # localizes to 2026-03-01).
-    freeze_nestquest_clock(
-        monkeypatch, datetime.datetime(2026, 3, 1, 12, 0, tzinfo=datetime.timezone.utc)
-    )
-
-    database = await _prepare(tmp_path / "nq.db", hass.async_add_executor_job)
-    try:
-        settings = NestQuestSettings(horizon_days=3, day_rollover_time="03:30")
-        today = datetime.date(2026, 3, 1)
-
-        NOW = "2026-03-01T12:00:00+00:00"
-        child = await ChildrenDao(database).create("Ada", NOW)
-        await create_quest_definition(
-            database,
-            "Daily chore",
-            ScheduleRule(
-                rule_type=RuleType.DAILY, start_date=today.isoformat()
-            ),
-            [child.id],
-            ["morning"],
-        )
-
-        # Integration path: the window comes from settings.horizon_window.
-        await nestquest._run_horizon_materialization(hass, database, settings)
-
-        end = today + datetime.timedelta(days=3)
-        records = await QuestInstancesDao(database).list_by_date_range(
-            child.id, today.isoformat(), end.isoformat()
-        )
-        dates = sorted({r.due_date for r in records})
-        assert dates == [
-            (today + datetime.timedelta(days=i)).isoformat()
-            for i in range(4)
-        ]
-        beyond = (end + datetime.timedelta(days=1)).isoformat()
-        far = (end + datetime.timedelta(days=10)).isoformat()
-        assert await QuestInstancesDao(database).list_by_date_range(
-            child.id, beyond, far
-        ) == []
-
-        # The rollover listener registers at the configured hour/minute.
-        remove = nestquest._register_day_rollover_listener(
-            hass, database, settings
-        )
-        try:
-            reg = hass.time_change.registrations[-1]
-            assert reg["hour"] == 3
-            assert reg["minute"] == 30
-        finally:
-            remove()
     finally:
         await database.close()

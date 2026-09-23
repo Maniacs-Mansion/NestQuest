@@ -14,7 +14,7 @@ import pytest
 from conftest import executor_for, make_hass
 
 import custom_components.nestquest.core.db as db_module
-from custom_components.nestquest.db import NestQuestDatabase
+from custom_components.nestquest.core.db import NestQuestDatabase
 
 
 def _run(coro):
@@ -933,68 +933,3 @@ def test_execute_many_exposes_rowcount(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle wiring: opened once per entry, closed on unload
-# ---------------------------------------------------------------------------
-
-
-async def test_setup_entry_opens_database_in_runtime_data(hass, make_entry) -> None:
-    from conftest import wire_entry_to_registry
-
-    from custom_components.nestquest import async_setup_entry, async_unload_entry
-
-    entry = wire_entry_to_registry(make_entry(), hass.registry)
-    assert await async_setup_entry(hass, entry) is True
-    runtime = entry.runtime_data
-    assert runtime.database is not None
-    assert runtime.database.connected is True
-    await async_unload_entry(hass, entry)
-
-
-async def test_unload_entry_closes_database(hass, make_entry) -> None:
-    from conftest import wire_entry_to_registry
-
-    from custom_components.nestquest import async_setup_entry, async_unload_entry
-
-    entry = wire_entry_to_registry(make_entry(), hass.registry)
-    await async_setup_entry(hass, entry)
-    database = entry.runtime_data.database
-    assert database.connected is True
-    assert await async_unload_entry(hass, entry) is True
-    assert database.connected is False
-    with pytest.raises(RuntimeError, match="closed"):
-        await database.fetch_one("SELECT 1")
-
-
-async def test_second_setup_does_not_open_second_connection(hass, make_entry) -> None:
-    from conftest import wire_entry_to_registry
-
-    from custom_components.nestquest import async_setup_entry, async_unload_entry
-
-    entry = wire_entry_to_registry(make_entry(), hass.registry)
-    await async_setup_entry(hass, entry)
-    first = entry.runtime_data.database
-
-    await async_setup_entry(hass, entry)
-    second = entry.runtime_data.database
-
-    assert first is second
-    assert first.connected is True
-    await async_unload_entry(hass, entry)
-
-
-async def test_setup_unload_cycles_reopen_fresh_connection(hass, make_entry) -> None:
-    from conftest import wire_entry_to_registry
-
-    from custom_components.nestquest import async_setup_entry, async_unload_entry
-
-    entry = wire_entry_to_registry(make_entry(), hass.registry)
-    seen: list[NestQuestDatabase] = []
-    for _ in range(3):
-        await async_setup_entry(hass, entry)
-        runtime = entry.runtime_data
-        assert runtime.database.connected is True
-        seen.append(runtime.database)
-        await async_unload_entry(hass, entry)
-        assert runtime.database.connected is False
-    assert len(set(seen)) == 3
-    assert hass.data == {}
