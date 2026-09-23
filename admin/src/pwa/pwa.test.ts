@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { REVISION_MARKER, injectServiceWorker } from "../../vite-sw-plugin";
 import { registerServiceWorker } from "./register";
 
 const adminRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -78,7 +79,10 @@ describe("index.html and entry point", () => {
 
 // Minimal service-worker global scope: runs public/sw.js against in-memory
 // caches and a stubbed network, so handler behaviour is checked without I/O.
-function loadServiceWorker(network: (url: string) => Promise<FakeResponse>) {
+function loadServiceWorker(
+  network: (url: string) => Promise<FakeResponse>,
+  source: string = swSource,
+) {
   const listeners: Record<string, (event: any) => void> = {};
   const stores = new Map<string, Map<string, FakeResponse>>();
   const openStore = (name: string) => {
@@ -117,7 +121,7 @@ function loadServiceWorker(network: (url: string) => Promise<FakeResponse>) {
     clients: { claim: vi.fn(async () => undefined) },
   };
   const ResponseStub = { error: () => new FakeResponse("", false, "error") };
-  new Function("self", "caches", "fetch", "Response", swSource)(self, caches, fetchFn, ResponseStub);
+  new Function("self", "caches", "fetch", "Response", source)(self, caches, fetchFn, ResponseStub);
 
   const dispatch = async (type: string, init: object = {}) => {
     let pending: Promise<unknown> | undefined;
@@ -216,6 +220,105 @@ describe("service worker (public/sw.js)", () => {
       expect(responded).toBe(false);
     }
     expect(sw.fetchFn).not.toHaveBeenCalled();
+  });
+});
+
+// A Vite-style built index.html referencing hashed bundles.
+const builtIndexHtml = (hash: string) => `<!doctype html>
+<html lang="en">
+  <head>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <script type="module" crossorigin src="/assets/index-${hash}.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/vendor-${hash}.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-${hash}.css">
+    <link rel="preconnect" href="https://auth.example.com" />
+  </head>
+  <body><div id="root"></div></body>
+</html>`;
+
+// Same-origin script/link URLs of an HTML document, parsed independently of
+// the build plugin so the regression check does not trust its own extractor.
+const referencedAssets = (html: string) =>
+  [...new DOMParser().parseFromString(html, "text/html").querySelectorAll("script[src], link[href]")]
+    .map((el) => new URL(el.getAttribute("src") ?? el.getAttribute("href")!, "https://admin.test/"))
+    .filter((url) => url.origin === "https://admin.test")
+    .map((url) => url.href);
+
+describe("build-time service worker injection", () => {
+  it("precaches every asset the cached index.html references on install (PWA-001)", async () => {
+    const html = builtIndexHtml("Ab12Cd34");
+    const built = injectServiceWorker(html, swSource);
+    const sw = loadServiceWorker(async (url) =>
+      new FakeResponse(url.endsWith("/index.html") ? html : `net:${url}`),
+    built);
+
+    await sw.dispatch("install");
+    const shell = [...sw.stores.entries()].find(([name]) => name.startsWith("nestquest-admin-shell-"));
+    expect(shell).toBeDefined();
+    const [, shellStore] = shell!;
+
+    const cachedHtml = shellStore.get("https://admin.test/index.html")!.body;
+    const assets = referencedAssets(cachedHtml);
+    expect(assets).toEqual(
+      expect.arrayContaining([
+        "https://admin.test/assets/index-Ab12Cd34.js",
+        "https://admin.test/assets/vendor-Ab12Cd34.js",
+        "https://admin.test/assets/index-Ab12Cd34.css",
+      ]),
+    );
+    for (const asset of assets) expect([...shellStore.keys()]).toContain(asset);
+    expect([...shellStore.keys()]).not.toContain("https://auth.example.com/");
+  });
+
+  it("derives a new revision for different index.html content (PWA-002)", () => {
+    const a = injectServiceWorker(builtIndexHtml("aaaa1111"), swSource);
+    const b = injectServiceWorker(builtIndexHtml("bbbb2222"), swSource);
+    const revisionOf = (src: string) => /const REVISION = "([0-9a-f]+)";/.exec(src)?.[1];
+
+    expect(a).not.toContain(REVISION_MARKER);
+    expect(b).not.toContain(REVISION_MARKER);
+    expect(revisionOf(a)).toMatch(/^[0-9a-f]{12}$/);
+    expect(revisionOf(b)).toMatch(/^[0-9a-f]{12}$/);
+    expect(revisionOf(a)).not.toBe(revisionOf(b));
+    expect(injectServiceWorker(builtIndexHtml("aaaa1111"), swSource)).toBe(a);
+  });
+
+  it("names both caches after the build revision (PWA-002)", async () => {
+    const built = injectServiceWorker(builtIndexHtml("aaaa1111"), swSource);
+    const revision = /const REVISION = "([0-9a-f]+)";/.exec(built)![1];
+    const sw = loadServiceWorker(async (url) => new FakeResponse(`net:${url}`), built);
+
+    await sw.dispatch("install");
+    await sw.dispatch("fetch", { request: request("/assets/late.js", { destination: "script" }) });
+    expect([...sw.stores.keys()].sort()).toEqual([
+      `nestquest-admin-runtime-${revision}`,
+      `nestquest-admin-shell-${revision}`,
+    ]);
+  });
+
+  it("fails fast when sw.js lacks the placeholders", () => {
+    expect(() => injectServiceWorker(builtIndexHtml("x"), "const SHELL_URLS = [];")).toThrow();
+  });
+
+  it("activation deletes only stale nestquest-admin caches (PWA-003)", async () => {
+    const built = injectServiceWorker(builtIndexHtml("aaaa1111"), swSource);
+    const sw = loadServiceWorker(async (url) => new FakeResponse(`net:${url}`), built);
+    for (const name of [
+      "nestquest-admin-shell-old",
+      "nestquest-admin-runtime-old",
+      "some-other-app-cache",
+    ]) {
+      sw.openStore(name);
+    }
+
+    await sw.dispatch("install");
+    await sw.dispatch("activate");
+    const names = [...sw.stores.keys()];
+    expect(names).not.toContain("nestquest-admin-shell-old");
+    expect(names).not.toContain("nestquest-admin-runtime-old");
+    expect(names).toContain("some-other-app-cache");
+    expect(names.some((n) => n.startsWith("nestquest-admin-shell-") && n !== "nestquest-admin-shell-old")).toBe(true);
   });
 });
 

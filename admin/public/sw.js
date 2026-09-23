@@ -2,20 +2,29 @@
    Precaches the app shell, serves static assets cache-first, and falls back
    to the cached shell for navigations when offline. Only same-origin GET
    requests are handled; cross-origin requests (Authentik, the API host) are
-   never intercepted or cached. */
+   never intercepted or cached.
+   The build (vite-sw-plugin.ts) replaces PRECACHE_ASSETS with the hashed
+   bundles referenced by index.html and the revision marker with a content
+   hash, so each release installs a new worker with fresh caches. */
 
-const VERSION = "v1";
-const SHELL_CACHE = `nestquest-admin-shell-${VERSION}`;
-const RUNTIME_CACHE = `nestquest-admin-runtime-${VERSION}`;
+const REVISION = "__NQ_BUILD_REVISION__";
+const CACHE_PREFIX = "nestquest-admin-";
+const SHELL_CACHE = `${CACHE_PREFIX}shell-${REVISION}`;
+const RUNTIME_CACHE = `${CACHE_PREFIX}runtime-${REVISION}`;
 const CURRENT_CACHES = [SHELL_CACHE, RUNTIME_CACHE];
 
+const PRECACHE_ASSETS = [];
+
 const SHELL_URLS = [
-  "/",
-  "/index.html",
-  "/manifest.webmanifest",
-  "/icons/icon-192.png",
-  "/icons/icon-512.png",
-  "/icons/icon-maskable-512.png",
+  ...new Set([
+    "/",
+    "/index.html",
+    "/manifest.webmanifest",
+    "/icons/icon-192.png",
+    "/icons/icon-512.png",
+    "/icons/icon-maskable-512.png",
+    ...PRECACHE_ASSETS,
+  ]),
 ];
 
 // Request destinations treated as static assets (cache-first). Anything else
@@ -37,7 +46,9 @@ self.addEventListener("activate", (event) => {
       .keys()
       .then((keys) =>
         Promise.all(
-          keys.filter((key) => !CURRENT_CACHES.includes(key)).map((key) => caches.delete(key)),
+          keys
+            .filter((key) => key.startsWith(CACHE_PREFIX) && !CURRENT_CACHES.includes(key))
+            .map((key) => caches.delete(key)),
         ),
       )
       .then(() => self.clients.claim()),
