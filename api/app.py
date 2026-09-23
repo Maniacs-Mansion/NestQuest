@@ -48,6 +48,7 @@ from api.database import DatabaseState, make_database
 from api.events import TransitionPublisher
 from api.routes_admin import router as admin_router
 from api.routes_panel import router as panel_router
+from api.scheduler import MissedSweepScheduler
 
 
 def _build_lifespan(db_path: str):
@@ -57,7 +58,11 @@ def _build_lifespan(db_path: str):
     path in without threading it through FastAPI's lifespan signature.
     The lifespan also installs the app's ONE in-process transition
     publisher on ``app.state.publisher`` (see :mod:`api.events`) so
-    every route and SSE subscriber shares that single instance.
+    every route and SSE subscriber shares that single instance, and
+    starts the daily missed-sweep scheduler
+    (:class:`api.scheduler.MissedSweepScheduler`) against the same
+    database and publisher — cancelled before the connection closes on
+    shutdown.
     """
 
     @asynccontextmanager
@@ -65,10 +70,16 @@ def _build_lifespan(db_path: str):
         state = make_database(db_path)
         app.state.db = state
         app.state.publisher = TransitionPublisher()
+        scheduler = MissedSweepScheduler(
+            state.database, publisher=app.state.publisher
+        )
+        app.state.sweep_scheduler = scheduler
         try:
             await state.open_and_migrate()
+            scheduler.start()
             yield
         finally:
+            await scheduler.stop()
             await state.close()
 
     return lifespan

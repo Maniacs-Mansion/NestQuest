@@ -198,6 +198,12 @@ core_dao_children = importlib.import_module(
 #: delegating.
 core_dao_rules = importlib.import_module(f"{_CORE_MODULE_NAME}.dao_rules")
 
+#: The HA-free missed sweep (``core.sweep.run_missed_sweep`` +
+#: ``SWEEP_WATERMARK_KEY``) the admin plane's trigger route calls and
+#: the daily scheduler runs — the ONE sweep policy the integration's
+#: bus shim shares.
+core_sweep = importlib.import_module(f"{_CORE_MODULE_NAME}.sweep")
+
 __all__ = [
     "core",
     "core_children",
@@ -218,4 +224,5 @@ __all__ = [
     "core_snapshot",
     "core_settings",
     "core_settings_store",
+    "core_sweep",
 ]

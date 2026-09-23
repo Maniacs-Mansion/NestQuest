@@ -139,6 +139,23 @@ are deliberately not unified here:
   module's uniform None-as-absent rule).  The response is the updated
   effective settings, the same shape ``GET`` returns.
 
+The missed-sweep trigger (task 058c7b69) follows the same pattern over
+:mod:`nestquest_core.sweep` — the HA-free sweep policy the
+integration's rollover listener shares:
+
+- ``POST /missed-sweep`` runs the sweep for the API host's local
+  ``today`` (ONE :func:`_local_now` clock read threaded into the core
+  call) and publishes each returned ``(event_type, payload)`` pair
+  DIRECTLY on the app's ONE transition publisher — the sweep-built
+  payload, never re-fetched (the core commits its watermark before
+  returning, so a failed re-fetch after it would lose the missed event
+  forever), the same publish-what-the-core-built shape
+  api/scheduler.py uses.  The watermark rule
+  (a same-day rerun announces nothing, a post-downtime run sweeps the
+  accumulated window once), the no-completion-event rule and the
+  read-only-over-the-domain-tables guarantee all live in the core; the
+  response reports how many transitions were published.
+
 Error mapping (every children, quest-definition and presence route,
 deliberately narrow):
 
@@ -237,6 +254,7 @@ from api.nestquest_core import (
     core_recurrence,
     core_settings,
     core_settings_store,
+    core_sweep,
 )
 
 #: All admin-plane routes share this router; the ONE admin dependency
@@ -654,6 +672,17 @@ class AdminSettingsResponse(BaseModel):
     celebration_enabled: bool
 
 
+class AdminMissedSweepResponse(BaseModel):
+    """The result of ``POST /api/v1/admin/missed-sweep``.
+
+    ``fired`` is the number of ``nestquest_quest_missed`` transitions
+    the run built AND this route published on the SSE stream — zero
+    when the sweep's watermark already covers today (a same-day rerun).
+    """
+
+    fired: int
+
+
 #: 404 detail for a child id the core layer reports as non-existent.
 _CHILD_NOT_FOUND_DETAIL = "Child not found"
 
@@ -799,6 +828,19 @@ def _raise_settings_error(error: ValueError) -> NoReturn:
     settings are never half-changed — and is 422 with the core's
     message as the detail.  Only ``ValueError`` is caught, so an
     unexpected failure re-raises rather than becoming a 4xx.
+    """
+    raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+def _raise_sweep_error(error: ValueError) -> NoReturn:
+    """Map a core missed-sweep ``ValueError`` onto 422 and raise it.
+
+    The sweep route has no path ids, so it has no 404 case: a core
+    ``ValueError`` — a rejected date the sweep's query refuses before
+    any read, unreachable from this handler because ``today`` comes
+    from the route's own clock read — is 422 with the core's message
+    as the detail.  Only ``ValueError`` is caught, so an unexpected
+    failure re-raises rather than becoming a 4xx.
     """
     raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -1633,6 +1675,58 @@ async def admin_update_settings(
     except ValueError as error:
         _raise_settings_error(error)
     return _settings_response(settings)
+
+
+@router.post(
+    "/missed-sweep",
+    summary="Run the nightly missed-quest sweep now",
+    response_model=AdminMissedSweepResponse,
+)
+async def admin_run_missed_sweep(
+    request: Request,
+) -> AdminMissedSweepResponse:
+    """Run the missed-quest sweep and publish what it built.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter over the SAME
+    HA-free sweep policy the integration's rollover listener runs
+    (:mod:`nestquest_core.sweep`): ONE timezone-aware clock read
+    (:func:`_local_now`) pins the API host's local ``today``, and ONE
+    :func:`nestquest_core.sweep.run_missed_sweep` call does everything
+    else — the past-due open-instance query, the documented payload
+    build and the watermark update (a same-day rerun is an empty
+    no-op, and a run after downtime sweeps the accumulated window
+    once).  The route is read-only over the domain tables: it never
+    mutates an instance and never writes a completion event.
+
+    Each returned ``(event_type, payload)`` pair is published DIRECTLY
+    on the app's ONE transition publisher (``request.app.state.publisher``,
+    fan-out fire-and-forget, see api/events.py) — the exact payload the
+    sweep built, never re-fetched and never hand-built here, the same
+    publish-what-the-core-built shape api/scheduler.py uses.  This is a
+    correctness rule, not a style preference: the core commits the
+    idempotency watermark BEFORE returning, so a re-fetch-based publish
+    loop opens a loss window — a concurrent regenerate deleting the
+    instance, or a transient database error, would raise uncaught (a
+    bare 500) AFTER the watermark advanced, and no future sweep would
+    ever re-examine that instance.  Publishing the built payload leaves
+    no such window, and every event of one run keeps the ONE shared
+    ``occurred_at`` stamp the sweep computed for it.  The response
+    reports ``fired`` — the number of transitions published.  Error
+    mapping (:func:`_raise_sweep_error`): every core ``ValueError`` is
+    422; anything else re-raises.
+    """
+    state: DatabaseState = request.app.state.db
+    database = state.database
+    today = _local_now().date()
+    try:
+        events = await core_sweep.run_missed_sweep(database, today=today)
+    except ValueError as error:
+        _raise_sweep_error(error)
+    for event_type, payload in events:
+        request.app.state.publisher.publish(event_type, payload)
+    return AdminMissedSweepResponse(fired=len(events))
 
 
 __all__ = ["router"]
