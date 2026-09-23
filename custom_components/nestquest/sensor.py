@@ -21,6 +21,8 @@ missed instances, and ``admin_instances`` includes them (D-009).
 """
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -41,12 +43,17 @@ from .coordinator import (
 )
 from .core.snapshot import instance_payload
 
-#: Home Assistant's state machine refuses states longer than 255
+#: HA's state machine refuses states longer than 255
 #: characters (its hard recorder/state limit).  These sensors' states
 #: are numeric, but the guard is applied uniformly: a payload-bearing
 #: sensor can never crash the state write, and later string-state
 #: sensors reuse the same helper.
 MAX_STATE_LENGTH = 255
+
+#: Entity-id length cap the slug mirror applies: HA truncates the
+#: entity_id (``sensor.`` + slug) at MAX_LENGTH_STATE_ENTITY_ID (64),
+#: so the slugged object id alone may not exceed 64 - len("sensor.").
+_MAX_SLUG_LENGTH = 64 - len("sensor.")
 
 
 def _state_within_limit(state: Any) -> Any:
@@ -96,6 +103,56 @@ def _next_open_quest(
             view.due_time if view.due_time is not None else "",
         ),
     )
+
+
+def _slugify(text: str) -> str:
+    """Slugify a display name the way Home Assistant derives entity ids.
+
+    Mirrors ``homeassistant.util.slugify`` (the unicode path HA runs
+    entity names through) for accented-Latin names: NFKD-normalize,
+    fold to ASCII (accents drop out with their combining marks),
+    lowercase, and turn every run of non-alphanumerics into one
+    underscore, capped at HA's entity-id length like the registry does.
+    The documented divergence from HA's vendored slugifier is unidecode:
+    HA transliterates any script to ASCII (so e.g. non-Latin names
+    survive), this mirror drops those characters instead, and a name
+    that then slugs to nothing falls through to HA's ``unknown``
+    sentinel — the same answer HA's wrapper gives.  (The harness is
+    mock-only — no real HA to import the helper from — and entity ids
+    are registry identity, so the mirror is deliberate.)
+    """
+    slug = unicodedata.normalize("NFKD", text)
+    slug = slug.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "_", slug.lower()).strip("_")
+    return (slug or "unknown")[:_MAX_SLUG_LENGTH]
+
+
+def _child_roster(children: Iterable[ChildDaySnapshot]) -> list[dict[str, Any]]:
+    """The ordered child roster the panel cards discover children from.
+
+    One entry per ACTIVE child in the snapshot's order (the API's
+    sort_order, then id): ``child_id``, ``name``, and the ``slug`` the
+    entity-id derivation produces for the child's name — the piece the
+    cards need to build ``sensor.nestquest_<slug>_...`` ids.  Duplicate
+    display names get the registry's ``_2``/``_3`` suffix in snapshot
+    order, matching how HA resolves the collision at registration.  The
+    rollups' ``children`` attribute (per-child counts) is unchanged and
+    carries a different shape on purpose.
+    """
+    slugs: dict[str, int] = {}
+    roster: list[dict[str, Any]] = []
+    for child in children:
+        base = _slugify(child.child_name)
+        taken = slugs.get(base, 0) + 1
+        slugs[base] = taken
+        roster.append(
+            {
+                "child_id": child.child_id,
+                "name": child.child_name,
+                "slug": base if taken == 1 else f"{base}_{taken}",
+            }
+        )
+    return roster
 
 
 class _NestQuestChildDaySensor(CoordinatorEntity, SensorEntity):
@@ -356,7 +413,12 @@ class _NestQuestHouseholdSensor(CoordinatorEntity, SensorEntity):
 
 
 class NestQuestHouseholdDueTodaySensor(_NestQuestHouseholdSensor):
-    """Total quests due today across active children."""
+    """Total quests due today across active children.
+
+    Also publishes ``child_roster`` (see :func:`_child_roster`): the
+    ordered child identity list the panel cards read to discover the
+    board's children when the card config carries no ``child_order``.
+    """
 
     _attr_name = "NestQuest household quests due today"
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -380,7 +442,8 @@ class NestQuestHouseholdDueTodaySensor(_NestQuestHouseholdSensor):
             "children": {
                 str(child.child_id): child.due_today
                 for child in data.children
-            }
+            },
+            "child_roster": _child_roster(data.children),
         }
 
 

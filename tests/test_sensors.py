@@ -19,6 +19,7 @@ from custom_components.nestquest import async_setup_entry, async_unload_entry
 from custom_components.nestquest.const import DOMAIN
 from custom_components.nestquest.sensor import (
     MAX_STATE_LENGTH,
+    _slugify,
     _state_within_limit,
 )
 
@@ -539,3 +540,115 @@ async def test_household_rollups_sum_the_active_children(
     assert cycle_day_entity.name == "NestQuest cycle day"
     assert cycle_day_entity.native_value == 4
     assert cycle_day_entity.extra_state_attributes["today"] == _today_iso()
+
+
+async def test_household_due_sensor_publishes_the_ordered_child_roster(
+    hass, make_entry
+) -> None:
+    """Feature 20: the rollup carries the ordered child roster beside
+    the unchanged per-child ``children`` counts, so the panel cards can
+    discover the board without a configured child_order.  The order is
+    the coordinator snapshot's (the API's sort_order, then id)."""
+    entry, _coordinator, _client = await _setup_entry(
+        hass, make_entry, _seeded_payload()
+    )
+    attributes = hass.entities[
+        "nestquest_household_quests_due_today"
+    ].extra_state_attributes
+    assert attributes["child_roster"] == [
+        {"child_id": ADA, "name": "Ada", "slug": "ada"},
+        {"child_id": BO, "name": "Bo", "slug": "bo"},
+        {"child_id": CORY, "name": "Cory", "slug": "cory"},
+    ]
+    # The pre-existing per-child counts attribute is untouched.
+    assert attributes["children"] == {
+        str(ADA): 1,
+        str(BO): 1,
+        str(CORY): 0,
+    }
+
+
+async def test_household_roster_tracks_the_snapshot_on_refresh(
+    hass, make_entry
+) -> None:
+    """The roster re-derives from every snapshot: a reorder and a
+    rename in the API payload show up (with the re-derived slug) on the
+    next refresh, like the sensor names already do."""
+    reordered = _payload(
+        [
+            _child(CORY, "Cory"),
+            _child(ADA, "Ada", [_instance(7, ADA)]),
+            _child(BO, "Mirren", [_instance(8, BO)]),
+        ]
+    )
+    entry, coordinator, _client = await _setup_entry(
+        hass, make_entry, _seeded_payload(), reordered
+    )
+    roster_entity = hass.entities["nestquest_household_quests_due_today"]
+    assert [entry["slug"] for entry in roster_entity.extra_state_attributes["child_roster"]] == [
+        "ada",
+        "bo",
+        "cory",
+    ]
+
+    await coordinator.async_refresh()
+
+    assert roster_entity.extra_state_attributes["child_roster"] == [
+        {"child_id": CORY, "name": "Cory", "slug": "cory"},
+        {"child_id": ADA, "name": "Ada", "slug": "ada"},
+        {"child_id": BO, "name": "Mirren", "slug": "mirren"},
+    ]
+
+
+async def test_duplicate_display_names_get_registry_suffix_slugs(
+    hass, make_entry
+) -> None:
+    """Two children may share a nickname (the children layer allows
+    it); the roster's slugs then mirror the registry's collision
+    suffixing (_2, _3, ...) in snapshot order, so both plates resolve."""
+    payload = _payload(
+        [
+            _child(ADA, "Ada", [_instance(7, ADA)]),
+            _child(BO, "Ada"),
+        ]
+    )
+    entry, _coordinator, _client = await _setup_entry(hass, make_entry, payload)
+    assert hass.entities[
+        "nestquest_household_quests_due_today"
+    ].extra_state_attributes["child_roster"] == [
+        {"child_id": ADA, "name": "Ada", "slug": "ada"},
+        {"child_id": BO, "name": "Ada", "slug": "ada_2"},
+    ]
+
+
+async def test_empty_household_publishes_an_empty_roster(
+    hass, make_entry
+) -> None:
+    """An empty household is a valid 0: the roster is an empty list,
+    and the card's discovery of it renders the not-set-up notice."""
+    entry, _coordinator, _client = await _setup_entry(
+        hass, make_entry, _payload([])
+    )
+    attributes = hass.entities[
+        "nestquest_household_quests_due_today"
+    ].extra_state_attributes
+    assert attributes["child_roster"] == []
+    assert attributes["children"] == {}
+
+
+def test_slugify_mirrors_home_assistant_entity_id_derivation() -> None:
+    """The slug mirror matches homeassistant.util.slugify for the names
+    children are registered with (verified against HA's own slugify)."""
+    assert _slugify("Ada") == "ada"
+    assert _slugify("Mary Jane") == "mary_jane"
+    assert _slugify("Mary-Jane") == "mary_jane"
+    assert _slugify("O'Brien") == "o_brien"
+    assert _slugify("Émilie") == "emilie"
+    assert _slugify("Åsa") == "asa"
+    assert _slugify("  Bo  ") == "bo"
+    # HA's wrapper answers "unknown" when a name slugs to nothing.
+    assert _slugify("   ") == "unknown"
+    assert _slugify("?!?") == "unknown"
+    # The registry caps the entity_id at 64 characters, so the slugged
+    # object id alone is capped at 64 - len("sensor.").
+    assert _slugify("a" * 80) == "a" * (64 - len("sensor."))

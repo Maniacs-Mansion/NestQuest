@@ -5,16 +5,25 @@ the contract by reading the card sources and the built bundle, in the same
 spirit as test_frontend.py. They cover the states decided in
 design/PANEL-EMPTY-STATES.md and PANEL-SPEC.md, and guard the kid-facing
 bundles against ever gaining a parent-only service call.
+
+The party board additionally has render tests: they drive
+frontend/tests/render-party-board.mjs, which imports the built bundle into a
+jsdom window and reports the ordered plates the shadow DOM renders, so the
+zero-config discovery contract is asserted against the bundle HACS ships.
 """
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
-FRONTEND_CARDS_DIR = REPO_ROOT / "frontend" / "src" / "cards"
+FRONTEND_DIR = REPO_ROOT / "frontend"
+FRONTEND_CARDS_DIR = FRONTEND_DIR / "src" / "cards"
 PARTY_BOARD = FRONTEND_CARDS_DIR / "party-board.ts"
 QUEST_LOG = FRONTEND_CARDS_DIR / "quest-log.ts"
 BUNDLE_PATH = REPO_ROOT / "custom_components" / "nestquest" / "www" / "nestquest-cards.js"
+RENDER_HARNESS = FRONTEND_DIR / "tests" / "render-party-board.mjs"
 
 PANEL_SOURCES = (PARTY_BOARD, QUEST_LOG)
 
@@ -158,3 +167,123 @@ def test_panel_cards_reference_no_admin_only_services() -> None:
     bundle = _read(BUNDLE_PATH)
     assert "nestquest-party-board-card" in bundle
     assert "nestquest-quest-log-card" in bundle
+
+
+def test_party_board_discovers_children_from_the_household_roster() -> None:
+    """Feature 20: with no child_order configured, the board discovers
+    the ordered child slugs from the household rollup's child_roster
+    attribute; explicit configuration still wins."""
+    source = _read(PARTY_BOARD)
+    assert "child_roster" in source
+    assert "sensor.nestquest_household_quests_due_today" in source
+    # Discovery only fills in for a MISSING child_order; a supplied
+    # order array is honoured verbatim before the discovered list is
+    # ever consulted.
+    assert "Array.isArray(order)" in source
+    assert "_discoveredChildSlugs()" in source
+
+
+# --- Render tests (built bundle under jsdom) ---------------------------------
+
+#: The seeded three-child household, in the API's sort order: Ada and
+#: Bo share one daily quest (Bo is away today), Cory has none.
+ROSTER = [
+    {"child_id": 1, "name": "Ada", "slug": "ada"},
+    {"child_id": 2, "name": "Bo", "slug": "bo"},
+    {"child_id": 3, "name": "Cory", "slug": "cory"},
+]
+
+
+def _state(state: str, **attributes) -> dict:
+    return {"state": state, "attributes": attributes}
+
+
+def _three_child_states() -> dict:
+    """The hass states a three-child household exposes.
+
+    Entity ids follow the documented naming contract
+    (design/ENTITIES-AND-SERVICES.md §1): the household rollup and the
+    per-child sensors slugged from the child names.
+    """
+    return {
+        "sensor.nestquest_household_quests_due_today": _state(
+            "2",
+            children={"1": 1, "2": 1, "3": 0},
+            child_roster=ROSTER,
+        ),
+        "sensor.nestquest_ada_quests_due_today": _state(
+            "1", child_name="Ada", present=True
+        ),
+        "sensor.nestquest_ada_quests_completed_today": _state("0"),
+        "sensor.nestquest_ada_completion_pct_today": _state("0"),
+        "binary_sensor.nestquest_ada_present_today": _state("on"),
+        "sensor.nestquest_bo_quests_due_today": _state(
+            "1", child_name="Bo", present=False
+        ),
+        "sensor.nestquest_bo_quests_completed_today": _state("0"),
+        "sensor.nestquest_bo_completion_pct_today": _state("0"),
+        "binary_sensor.nestquest_bo_present_today": _state("off"),
+        "sensor.nestquest_cory_quests_due_today": _state(
+            "0", child_name="Cory", present=True
+        ),
+        "sensor.nestquest_cory_quests_completed_today": _state("0"),
+        "sensor.nestquest_cory_completion_pct_today": _state("100"),
+        "binary_sensor.nestquest_cory_present_today": _state("on"),
+    }
+
+
+def _render_party_board(config: dict, states: dict) -> dict:
+    """Render the built bundle's party board and return its plates.
+
+    Drives frontend/tests/render-party-board.mjs: the harness imports
+    the committed bundle (the artifact HACS ships) into a jsdom window,
+    mounts the card with the given config and hass snapshot, and prints
+    the ordered plates its shadow DOM renders.
+    """
+    assert BUNDLE_PATH.is_file(), "bundle missing: run cd frontend && npm run build"
+    assert RENDER_HARNESS.is_file()
+    spec = {
+        "bundle": str(BUNDLE_PATH),
+        "tag": "nestquest-party-board-card",
+        "config": config,
+        "hass": {"config": {"time_zone": "UTC"}, "states": states},
+    }
+    completed = subprocess.run(
+        ["node", str(RENDER_HARNESS)],
+        input=json.dumps(spec),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, (
+        f"render harness failed: {completed.stderr}"
+    )
+    return json.loads(completed.stdout)
+
+
+def test_party_board_renders_discovered_children_in_sort_order() -> None:
+    """No child_order key: three plates render in the roster's sort
+    order (the coordinator snapshot's order), one per child."""
+    result = _render_party_board(
+        {"type": "custom:nestquest-party-board-card"},
+        _three_child_states(),
+    )
+    assert result["plates"] == [
+        {"name": "Ada", "kind": "present"},
+        {"name": "Bo", "kind": "away"},
+        {"name": "Cory", "kind": "present"},
+    ]
+
+
+def test_explicit_child_order_still_wins_over_discovery() -> None:
+    """A supplied child_order keeps working: it overrides the household
+    roster's order and limits the plates to the configured slugs."""
+    result = _render_party_board(
+        {
+            "type": "custom:nestquest-party-board-card",
+            "child_order": ["bo", "ada"],
+        },
+        _three_child_states(),
+    )
+    assert [plate["name"] for plate in result["plates"]] == ["Bo", "Ada"]
+    assert "Cory" not in [plate["name"] for plate in result["plates"]]
