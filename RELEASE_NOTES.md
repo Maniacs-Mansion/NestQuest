@@ -61,10 +61,12 @@ API service that owns the database.
 
 - Minimum Home Assistant version: **2024.6.0**.
 - A running NestQuest API service, reachable at the base URL and panel
-  service token configured in the integration options (see `api/README.md`
-  and `docs/ARCHITECTURE.md`). Feature 17 — the deployment (TLS reverse
-  proxy, Authentik, network separation, backups) — is **not** part of this
-  release and must be completed before the integration is functional.
+  service token configured in the integration options. The API service
+  source ships in `api/`; there is no container image, compose file or
+  deployment runbook in this release, and Feature 17 — the deployment
+  (TLS reverse proxy, Authentik, network separation, backups) — is **not**
+  part of this release and must be completed before the integration is
+  functional. See `docs/ARCHITECTURE.md` for the target design.
 
 ### Breaking changes
 
@@ -97,11 +99,13 @@ API service that owns the database.
 ### Known Limitations
 
 - **Feature 17 (API deployment and identity) is not in this release.** The
-  API is containerized (`Dockerfile`, `deploy/compose.yaml`,
-  `api/README.md`) but there is no deployed TLS reverse proxy, no Authentik
-  application/provider/`nestquest-admins` group, no proven network
-  separation of the panel routes, and no backup/restore. Until that
-  deployment is completed the integration has nothing to talk to.
+  API service source ships in `api/`, but no container image, compose
+  file, TLS reverse proxy, Authentik application/provider/`nestquest-admins`
+  group, proven network separation of the panel routes, or backup/restore
+  is included. Feature 17's containerization groundwork was completed on
+  its own feature branch, which is **not** merged into `dev` and therefore
+  is not part of this release. Until that deployment is completed the
+  integration has nothing to talk to.
 - **Feature 19 (admin PWA) is not in this release.** There is no admin UI
   in 0.6.0; admin operations are reachable only through the API directly.
 - Moving the household database from Home Assistant to the API box is a
