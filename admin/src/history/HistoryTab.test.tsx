@@ -1,8 +1,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import HistoryTab, { FOOTER_NOTE, computeStats } from "./HistoryTab";
 import type { HistoryFilter, HistoryRow } from "../api/history";
 import { storeTokens } from "../auth/oidc";
+import { TransitionsProvider } from "../api/useTransitions";
+import { frame, testStream, type TestStream } from "../api/testStream";
 
 const TODAY = "2026-09-23";
 
@@ -421,5 +423,209 @@ describe("HistoryTab", () => {
   it("the scroll column ends with 92px bottom padding", async () => {
     await renderReady();
     expect(screen.getByTestId("history-scroll").style.paddingBottom).toBe("92px");
+  });
+});
+
+describe("HistoryTab live updates", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let streams: TestStream[];
+
+  function historyRequests(): URL[] {
+    return fetchMock.mock.calls
+      .map(([url]) => new URL(String(url), "http://x"))
+      .filter((url) => url.pathname === "/api/v1/admin/history");
+  }
+
+  const PAYLOAD = {
+    child_id: 2,
+    child_name: "Maeve",
+    instance_id: 2,
+    quest_title: "Make bed",
+    window: "morning",
+    due_date: TODAY,
+    due_time: null,
+    occurred_at: "2026-09-23T15:10:00Z",
+  };
+
+  beforeAll(() => {
+    vi.stubEnv("TZ", "America/Los_Angeles");
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+  });
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+    streams = [];
+    fetchMock = vi.fn((url: string) => {
+      if (new URL(url, "http://x").pathname.endsWith("/api/v1/admin/events")) {
+        const stream = testStream();
+        streams.push(stream);
+        return Promise.resolve(stream.response);
+      }
+      return Promise.resolve(routeFetch(url));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("a quest transition refetches the active filter; a day-complete does not", async () => {
+    render(
+      <TransitionsProvider>
+        <HistoryTab today={TODAY} />
+      </TransitionsProvider>,
+    );
+    await screen.findByTestId("stat-on-time");
+    fireEvent.click(screen.getByRole("button", { name: "Reversals" }));
+    await waitFor(() =>
+      expect(historyRequests().some((u) => u.searchParams.get("filter") === "reversals")).toBe(true),
+    );
+    await screen.findByTestId("stat-on-time");
+    await waitFor(() => expect(streams).toHaveLength(1));
+    const before = historyRequests().length;
+
+    streams[0].push(
+      frame("nestquest_child_day_complete", {
+        child_id: 2,
+        child_name: "Maeve",
+        quests_due: 4,
+        quests_completed: 4,
+        occurred_at: "2026-09-23T15:00:00Z",
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(historyRequests().length).toBe(before);
+
+    streams[0].push(frame("nestquest_quest_uncompleted", PAYLOAD));
+
+    await waitFor(() => expect(historyRequests().length).toBe(before + 3));
+    const refetched = historyRequests().slice(before);
+    // One refetch (reversals + the two stats queries), same range and filter.
+    expect(refetched.map((u) => u.searchParams.get("filter")).sort()).toEqual([
+      "all",
+      "missed",
+      "reversals",
+    ]);
+    for (const url of refetched) {
+      expect(url.searchParams.get("start")).toBe("2026-09-10");
+      expect(url.searchParams.get("end")).toBe(TODAY);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(historyRequests().length).toBe(before + 3);
+    expect(screen.queryByTestId("history-loading")).toBeNull();
+    expect(screen.getByRole("button", { name: "Reversals" }).getAttribute("aria-pressed")).toBe("true");
+    // Rows stay read-only (D-005): no row carries a control.
+    for (const row of screen.getAllByTestId("history-row")) {
+      expect(within(row).queryByRole("button")).toBeNull();
+    }
+  });
+
+  describe("a filter change interleaved with a quest transition", () => {
+    // Both land before the load effect runs, so one load serves both.
+    async function interleave(order: "sse-first" | "chip-first") {
+      await act(async () => {
+        const click = () => fireEvent.click(screen.getByRole("button", { name: "Reversals" }));
+        if (order === "chip-first") click();
+        streams[0].push(frame("nestquest_quest_uncompleted", PAYLOAD));
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        if (order === "sse-first") click();
+      });
+    }
+
+    async function renderLive() {
+      render(
+        <TransitionsProvider>
+          <HistoryTab today={TODAY} />
+        </TransitionsProvider>,
+      );
+      await screen.findByTestId("stat-on-time");
+      await waitFor(() => expect(streams).toHaveLength(1));
+      expect(screen.getAllByTestId("history-row")).toHaveLength(ROWS.all.length);
+    }
+
+    function titles(): string[] {
+      return screen.getAllByTestId("history-row").map((el) => el.textContent ?? "");
+    }
+
+    for (const order of ["sse-first", "chip-first"] as const) {
+      it(`${order}: shows loading, then only the active filter's rows`, async () => {
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const route = fetchMock.getMockImplementation()!;
+        await renderLive();
+        fetchMock.mockImplementation((url: string) => {
+          const parsed = new URL(url, "http://x");
+          if (parsed.searchParams.get("filter") === "reversals") {
+            return gate.then(() => route(url));
+          }
+          return route(url);
+        });
+
+        await interleave(order);
+        expect(screen.getByRole("button", { name: "Reversals" }).getAttribute("aria-pressed")).toBe("true");
+        // The previous filter's rows never show under the new chip.
+        expect(screen.getByTestId("history-loading")).toBeTruthy();
+        expect(screen.queryAllByTestId("history-row")).toHaveLength(0);
+
+        release();
+        await screen.findByTestId("stat-on-time");
+        expect(titles()).toHaveLength(1);
+        expect(titles()[0]).toContain("Make bed · Maeve");
+        expect(screen.getAllByTestId("history-dot")[0].className).toContain("history-dot--uncompleted");
+      });
+
+      it(`${order}: a failed filter-change load shows the error state, not stale rows`, async () => {
+        const route = fetchMock.getMockImplementation()!;
+        await renderLive();
+        fetchMock.mockImplementation((url: string) => {
+          const parsed = new URL(url, "http://x");
+          if (parsed.pathname === "/api/v1/admin/history") {
+            return Promise.resolve(jsonResponse({ detail: "boom" }, 500));
+          }
+          return route(url);
+        });
+
+        await interleave(order);
+        const error = await screen.findByTestId("history-error");
+        expect(error.textContent).toContain("The history could not be loaded");
+        expect(screen.getByRole("button", { name: "Reversals" }).getAttribute("aria-pressed")).toBe("true");
+        expect(screen.queryAllByTestId("history-row")).toHaveLength(0);
+        expect(screen.queryByTestId("stat-on-time")).toBeNull();
+      });
+    }
+  });
+
+  it("a failed transition refresh keeps the active filter's rows on screen", async () => {
+    render(
+      <TransitionsProvider>
+        <HistoryTab today={TODAY} />
+      </TransitionsProvider>,
+    );
+    await screen.findByTestId("stat-on-time");
+    await waitFor(() => expect(streams).toHaveLength(1));
+    const route = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string) => {
+      if (new URL(url, "http://x").pathname === "/api/v1/admin/history") {
+        return Promise.resolve(jsonResponse({ detail: "boom" }, 500));
+      }
+      return route(url);
+    });
+    const before = historyRequests().length;
+
+    streams[0].push(frame("nestquest_quest_uncompleted", PAYLOAD));
+    // The "all" filter plus the missed stats query.
+    await waitFor(() => expect(historyRequests().length).toBe(before + 2));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.queryByTestId("history-error")).toBeNull();
+    expect(screen.queryByTestId("history-loading")).toBeNull();
+    expect(screen.getAllByTestId("history-row")).toHaveLength(ROWS.all.length);
   });
 });
