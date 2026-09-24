@@ -270,6 +270,57 @@ class PresenceOverridesDao:
         )
         return [_override_from_row(row) for row in rows]
 
+    async def list_filtered(
+        self,
+        *,
+        child_id: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> list[PresenceOverrideRecord]:
+        """Return the household's overrides, optionally narrowed.
+
+        Every filter is optional and they combine: ``child_id`` keeps
+        that child's overrides only (an unknown child raises ValueError
+        rather than reading as "no overrides"); ``start`` keeps
+        overrides ending on or after it and ``end`` keeps overrides
+        starting on or before it, so both together select the overrides
+        overlapping the closed range ``[start, end]`` (the
+        :meth:`list_by_child_and_range` boundary rule).  Dates are
+        strict YYYY-MM-DD and ``end`` must not precede ``start``.
+        Ordered stably by start date, then child id, then id.
+        """
+        if start is not None:
+            _validate_date(start, "start")
+        if end is not None:
+            _validate_date(end, "end")
+        if start is not None and end is not None and end < start:
+            raise ValueError(
+                f"end must be on or after start, got {end!r} < {start!r}"
+            )
+        clauses: list[str] = []
+        params: list[object] = []
+        if child_id is not None:
+            child = await self._database.fetch_one(
+                "SELECT 1 FROM children WHERE id = ?", (child_id,)
+            )
+            if child is None:
+                raise ValueError(f"child {child_id} does not exist")
+            clauses.append("child_id = ?")
+            params.append(child_id)
+        if start is not None:
+            clauses.append("end_date >= ?")
+            params.append(start)
+        if end is not None:
+            clauses.append("start_date <= ?")
+            params.append(end)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = await self._database.fetch_all(
+            f"SELECT {_OVERRIDE_COLUMNS} FROM presence_overrides{where} "
+            "ORDER BY start_date, child_id, id",
+            tuple(params),
+        )
+        return [_override_from_row(row) for row in rows]
+
     async def get(self, override_id: int) -> PresenceOverrideRecord | None:
         """Return one override by id, or None when it does not exist."""
         row = await self._database.fetch_one(
