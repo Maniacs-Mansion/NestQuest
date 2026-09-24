@@ -51,6 +51,36 @@ class CyclePromptTests(unittest.TestCase):
         self.assertNotIn("The persistent user service runs", output)
         self.assertNotIn("---\n\n---\n\n# 27", output)
 
+    def test_task_complete_feature_triggers_one_guarded_promotion(self):
+        output = RENDER(TEMPLATE, PROFILE)
+        self.assertIn(
+            "feature becomes task-complete and its reviewed merge into `dev` is verified",
+            output,
+        )
+        self.assertIn("Every required feature task is `done`", output)
+        self.assertIn("No task review, remediation, approval, or merge remains pending", output)
+        self.assertIn("feature acceptance criteria and integrated checks pass", output)
+        self.assertIn("Independent approval applies to the exact feature head", output)
+        self.assertIn("approver's merge of that head into `dev` is verified", output)
+        self.assertIn("reflects the completed feature and exact repository references", output)
+        self.assertIn("Task completion inside an unmerged feature branch does not trigger", output)
+        self.assertIn("Do not create a duplicate promotion", output)
+        self.assertIn("Allow only one active promotion pull request to `main`", output)
+        self.assertIn("if it was closed without merge, recalculate", output)
+        self.assertIn("sole active orchestrator for the project", output)
+        self.assertIn("including controller exclusivity, reconciliation", output)
+        self.assertIn("RELEASE_PREPARATION_POLICY = EXCLUDED", output)
+        self.assertIn("Active promotion branch and pull request", output)
+        self.assertIn("An active promotion that has not reached `RELEASE_READY`", output)
+        self.assertIn("RELEASE_PREPARATION_POLICY:\n", output)
+        self.assertIn("A ready promotion is a local checkpoint", output)
+        self.assertIn("continue that work while the ready promotion waits", output)
+        self.assertLess(
+            output.index("Begin an automatically triggered, requested, or scheduled release"),
+            output.index("Advance to the next eligible feature"),
+        )
+        self.assertIn("Only Joshua may merge into `main`", output)
+
 
 if __name__ == "__main__":
     unittest.main()

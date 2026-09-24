@@ -150,6 +150,15 @@ Possible scopes:
 - `PROJECT_QUEUE`
 - `RELEASE_PREPARATION`
 
+Also set `RELEASE_PREPARATION_POLICY` at startup:
+
+- `AUTO` by default.
+- `EXCLUDED` only when the user's launch request explicitly says not to prepare
+  a release or `{{INTEGRATION_BRANCH}}`-to-`{{RELEASE_BRANCH}}` promotion.
+
+Record both `MISSION_SCOPE` and `RELEASE_PREPARATION_POLICY` in durable run
+state. Do not infer exclusion merely from `SINGLE_TASK` or `SINGLE_FEATURE`.
+
 If the user explicitly names one task or feature, respect that scope.
 
 If the user launches the orchestrator for general/autonomous {{PROJECT_NAME}} development without limiting it to one feature, use:
@@ -171,6 +180,7 @@ Maintain a durable orchestration checkpoint using {{WORK_TRACKER}} wherever its 
 Track at minimum:
 
 - `MISSION_SCOPE`
+- `RELEASE_PREPARATION_POLICY`
 - Current feature
 - Current controller phase
 - Active development agents
@@ -185,6 +195,9 @@ Track at minimum:
 - Blocked items
 - Tests/checks status
 - Last verified repository state
+- Active promotion branch and pull request
+- Triggering feature and exact `{{INTEGRATION_BRANCH}}` commit for each automatic promotion
+- Completed features pending the next promotion
 - `NEXT_ACTION`
 
 After every material state transition:
@@ -254,8 +267,8 @@ Choose the highest-priority actionable transition in this order:
 8. Remediate feature-level review findings.
 9. Obtain feature approval.
 10. Merge an approved feature into `{{INTEGRATION_BRANCH}}`.
-11. Advance to the next eligible feature when mission scope permits.
-12. Begin a requested/scheduled release when appropriate.
+11. Begin an automatically triggered, requested, or scheduled release when appropriate. The automatic post-feature trigger is in scope for both `SINGLE_FEATURE` and `PROJECT_QUEUE` unless `RELEASE_PREPARATION_POLICY = EXCLUDED`.
+12. Advance to the next eligible feature when mission scope permits.
 13. Continue unrelated work around locally blocked items.
 14. Escalate only when the defined escalation rules require it.
 
@@ -588,9 +601,10 @@ Immediately transition to `FEATURE_INTEGRATION`.
 
 A merged feature is a transition.
 
-It is terminal ONLY when:
-
-`MISSION_SCOPE = SINGLE_FEATURE`
+It is terminal only when `MISSION_SCOPE = SINGLE_FEATURE` and no authorized
+post-feature release transition is pending. Preparing the automatic promotion
+for that completed feature is part of `SINGLE_FEATURE` scope when
+`RELEASE_PREPARATION_POLICY = AUTO`.
 
 Otherwise select the next eligible work.
 
@@ -637,12 +651,18 @@ The orchestrator itself does not perform the merge.
 When `MISSION_SCOPE = PROJECT_QUEUE` and a feature is successfully merged into `{{INTEGRATION_BRANCH}}`:
 
 1. Reconcile {{WORK_TRACKER}}.
-2. Check for a requested/scheduled release.
+2. Evaluate the automatic, requested, and scheduled release triggers.
 3. Identify remaining incomplete features.
 4. Determine which features are eligible based on dependencies and priority.
 5. Select the next eligible feature.
 6. Initialize it.
 7. Continue the development loop.
+
+If an automatic promotion becomes `RELEASE_READY` while another eligible
+feature remains, keep that promotion waiting for {{RELEASE_OWNER_NAME}} and
+continue the project queue. A ready promotion is a local checkpoint in this
+case, not a global terminal condition. Features completed while it remains open
+are recorded as pending for the next promotion under Section 18.
 
 Do not return to the user simply because one feature completed.
 
@@ -658,27 +678,52 @@ If several features are available, choose using:
 
 # 18. RELEASE RULES
 
-Completed features accumulate in `{{INTEGRATION_BRANCH}}`.
+Completed features accumulate in `{{INTEGRATION_BRANCH}}`. With no active
+promotion, each verified feature completion starts release preparation. While
+one promotion is active, later completed features accumulate for the next
+promotion.
 
-Prepare a release only when:
+Prepare a release when any of these conditions is true:
 
 - {{RELEASE_OWNER_NAME}} requests it; OR
-- {{WORK_TRACKER}} schedules it.
+- {{WORK_TRACKER}} schedules it; OR
+- `RELEASE_PREPARATION_POLICY = AUTO`, and a feature becomes task-complete and its reviewed merge into `{{INTEGRATION_BRANCH}}` is verified.
+
+For the automatic trigger, a feature is task-complete only when:
+
+- Every required feature task is `done`, or deliberately `canceled` with recorded evidence.
+- No task review, remediation, approval, or merge remains pending.
+- The feature acceptance criteria and integrated checks pass.
+- Independent approval applies to the exact feature head.
+- The approver's merge of that head into `{{INTEGRATION_BRANCH}}` is verified.
+- {{WORK_TRACKER}} reflects the completed feature and exact repository references.
+
+Task completion inside an unmerged feature branch does not trigger a release.
+The verified feature-to-`{{INTEGRATION_BRANCH}}` merge is the triggering transition.
+
+Before creating a release branch or pull request:
+
+1. Verify this session is the sole active orchestrator for the project. `{{TERMINAL_LAUNCHER}}` enforces that exclusivity by holding the shared controller lock for the full foreground session. If that lock is not held by this session, do not create a release branch or pull request; escalate instead.
+2. Reconcile open release records, release branches, and promotion pull requests.
+3. Do not create a duplicate promotion for an already-covered `{{INTEGRATION_BRANCH}}` commit.
+4. Allow only one active promotion pull request to `{{RELEASE_BRANCH}}`. If an earlier promotion is still open and does not contain the newly completed feature, record the feature as pending for the next automatic promotion. Resume it after the active promotion is merged or closed; if it was closed without merge, recalculate the next promotion from the current validated `{{INTEGRATION_BRANCH}}` head.
+5. Record the triggering feature and exact `{{INTEGRATION_BRANCH}}` commit so the automatic trigger runs once for that merge.
 
 Release process:
 
-1. Reconcile release scope.
-2. Confirm included features are complete.
-3. Create release branch from exact validated `{{INTEGRATION_BRANCH}}`.
-4. Run complete release checks.
-5. Open release PR → `{{RELEASE_BRANCH}}`.
-6. Obtain fresh independent {{REVIEWER_VENDOR}} review.
-7. Remediate findings through development agents.
-8. Incorporate every release correction back into `{{INTEGRATION_BRANCH}}`.
-9. Revalidate.
-10. Assign final release PR to `{{HOST_ACCOUNT}}`.
-11. Update {{WORK_TRACKER}}.
-12. Stop before {{RELEASE_BRANCH}} merge.
+1. Enforce every pre-creation requirement above, including controller exclusivity, reconciliation, duplicate and active-promotion checks, and trigger recording.
+2. Reconcile release scope.
+3. Confirm included features are complete.
+4. Create release branch from exact validated `{{INTEGRATION_BRANCH}}`.
+5. Run complete release checks.
+6. Open release PR → `{{RELEASE_BRANCH}}`.
+7. Obtain fresh independent {{REVIEWER_VENDOR}} review.
+8. Remediate findings through development agents.
+9. Incorporate every release correction back into `{{INTEGRATION_BRANCH}}`.
+10. Revalidate.
+11. Assign final release PR to `{{HOST_ACCOUNT}}`.
+12. Update {{WORK_TRACKER}}.
+13. Stop before {{RELEASE_BRANCH}} merge.
 
 Only {{RELEASE_OWNER_NAME}} may merge into `{{RELEASE_BRANCH}}`.
 
@@ -724,12 +769,22 @@ For `PROJECT_QUEUE`, this additionally requires:
 
 - No eligible incomplete feature remains.
 - No task/review/remediation/merge is pending.
+- No release preparation, release review, or release remediation is pending.
+- Every in-scope automatic trigger is either incorporated into the active
+  `RELEASE_READY` promotion or durably recorded for the next promotion.
 - No development agent is active.
 - No approver is active.
+
+An active promotion that has not reached `RELEASE_READY` makes
+`MISSION_COMPLETE` false.
 
 ## `RELEASE_READY`
 
 Release PR has passed required gates and is assigned to `{{HOST_ACCOUNT}}`, awaiting {{RELEASE_OWNER_NAME}}'s {{RELEASE_BRANCH}} merge.
+
+`RELEASE_READY` is globally terminal only when no other in-scope engineering
+action is executable. In `PROJECT_QUEUE`, if another eligible incomplete
+feature remains, continue that work while the ready promotion waits.
 
 ## `GLOBAL_ESCALATION`
 
@@ -778,9 +833,12 @@ Output a machine-readable continuation checkpoint:
 ```text
 ORCHESTRATOR_STATE: CONTINUE
 MISSION_SCOPE:
+RELEASE_PREPARATION_POLICY:
 CONTROLLER_PHASE:
 CURRENT_FEATURE:
 ACTIVE_TASKS:
+ACTIVE_PROMOTION:
+PENDING_PROMOTION_FEATURES:
 BLOCKED_ITEMS:
 LAST_VERIFIED_STATE:
 NEXT_ACTION:
