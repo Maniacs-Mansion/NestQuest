@@ -31,13 +31,14 @@ from __future__ import annotations
 
 import datetime
 
+from .dao_children import ChildrenDao
 from .dao_presence import (
     PresenceOverrideRecord,
     PresenceOverridesDao,
     PresenceSchedulesDao,
 )
 from .db import NestQuestDatabase
-from .materialize import regenerate_for_child
+from .materialize import count_removed_by_override, regenerate_for_child
 from .presence import PresenceOverride, PresenceSchedule
 
 
@@ -132,6 +133,42 @@ async def create_presence_override(
         database, override.child_id, today=today, horizon_days=horizon_days
     )
     return record
+
+
+async def preview_presence_override_consequence(
+    database: NestQuestDatabase,
+    child_id: int,
+    start_date: object,
+    end_date: object,
+    is_present: bool,
+    *,
+    today: datetime.date | None = None,
+    horizon_days: int | None = None,
+) -> int:
+    """Return how many upcoming instances saving this override removes.
+
+    The admin override editor's live consequence warning, computed
+    BEFORE anything is saved: the arguments build the SAME
+    :class:`~.presence.PresenceOverride` :func:`create_presence_override`
+    builds (so a malformed or inverted range, or a non-bool
+    ``is_present``, raises the same ValueError), then
+    :func:`~.materialize.count_removed_by_override` compares what the
+    materialization walk generates for the child with and without it.
+    Nothing is written.  An unknown child reads ``child N does not
+    exist``; an INACTIVE child has no instances to remove (the walk's
+    write path never materializes one), so it counts 0.
+    ``today``/``horizon_days`` resolve as the post-save regeneration
+    resolves them.
+    """
+    override = PresenceOverride(child_id, start_date, end_date, is_present)
+    child = await ChildrenDao(database).get(override.child_id)
+    if child is None:
+        raise ValueError(f"child {override.child_id} does not exist")
+    if not child.is_active:
+        return 0
+    return await count_removed_by_override(
+        database, override, today=today, horizon_days=horizon_days
+    )
 
 
 async def get_presence_schedule(

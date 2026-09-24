@@ -58,6 +58,13 @@ layer the HA services share, so the two planes cannot drift:
   (children are never hard-deleted; overrides are deletable by
   design) and regenerates that override's child.  It answers
   ``{"status": "ok"}``.
+- ``POST /presence-overrides/consequence`` previews an override
+  BEFORE it is saved: ONE ``preview_presence_override_consequence``
+  call answers ``{removed: N}``, the number of the child's open
+  upcoming instances the materialization walk would stop generating
+  (instances with a completion event are never counted, D-005).
+  Nothing is written; an unknown child is 404, a malformed or inverted
+  range 422.
 - ``GET /children/{child_id}/presence-schedule`` reads the child's
   schedule through ONE ``get_presence_schedule`` call, wrapped as
   ``{"schedule": ...}`` in the PUT response's shape — ``null`` when the
@@ -664,6 +671,34 @@ class AdminPresenceOverrideListResponse(BaseModel):
     """The ``GET /presence-overrides`` payload: the matching overrides."""
 
     overrides: list[AdminPresenceOverrideResponse]
+
+
+class AdminPresenceOverrideConsequenceRequest(BaseModel):
+    """The body of ``POST /api/v1/admin/presence-overrides/consequence``.
+
+    The create body's shape minus the note (which cannot change what is
+    generated): the strict dates, their order and the real
+    ``is_present`` bool are enforced by the SAME
+    :class:`~nestquest_core.presence.PresenceOverride` constructor the
+    create route's core path builds; this model only guards the SHAPE.
+    Strict fields: a JSON ``true`` is not child id 1, nor ``1`` a bool.
+    """
+
+    child_id: StrictInt
+    start_date: str
+    end_date: str
+    is_present: StrictBool
+
+
+class AdminPresenceOverrideConsequenceResponse(BaseModel):
+    """The consequence preview: ``removed`` upcoming instances.
+
+    The number of open (no completion event) upcoming quest instances
+    of the child that saving the override would remove — the "This
+    removes N upcoming tasks" warning.  Always 0 for a present override.
+    """
+
+    removed: int
 
 
 class AdminUncompleteResponse(BaseModel):
@@ -1606,6 +1641,45 @@ async def admin_delete_presence_override(
     except ValueError as error:
         _raise_presence_override_error(error)
     return {"status": "ok"}
+
+
+@router.post(
+    "/presence-overrides/consequence",
+    summary="Count the upcoming instances a presence override would remove",
+    response_model=AdminPresenceOverrideConsequenceResponse,
+)
+async def admin_presence_override_consequence(
+    body: AdminPresenceOverrideConsequenceRequest, request: Request
+) -> AdminPresenceOverrideConsequenceResponse:
+    """Return how many upcoming instances saving the override removes.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: ONE
+    :func:`nestquest_core.presence_management.preview_presence_override_consequence`
+    call, anchored on ONE :func:`_local_now` clock read, which compares
+    the materialization walk's output for the child with and without
+    the proposed override and excludes instances that already have a
+    completion event (D-005).  Nothing is written.
+
+    Errors are mapped by :func:`_raise_child_error`: an unknown child
+    is 404; a malformed or inverted range is 422.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        removed = await (
+            core_presence_management.preview_presence_override_consequence(
+                state.database,
+                body.child_id,
+                body.start_date,
+                body.end_date,
+                body.is_present,
+                today=_local_now().date(),
+            )
+        )
+    except ValueError as error:
+        _raise_child_error(error)
+    return AdminPresenceOverrideConsequenceResponse(removed=removed)
 
 
 @router.get(
