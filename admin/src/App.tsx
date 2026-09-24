@@ -1,6 +1,7 @@
 import { useState } from "react";
 import "./App.css";
 import DefinitionsTab from "./definitions/DefinitionsTab";
+import ScheduleTab from "./schedule/ScheduleTab";
 import TodayTab from "./today/TodayTab";
 
 const TABS = [
@@ -16,7 +17,7 @@ export default function App() {
   const [active, setActive] = useState<TabId>("today");
   // Built screens own their header (ADMIN-SPEC §1); the generic shell header
   // stays for placeholder tabs and is visually hidden otherwise.
-  const hasScreen = active === "today" || active === "tasks";
+  const hasScreen = active === "today" || active === "tasks" || active === "schedule";
 
   return (
     <div className="admin-shell">
@@ -33,6 +34,8 @@ export default function App() {
           <TodayTab />
         ) : active === "tasks" ? (
           <DefinitionsTab />
+        ) : active === "schedule" ? (
+          <ScheduleTab />
         ) : (
           <p className="admin-placeholder">
             {TABS.find((tab) => tab.id === active)?.label} placeholder — screens
