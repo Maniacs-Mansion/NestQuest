@@ -119,14 +119,13 @@
 }
 
 .schedule-day {
+  display: grid;
+  place-items: center;
   aspect-ratio: 1;
-  padding: 0;
   border: 1px solid transparent;
   border-radius: 6px;
-  font-family: inherit;
   font-size: 12px;
   font-weight: 700;
-  cursor: pointer;
 }
 
 .schedule-day--home {
@@ -184,60 +183,11 @@
   border-radius: 3px;
 }
 
-/* Pattern editing controls */
-.schedule-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 8px;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--nq-a-divider);
-}
-
-.schedule-field {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: var(--nq-a-size-label);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--nq-a-ink-secondary);
-}
-
-.schedule-field input,
-.schedule-field select {
-  min-height: 36px;
-  padding: 0 8px;
-  border: 1px solid var(--nq-a-border);
-  border-radius: 6px;
-  background: var(--nq-a-surface);
-  color: var(--nq-a-ink);
-  font-family: inherit;
-  font-size: 13px;
+.schedule-legend-note {
+  margin: 8px 0 0;
+  font-size: 10.5px;
   font-weight: 600;
-  text-transform: none;
-  letter-spacing: normal;
-}
-
-.schedule-save {
-  min-height: 36px;
-  margin-left: auto;
-  padding: 0 14px;
-  border: 0;
-  border-radius: var(--nq-a-density-radius);
-  background: var(--nq-brand-gradient);
-  color: #fff;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.schedule-save:disabled {
-  opacity: 0.45;
-  cursor: default;
+  color: var(--nq-a-ink-tertiary);
 }
 
 .schedule-save-status {
@@ -251,7 +201,7 @@
   color: var(--nq-a-danger-strong);
 }
 
-/* Presence pattern + overrides cards */
+/* Presence patterns + overrides cards */
 .schedule-section-head {
   display: flex;
   align-items: center;
@@ -318,13 +268,6 @@
   color: var(--nq-a-ink-secondary);
 }
 
-.schedule-rule {
-  flex: none;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--nq-a-ink-secondary);
-}
-
 .schedule-icon-action {
   flex: none;
   display: grid;
@@ -337,6 +280,10 @@
   background: none;
   color: var(--nq-a-ink-tertiary);
   cursor: pointer;
+}
+
+.schedule-icon-action--edit {
+  margin-right: -4px;
 }
 
 .schedule-empty {
