@@ -58,6 +58,17 @@ layer the HA services share, so the two planes cannot drift:
   (children are never hard-deleted; overrides are deletable by
   design) and regenerates that override's child.  It answers
   ``{"status": "ok"}``.
+- ``GET /children/{child_id}/presence-schedule`` reads the child's
+  schedule through ONE ``get_presence_schedule`` call, wrapped as
+  ``{"schedule": ...}`` in the PUT response's shape — ``null`` when the
+  child has none (present every day), never a 404; an unknown child is
+  404.
+- ``GET /presence-overrides`` lists the household's overrides through
+  ONE ``list_presence_overrides`` call, wrapped as
+  ``{"overrides": [...]}`` in the POST response's shape, ordered by
+  start date, child id, id; the optional ``child_id``, ``start`` and
+  ``end`` query filters (strict dates, ``end >= start``) are the
+  core's to validate.
 
 The uncomplete and regenerate routes (task da0226b3) follow the same
 pattern over :mod:`nestquest_core.completion` and
@@ -637,6 +648,22 @@ class AdminPresenceOverrideResponse(BaseModel):
     end_date: str
     is_present: bool
     note: str | None
+
+
+class AdminPresenceScheduleReadResponse(BaseModel):
+    """The ``GET /children/{child_id}/presence-schedule`` payload.
+
+    ``schedule`` is ``None`` when the child has no schedule — the child
+    is present every day (Feature 05); absence is state, not an error.
+    """
+
+    schedule: AdminPresenceScheduleResponse | None
+
+
+class AdminPresenceOverrideListResponse(BaseModel):
+    """The ``GET /presence-overrides`` payload: the matching overrides."""
+
+    overrides: list[AdminPresenceOverrideResponse]
 
 
 class AdminUncompleteResponse(BaseModel):
@@ -1579,6 +1606,75 @@ async def admin_delete_presence_override(
     except ValueError as error:
         _raise_presence_override_error(error)
     return {"status": "ok"}
+
+
+@router.get(
+    "/children/{child_id}/presence-schedule",
+    summary="Read a child's repeating presence schedule",
+    response_model=AdminPresenceScheduleReadResponse,
+)
+async def admin_get_presence_schedule(
+    child_id: int, request: Request
+) -> AdminPresenceScheduleReadResponse:
+    """Return the child's presence schedule, or ``schedule: null``.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: one
+    :func:`nestquest_core.presence_management.get_presence_schedule`
+    call; a stored schedule is serialized exactly as the PUT response
+    is, and a child without one answers ``{"schedule": null}`` (present
+    every day).  Errors are mapped by :func:`_raise_child_error`: an
+    unknown child is 404.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        schedule = await core_presence_management.get_presence_schedule(
+            state.database, child_id
+        )
+    except ValueError as error:
+        _raise_child_error(error)
+    return AdminPresenceScheduleReadResponse(
+        schedule=(
+            None if schedule is None else _presence_schedule_response(schedule)
+        )
+    )
+
+
+@router.get(
+    "/presence-overrides",
+    summary="List presence overrides",
+    response_model=AdminPresenceOverrideListResponse,
+)
+async def admin_list_presence_overrides(
+    request: Request,
+    child_id: int | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> AdminPresenceOverrideListResponse:
+    """Return the household's presence overrides, optionally filtered.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: the optional
+    ``child_id``, ``start`` and ``end`` query parameters go straight to
+    :func:`nestquest_core.presence_management.list_presence_overrides`
+    — the date policy (strict ``YYYY-MM-DD``, ``end >= start``) and the
+    overlap rule live in the core — and each record is serialized
+    exactly as the POST response is, ordered by start date, child id,
+    id.  Errors are mapped by :func:`_raise_child_error`: an unknown
+    ``child_id`` is 404, a rejected date or range is 422.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        records = await core_presence_management.list_presence_overrides(
+            state.database, child_id=child_id, start=start, end=end
+        )
+    except ValueError as error:
+        _raise_child_error(error)
+    return AdminPresenceOverrideListResponse(
+        overrides=[_presence_override_response(record) for record in records]
+    )
 
 
 @router.post(
