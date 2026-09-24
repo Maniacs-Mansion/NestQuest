@@ -36,9 +36,10 @@ Patch release bringing the admin PWA follow-ups and its hosting deployment from
 ### Breaking changes
 
 - **None.** The schema is unchanged at version 8 and no migration runs.
-  `custom_components/` is unchanged from 0.7.0 — no Home Assistant entity,
-  service, event or automation surface changes. This release adds admin PWA
-  screens and deployment artifacts only.
+  `custom_components/` is unchanged from 0.7.0 apart from the manifest
+  release-version metadata — no Home Assistant entity, service, event or
+  automation surface changes. This release adds admin PWA screens and deployment
+  artifacts only.
 
 ### Known Limitations
 
@@ -55,8 +56,9 @@ Patch release bringing the admin PWA follow-ups and its hosting deployment from
 ### Rollback
 
 Schema is unchanged (8), so no migration is involved in either direction.
-`custom_components/` is identical to 0.7.0; rolling back the integration is a
-plain swap, and the PWA/hosting can be redeployed from the 0.7.0 tree.
+`custom_components/` is unchanged from 0.7.0 apart from the release-version
+metadata; rolling back the integration is a plain swap, and the PWA/hosting can be
+redeployed from the 0.7.0 tree.
 
 **HACS installs:** HACS > Integrations > NestQuest > Redownload > 0.7.0, then
 restart Home Assistant.
