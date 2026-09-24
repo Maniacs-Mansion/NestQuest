@@ -42,5 +42,21 @@ services:
       retries: 5
       start_period: 15s
 
+  # Continuous backup: streams the SQLite database on the shared named
+  # volume to the Synology NAS over SFTP (config: deploy/litestream.yml).
+  # The SFTP private key deploy/litestream_key is git-ignored and must be
+  # created on the API box before starting (see api/README.md).
+  litestream:
+    image: litestream/litestream:0.5.17
+    restart: unless-stopped
+    command: ["replicate", "-config", "/etc/litestream.yml"]
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - nestquest-db:/var/lib/nestquest
+      - ./litestream.yml:/etc/litestream.yml:ro
+      - ./litestream_key:/etc/litestream/sftp_key:ro
+
 volumes:
   nestquest-db:
