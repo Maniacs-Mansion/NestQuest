@@ -371,6 +371,42 @@ async def test_malformed_range_or_status_is_422(
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"child_id": True},
+        {"child_id": False},
+        {"child_id": "1"},
+        {"child_id": 1.0},
+        {"is_present": 1},
+        {"is_present": 0},
+        {"is_present": "true"},
+        {"is_present": "false"},
+    ],
+)
+async def test_coercible_child_id_or_status_is_422(
+    custody: SimpleNamespace, overrides: dict[str, object]
+) -> None:
+    """Strict fields: a bool id or a numeric/string status is rejected.
+
+    The fixture child's id is 1, so a coerced ``true`` would otherwise
+    target it and return 200.  Nothing is stored and nothing removed.
+    """
+    assert custody.child_id == 1
+    database = custody.database
+    before = await _open_future_keys(database, custody.child_id)
+    body = {**_body(custody.child_id, 0, 14), **overrides}
+    response = await custody.client.post(
+        CONSEQUENCE_URL, json=body, headers=_admin_headers()
+    )
+    assert response.status_code == 422
+    assert await _open_future_keys(database, custody.child_id) == before
+    overrides_stored = await _dao_presence.PresenceOverridesDao(
+        database
+    ).list_by_child_and_range(custody.child_id, "2000-01-01", "2100-01-01")
+    assert overrides_stored == []
+
+
 # --- authentication: the router's ONE require_admin --------------------------
 
 

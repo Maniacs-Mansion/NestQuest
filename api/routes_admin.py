@@ -681,12 +681,13 @@ class AdminPresenceOverrideConsequenceRequest(BaseModel):
     ``is_present`` bool are enforced by the SAME
     :class:`~nestquest_core.presence.PresenceOverride` constructor the
     create route's core path builds; this model only guards the SHAPE.
+    Strict fields: a JSON ``true`` is not child id 1, nor ``1`` a bool.
     """
 
-    child_id: int
+    child_id: StrictInt
     start_date: str
     end_date: str
-    is_present: bool
+    is_present: StrictBool
 
 
 class AdminPresenceOverrideConsequenceResponse(BaseModel):
