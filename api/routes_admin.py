@@ -368,6 +368,12 @@ class AdminQuestDefinitionResponse(BaseModel):
     windows: list[AdminDefinitionWindowResponse]
 
 
+class AdminQuestDefinitionListResponse(BaseModel):
+    """The definitions list: every definition, active AND inactive, by id."""
+
+    definitions: list[AdminQuestDefinitionResponse]
+
+
 class AdminChildCreateRequest(BaseModel):
     """The body of ``POST /api/v1/admin/children``.
 
@@ -1166,6 +1172,32 @@ async def admin_reorder_children(
     except ValueError as error:
         _raise_child_error(error)
     return {"status": "ok"}
+
+
+@router.get(
+    "/quest-definitions",
+    summary="List quest definitions",
+    response_model=AdminQuestDefinitionListResponse,
+)
+async def admin_list_quest_definitions(
+    request: Request,
+) -> AdminQuestDefinitionListResponse:
+    """Return every quest definition in rising id order.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: one
+    :func:`nestquest_core.quest_definitions.list_all_definitions` call,
+    active AND inactive definitions included (the admin screen manages
+    both), each serialized exactly as the create/edit responses are.
+    """
+    state: DatabaseState = request.app.state.db
+    bundles = await core_quest_definitions.list_all_definitions(
+        state.database
+    )
+    return AdminQuestDefinitionListResponse(
+        definitions=[_quest_definition_response(bundle) for bundle in bundles]
+    )
 
 
 @router.post(
