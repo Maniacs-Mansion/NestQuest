@@ -7,9 +7,32 @@
 # runtime dependencies HERE — this file is what the container image
 # installs (see the Dockerfile at the repository root).
 #
-# Compatible ranges mirroring the dev group's floors; the API is a
-# server, so these are the only packages its runtime needs.
-fastapi>=0.115
-uvicorn>=0.30
-pyjwt[crypto]>=2.9
-httpx>=0.28
+# EXACT pins: the versions installed in the deployed image
+# (nestquest-api:latest on the API box, read with importlib.metadata),
+# so a rebuild resolves the same packages.  The four direct
+# dependencies come first; the rest is their resolved transitive
+# closure, pinned too so nothing floats.  The dev group's floors in
+# pyproject.toml are unchanged.  Bump deliberately, together with the
+# Dockerfile's digest-pinned base image.
+fastapi==0.141.1
+uvicorn==0.53.0
+pyjwt[crypto]==2.15.0
+httpx==0.28.1
+
+# Transitive dependencies of the above.
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
+cffi==2.1.1
+click==8.5.0
+cryptography==50.0.1
+h11==0.16.0
+httpcore==1.0.9
+idna==3.20
+pycparser==3.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+starlette==1.7.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0

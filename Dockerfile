@@ -14,12 +14,16 @@
 # the SQLite database lives on the mounted volume at
 # /var/lib/nestquest (compose supplies NESTQUEST_DB_PATH pointing
 # there — configuration is environment-supplied, never baked in).
-FROM python:3.12-slim AS builder
+#
+# Both stages use the same base image pinned by digest, and
+# api/requirements.txt pins exact versions, so a rebuild reproduces
+# the deployed image instead of floating to whatever is newest.
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS builder
 
 COPY api/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --prefix=/install -r /tmp/requirements.txt
 
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
 
 # The staged dependency install from the builder (no pip, no wheels).
 COPY --from=builder /install /usr/local
