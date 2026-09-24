@@ -59,7 +59,18 @@ box and is git-ignored. Create it once, before ``up``:
 
 then append ``restrict `` + the contents of ``deploy/litestream_key.pub``
 to ``joshua@10.60.1.50:~/.ssh/authorized_keys``. Compose mounts the
-private key read-only at ``/etc/litestream/sftp_key``.
+private key read-only at ``/etc/litestream/sftp_key``. The sidecar runs
+as uid/gid 999 (the API's ``nestquest`` user), so give it the key:
+
+    sudo chown 999:999 deploy/litestream_key && chmod 600 deploy/litestream_key
+
+The sidecar needs WRITE access to the database volume: Litestream adds
+its own ``_litestream_seq``/``_litestream_lock`` tables to the database,
+writes the ``-wal``/``-shm`` files and checkpoints the WAL, and fails
+with "unable to open database file" on a read-only mount. That access
+is contained rather than removed — the sidecar runs as the non-root
+volume owner with a read-only root filesystem, ``no-new-privileges``
+and all Linux capabilities dropped.
 
 Check replication with
 ``docker compose -f deploy/compose.yaml logs litestream`` or
