@@ -18,8 +18,9 @@ caveat in api/nestquest_core.py):
   and windows exactly as posted.
 - ``PATCH /api/v1/admin/quest-definitions/{id}``: an edit PERSISTS the
   supplied fields and leaves omitted fields untouched (exclude_unset
-  semantics); a supplied ``windows`` list replaces the whole set;
-  assignment is not settable through the edit.
+  semantics); a supplied ``windows`` list replaces the whole set; an
+  omitted ``assignee_child_ids`` leaves the assignees untouched (the
+  supplied-list cases live in test_api_admin_questdef_assignees.py).
 - ``PATCH /api/v1/admin/quest-definitions/{id}/active`` with
   ``is_active: false`` sets the flag FALSE and the definition STILL
   EXISTS with its rule, assignees and windows (never hard-deleted);
@@ -397,7 +398,7 @@ async def test_edit_persists_supplied_fields_and_leaves_omitted_untouched(
     )
     assert stored.definition.icon == "toy-box"
     assert stored.rule.to_dict() == _weekly_rule_dict()
-    # Assignment is not settable through the edit route: untouched.
+    # assignee_child_ids was omitted: the assignees are untouched.
     assert sorted(child.id for child in stored.assignees) == [ada, bo]
 
     # A second edit touching only the rule leaves the metadata and the
