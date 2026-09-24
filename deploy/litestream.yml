@@ -1,0 +1,32 @@
+# Litestream continuous backup of the NestQuest SQLite database (Feature
+# 17).  The ``litestream`` compose service mounts the same named volume
+# as the API and streams every committed change to the Synology NAS
+# over SFTP, so the backup lives OUTSIDE the container's volume.
+#
+# Nothing here is secret.  The SFTP private key is a dedicated,
+# git-ignored keypair (deploy/litestream_key) mounted read-only by
+# compose at /etc/litestream/sftp_key; its public half is in
+# joshua@10.60.1.50:~/.ssh/authorized_keys.  ``host-key`` pins the
+# NAS's host key so the connection is verified; it must be the ECDSA
+# key, because that is the algorithm Litestream's SSH client negotiates
+# with this NAS (pinning the ed25519 key fails with "host key mismatch").
+#
+# The Synology SFTP server is chrooted to the shared folders, so the
+# directory seen over SSH as /volume1/homes/Joshua/nestquest-backups is
+# /homes/Joshua/nestquest-backups over SFTP.
+
+# Take a full snapshot daily and keep a week of snapshots plus the
+# incremental changes between them (point-in-time restore window).
+snapshot:
+  interval: 24h
+  retention: 168h
+
+dbs:
+  - path: /var/lib/nestquest/nestquest.db
+    replicas:
+      - type: sftp
+        host: 10.60.1.50
+        user: joshua
+        path: /homes/Joshua/nestquest-backups
+        key-path: /etc/litestream/sftp_key
+        host-key: ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBNujay9nYEiXuRQf4wDRDU1gp+CDvpeMdhuhC2XypIihzKGEtB654kwrUGfA2kDWAoSPGlmojeS3OIRtHPkj6GY=
