@@ -29,9 +29,8 @@ describe("NestQuest Admin shell", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "History" }));
 
-    expect(screen.getByRole("tabpanel").textContent).toContain(
-      "History placeholder",
-    );
+    expect(screen.getByRole("heading", { name: "History" })).toBeTruthy();
+    expect(screen.getByRole("tabpanel").textContent).not.toContain("placeholder");
     expect(screen.getByRole("tab", { name: "History" }).getAttribute("aria-selected")).toBe(
       "true",
     );

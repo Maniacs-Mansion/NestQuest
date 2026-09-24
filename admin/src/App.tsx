@@ -1,6 +1,7 @@
 import { useState } from "react";
 import "./App.css";
 import DefinitionsTab from "./definitions/DefinitionsTab";
+import HistoryTab from "./history/HistoryTab";
 import ScheduleTab from "./schedule/ScheduleTab";
 import TodayTab from "./today/TodayTab";
 
@@ -15,18 +16,17 @@ type TabId = (typeof TABS)[number]["id"];
 
 export default function App() {
   const [active, setActive] = useState<TabId>("today");
-  // Built screens own their header (ADMIN-SPEC §1); the generic shell header
-  // stays for placeholder tabs and is visually hidden otherwise.
-  const hasScreen = active === "today" || active === "tasks" || active === "schedule";
 
   return (
     <div className="admin-shell">
-      <header className={hasScreen ? "admin-header visually-hidden" : "admin-header"}>
+      {/* Every tab is a built screen that owns its header (ADMIN-SPEC §1); the
+          generic shell header stays only as a visually hidden page heading. */}
+      <header className="admin-header visually-hidden">
         <h1 className="admin-title">NestQuest Admin</h1>
         <p className="admin-subline">Admin console</p>
       </header>
       <main
-        className={hasScreen ? "admin-panel admin-panel--screen" : "admin-panel"}
+        className="admin-panel admin-panel--screen"
         role="tabpanel"
         aria-labelledby={`tab-${active}`}
       >
@@ -37,10 +37,7 @@ export default function App() {
         ) : active === "schedule" ? (
           <ScheduleTab />
         ) : (
-          <p className="admin-placeholder">
-            {TABS.find((tab) => tab.id === active)?.label} placeholder — screens
-            arrive in later tasks.
-          </p>
+          <HistoryTab />
         )}
       </main>
       <nav className="admin-tabbar" aria-label="Admin sections">
