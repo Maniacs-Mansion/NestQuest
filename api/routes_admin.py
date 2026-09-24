@@ -116,6 +116,22 @@ owns every rule so the two routes cannot drift:
   a ``Content-Disposition`` attachment filename and the documented,
   stable header row (Admin spec §5 event-row fields).
 
+The snapshot route (task ef3f4877) is the admin-plane twin of the
+panel's ``GET /api/v1/panel/snapshot`` for the admin PWA's Today tab —
+the PWA is internet-facing and never holds the panel service token
+(D-012), so it reads the same snapshot here:
+
+- ``GET /snapshot`` threads ONE clock read (:func:`_local_now`) into
+  :func:`nestquest_core.snapshot.build_snapshot` and shapes each
+  child's instances through
+  :func:`nestquest_core.snapshot.instance_payload` with
+  ``include_missed=True`` — admin payloads KEEP missed instances with
+  their ``missed`` state (D-009), where the panel omits them.  The
+  body is the panel's documented shape (``today_iso``, ``cycle_day``,
+  ``children`` with the per-child presence, rollup counts and
+  ``instances``); the builder, the state derivation and the shaping
+  all live in the core.
+
 The settings routes (task 2b3de7e5) follow the same pattern over
 :mod:`nestquest_core.settings_store` — the API's OWN durable settings
 store.  The API now OWNS settings in the database (a validated JSON
@@ -254,6 +270,7 @@ from api.nestquest_core import (
     core_recurrence,
     core_settings,
     core_settings_store,
+    core_snapshot,
     core_sweep,
 )
 
@@ -681,6 +698,59 @@ class AdminMissedSweepResponse(BaseModel):
     """
 
     fired: int
+
+
+class AdminInstancePayload(BaseModel):
+    """One instance in the admin snapshot payload.
+
+    Mirrors :func:`nestquest_core.snapshot.instance_payload` with
+    ``include_missed=True``: ``state`` is ``open`` | ``completed`` |
+    ``missed`` (admin payloads keep missed instances, D-009),
+    ``on_time`` passes the completion event's flag through verbatim
+    (``None`` unless completed), and ``completed_at`` is the event's
+    UTC timestamp when completed.
+    """
+
+    id: int
+    definition_id: int
+    child_id: int
+    title: str
+    icon: str | None
+    window: str
+    due_time: str | None
+    state: str
+    overdue: bool
+    completed_at: str | None
+    on_time: bool | None
+
+
+class AdminChildSnapshotPayload(BaseModel):
+    """One child's day: presence, rollup counts, and today's instances."""
+
+    child_id: int
+    child_name: str
+    present: bool
+    #: ISO date of the child's next present day while they are away;
+    #: ``None`` when the child is present today.
+    next_present: str | None
+    due_today: int
+    completed_today: int
+    remaining_today: int
+    completion_pct: int
+    instances: list[AdminInstancePayload]
+
+
+class AdminSnapshotResponse(BaseModel):
+    """Today's whole household snapshot for the admin Today tab.
+
+    The panel snapshot's shape (``today_iso``, ``cycle_day``,
+    ``children`` in the household's sort order), with missed instances
+    kept in each child's ``instances``.
+    """
+
+    today_iso: str
+    cycle_day: int
+    children: list[AdminChildSnapshotPayload]
 
 
 #: 404 detail for a child id the core layer reports as non-existent.
@@ -1727,6 +1797,53 @@ async def admin_run_missed_sweep(
     for event_type, payload in events:
         request.app.state.publisher.publish(event_type, payload)
     return AdminMissedSweepResponse(fired=len(events))
+
+
+@router.get(
+    "/snapshot",
+    summary="Today's household snapshot",
+    response_model=AdminSnapshotResponse,
+)
+async def admin_snapshot(request: Request) -> AdminSnapshotResponse:
+    """Return today's full household snapshot for the admin Today tab.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: ONE clock read
+    (:func:`_local_now`) goes into
+    :func:`nestquest_core.snapshot.build_snapshot` against the live
+    database, and each child's instances are shaped with
+    ``instance_payload(include_missed=True)`` — missed instances are
+    KEPT in the admin payload (D-009) — into
+    :class:`AdminSnapshotResponse`.
+    """
+    state: DatabaseState = request.app.state.db
+    snapshot = await core_snapshot.build_snapshot(
+        state.database, core_settings.NestQuestSettings(), _local_now()
+    )
+    return AdminSnapshotResponse(
+        today_iso=snapshot.today_iso,
+        cycle_day=snapshot.cycle_day,
+        children=[
+            AdminChildSnapshotPayload(
+                child_id=child.child_id,
+                child_name=child.child_name,
+                present=child.present,
+                next_present=child.next_present,
+                due_today=child.due_today,
+                completed_today=child.completed_today,
+                remaining_today=child.remaining_today,
+                completion_pct=child.completion_pct,
+                instances=[
+                    AdminInstancePayload.model_validate(instance)
+                    for instance in core_snapshot.instance_payload(
+                        child.instances, include_missed=True
+                    )
+                ],
+            )
+            for child in snapshot.children
+        ],
+    )
 
 
 __all__ = ["router"]
