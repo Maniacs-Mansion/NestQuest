@@ -4,7 +4,7 @@
  * Every day's cycle position comes from the anchor date (./cycle.ts), never
  * from ISO week numbers or week parity (D-004).
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiForbiddenError } from "../api/client";
 import { ApiRequestError, fetchChildren, type AdminChild } from "../api/definitions";
 import {
@@ -274,6 +274,15 @@ export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProp
   const [save, setSave] = useState<SaveState>({ kind: "idle" });
   const [editorOpen, setEditorOpen] = useState(false);
   const [deletion, setDeletion] = useState<DeleteState>({ kind: "idle" });
+  const addRef = useRef<HTMLButtonElement>(null);
+  const editorWasOpen = useRef(false);
+
+  // The editor replaces this screen, so Add is remounted when it closes;
+  // hand focus back to it then.
+  useEffect(() => {
+    if (editorWasOpen.current && !editorOpen) addRef.current?.focus();
+    editorWasOpen.current = editorOpen;
+  }, [editorOpen]);
 
   /** Reload children, schedules and overrides in place (no loading flash). */
   const refresh = () =>
@@ -498,7 +507,12 @@ export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProp
 
         <div className="schedule-section-head">
           <h3 className="schedule-section-label">Overrides</h3>
-          <button type="button" className="schedule-text-action" onClick={() => setEditorOpen(true)}>
+          <button
+            ref={addRef}
+            type="button"
+            className="schedule-text-action"
+            onClick={() => setEditorOpen(true)}
+          >
             Add
           </button>
         </div>

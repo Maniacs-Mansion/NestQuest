@@ -6,7 +6,7 @@
  * until that count is on screen. Saving only ever sends the create request:
  * the API never removes an instance that already has a completion event (D-005).
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ApiForbiddenError } from "../api/client";
 import { ApiRequestError, type AdminChild } from "../api/definitions";
 import {
@@ -45,6 +45,32 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+const FOCUSABLE =
+  'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Make everything outside `root` inert (siblings of each ancestor up to
+ * <body>), so the tab bar behind the pushed screen cannot take focus.
+ * Returns the undo.
+ */
+function inertOutside(root: HTMLElement): () => void {
+  const made: HTMLElement[] = [];
+  for (let node: HTMLElement = root; node.parentElement && node !== document.body; node = node.parentElement) {
+    for (const sibling of Array.from(node.parentElement.children)) {
+      if (sibling === node || !(sibling instanceof HTMLElement) || sibling.hasAttribute("inert")) continue;
+      sibling.setAttribute("inert", "");
+      sibling.setAttribute("aria-hidden", "true");
+      made.push(sibling);
+    }
+  }
+  return () => {
+    for (const el of made) {
+      el.removeAttribute("inert");
+      el.removeAttribute("aria-hidden");
+    }
+  };
+}
+
 function tasksPhrase(count: number): string {
   return `${count} upcoming ${count === 1 ? "task" : "tasks"}`;
 }
@@ -76,6 +102,37 @@ export default function OverrideEditor({
   const [error, setError] = useState<string | null>(null);
   // Every form change bumps the sequence; only the latest request may render.
   const requestSeq = useRef(0);
+  const screenRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+
+  // Modal focus: move in on open and keep the background out of reach. The
+  // opener hands focus back to its Add control once this screen closes.
+  useEffect(() => {
+    titleRef.current?.focus();
+    return screenRef.current ? inertOutside(screenRef.current) : undefined;
+  }, []);
+
+  function onKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (!saving) onCancel();
+      return;
+    }
+    if (event.key !== "Tab" || !screenRef.current) return;
+    const focusable = Array.from(screenRef.current.querySelectorAll<HTMLElement>(FOCUSABLE));
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const current = document.activeElement;
+    const outside = !focusable.includes(current as HTMLElement);
+    if (event.shiftKey && (current === first || outside)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (current === last || outside)) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
 
   const child = childOptions.find((c) => c.id === childId) ?? childOptions[0];
   const rangeValid = isValidRange(startDate, endDate);
@@ -155,13 +212,20 @@ export default function OverrideEditor({
   }
 
   return (
-    <div className="override-screen" role="dialog" aria-modal="true" aria-labelledby="override-title">
+    <div
+      ref={screenRef}
+      className="override-screen"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="override-title"
+      onKeyDown={onKeyDown}
+    >
       <header className="override-header">
         <button type="button" className="override-back" aria-label="Back" onClick={onCancel}>
           <ChevronLeftGlyph size={20} />
         </button>
         <div>
-          <h2 className="override-title" id="override-title">
+          <h2 className="override-title" id="override-title" ref={titleRef} tabIndex={-1}>
             Presence override
           </h2>
           <p className="override-sub">Beats the custody pattern for these dates</p>

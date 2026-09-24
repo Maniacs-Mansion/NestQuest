@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import App from "../App";
 import ScheduleTab from "./ScheduleTab";
 import { CONSEQUENCE_DEBOUNCE_MS, isIsoDate, isValidRange } from "./OverrideEditor";
 import type { AdminChild } from "../api/definitions";
@@ -93,6 +94,10 @@ function headline(): string {
   return screen.getByTestId("override-consequence-headline").textContent ?? "";
 }
 
+function warningBody(): string {
+  return screen.getByTestId("override-consequence").querySelector(".override-warning-body")?.textContent ?? "";
+}
+
 function saveButton(): HTMLButtonElement {
   return screen.getByRole("button", { name: "Save override" }) as HTMLButtonElement;
 }
@@ -162,10 +167,9 @@ describe("OverrideEditor", () => {
     expect(consequenceBodies()).toEqual([
       { child_id: 1, start_date: TODAY, end_date: TODAY, is_present: false },
     ]);
-    const warning = screen.getByTestId("override-consequence");
-    expect(warning.textContent).toContain("Declan");
-    expect(warning.textContent).toContain("Sep 23");
-    expect(warning.textContent).toContain("Completed days are untouched.");
+    expect(warningBody()).toBe(
+      "Declan's open tasks Sep 23 are removed while away. Completed days are untouched.",
+    );
     expect(saveButton().disabled).toBe(false);
 
     consequence = () => jsonResponse({ removed: 9 });
@@ -177,7 +181,9 @@ describe("OverrideEditor", () => {
       end_date: "2026-09-27",
       is_present: false,
     });
-    expect(warning.textContent).toContain("Sep 23 – 27");
+    expect(warningBody()).toBe(
+      "Declan's open tasks Sep 23 – 27 are removed while away. Completed days are untouched.",
+    );
 
     consequence = () => jsonResponse({ removed: 2 });
     fireEvent.click(screen.getByRole("button", { name: "Maeve" }));
@@ -188,12 +194,16 @@ describe("OverrideEditor", () => {
       end_date: "2026-09-27",
       is_present: false,
     });
-    expect(warning.textContent).toContain("Maeve");
+    expect(warningBody()).toBe(
+      "Maeve's open tasks Sep 23 – 27 are removed while away. Completed days are untouched.",
+    );
 
     // A Home override removes nothing by definition: no request, count 0.
     fireEvent.click(screen.getByRole("button", { name: "Home" }));
     expect(headline()).toBe("This removes 0 upcoming tasks");
-    expect(warning.textContent).toContain("Completed days are untouched.");
+    expect(warningBody()).toBe(
+      "Maeve is home Sep 23 – 27, so no tasks are removed. Completed days are untouched.",
+    );
     await pastDebounce();
     expect(consequenceBodies()).toHaveLength(3);
   });
@@ -208,8 +218,8 @@ describe("OverrideEditor", () => {
     await openEditor();
     setDate("Through", "2026-09-25");
     await waitFor(() => expect(headline()).toBe("This removes 3 upcoming tasks"));
-    expect(screen.getByTestId("override-consequence").textContent).toContain(
-      "Completed days are untouched.",
+    expect(warningBody()).toBe(
+      "Declan's open tasks Sep 23 – 25 are removed while away. Completed days are untouched.",
     );
   });
 
@@ -255,6 +265,19 @@ describe("OverrideEditor", () => {
 
     setDate("Through", "2026-09-20"); // before From
     expect(headline()).toBe("Choose a valid date range");
+    await pastDebounce();
+    expect(consequenceBodies()).toHaveLength(1);
+    fireEvent.click(saveButton());
+    expect(calls().some((c) => c.method === "POST" && c.path === OVERRIDES_PATH)).toBe(false);
+  });
+
+  it("a malformed From date sends no consequence request and cannot be saved", async () => {
+    await openEditor();
+    await waitFor(() => expect(consequenceBodies()).toHaveLength(1));
+
+    setDate("From", "2026-02-30");
+    expect(headline()).toBe("Choose a valid date range");
+    expect(saveButton().disabled).toBe(true);
     await pastDebounce();
     expect(consequenceBodies()).toHaveLength(1);
     fireEvent.click(saveButton());
@@ -380,6 +403,120 @@ describe("OverrideEditor", () => {
       { method: "DELETE", path: `${OVERRIDES_PATH}/41`, body: undefined },
     ]);
     expect(screen.getByText("No overrides for Declan.")).toBeTruthy();
+  });
+});
+
+describe("OverrideEditor focus", () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+    overrides = [...INITIAL_OVERRIDES];
+    consequence = () => jsonResponse({ removed: 4 });
+    createResponse = (body) => {
+      const created = { id: 50, note: null, ...body } as PresenceOverride;
+      overrides = [...overrides, created];
+      return jsonResponse(created, 201);
+    };
+    fetchMock = vi.fn(async (url: string, init?: RequestInit) => routeFetch(url, init));
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  function dialog(): HTMLElement {
+    return screen.getByRole("dialog", { name: "Presence override" });
+  }
+
+  function addButton(): HTMLElement {
+    return screen.getByRole("button", { name: "Add" });
+  }
+
+  it("moves focus into the editor on open", async () => {
+    await openEditor();
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Presence override" }));
+    expect(dialog().contains(document.activeElement)).toBe(true);
+  });
+
+  it("keeps Tab and Shift+Tab inside the editor", async () => {
+    await openEditor();
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    const back = screen.getByRole("button", { name: "Back" });
+
+    saveButton().focus();
+    fireEvent.keyDown(saveButton(), { key: "Tab" });
+    expect(document.activeElement).toBe(back);
+
+    fireEvent.keyDown(back, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(saveButton());
+
+    // From the focused heading (not in the tab order) Shift+Tab wraps to the end.
+    const title = screen.getByRole("heading", { name: "Presence override" });
+    title.focus();
+    fireEvent.keyDown(title, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(saveButton());
+  });
+
+  it("makes the tab bar inert while open and restores it on close", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("tab", { name: "Schedule" }));
+    await screen.findByTestId("pattern-1");
+    fireEvent.click(addButton());
+    await screen.findByRole("heading", { name: "Presence override" });
+
+    const tabbar = document.querySelector(".admin-tabbar") as HTMLElement;
+    expect(tabbar.hasAttribute("inert")).toBe(true);
+    expect(tabbar.getAttribute("aria-hidden")).toBe("true");
+    expect(dialog().closest("[inert]")).toBeNull();
+
+    fireEvent.keyDown(dialog(), { key: "Escape" });
+    await screen.findByTestId("pattern-1");
+    expect(tabbar.hasAttribute("inert")).toBe(false);
+    expect(tabbar.hasAttribute("aria-hidden")).toBe(false);
+  });
+
+  it("Escape cancels without writing and returns focus to Add", async () => {
+    await openEditor();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+    await screen.findByTestId("pattern-1");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(addButton());
+    expect(calls().some((c) => c.method === "POST" && c.path === OVERRIDES_PATH)).toBe(false);
+  });
+
+  it("Escape does nothing while saving; focus returns to Add after the save", async () => {
+    const gate = deferred();
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const path = new URL(url, "http://x").pathname;
+      if (path === OVERRIDES_PATH && init?.method === "POST") await gate.promise;
+      return routeFetch(url, init);
+    });
+    await openEditor();
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    fireEvent.click(saveButton());
+    expect(screen.getByRole("button", { name: "Saving…" })).toBeTruthy();
+
+    fireEvent.keyDown(dialog(), { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    gate.resolve(new Response(null));
+    await screen.findByTestId("override-50");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(addButton());
+  });
+
+  it("Back and Cancel return focus to Add", async () => {
+    await openEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByTestId("pattern-1");
+    expect(document.activeElement).toBe(addButton());
+
+    fireEvent.click(addButton());
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    await screen.findByTestId("pattern-1");
+    expect(document.activeElement).toBe(addButton());
   });
 });
 
