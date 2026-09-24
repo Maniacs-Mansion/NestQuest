@@ -83,22 +83,35 @@ Seventh release of NestQuest, promoting the admin surface from `dev` onto
 
 **Schema version advances 7 → 8.** Migration 8 is additive, but a migrated
 database **cannot** be read by 0.6.0 or earlier (they refuse a newer schema
-version). **Back up `nestquest.db` (plus `-wal`/`-shm`) before upgrading.** To
-return to 0.6.0 you must restore that backup; a plain downgrade is impossible
-once migrated.
+version). The database is owned and migrated by the **NestQuest API service**,
+not by Home Assistant: it is the file at the API's configured
+`NESTQUEST_DB_PATH` on the API host, which need not be anywhere near the Home
+Assistant config directory. To return to 0.6.0 you must restore a backup of
+that file taken before the upgrade; a plain downgrade is impossible once
+migrated.
 
-**HACS installs:**
+**API host (database):**
 
-1. Before upgrading, stop HA and back up `nestquest.db` (plus `-wal`/`-shm`)
-   from the HA config directory.
-2. To roll back: HACS > Integrations > NestQuest > Redownload > 0.6.0, restore
-   the backed-up database, restart Home Assistant.
+1. Before upgrading, stop the NestQuest API service and back up the database
+   file at its configured `NESTQUEST_DB_PATH`, plus its `-wal` and `-shm`
+   sidecars (`<NESTQUEST_DB_PATH>-wal`, `<NESTQUEST_DB_PATH>-shm`) if present.
+   Only then deploy 0.7.0 and start the API service, which applies migration 8.
+2. To roll back: stop the API service, restore the backed-up database and
+   sidecars to `NESTQUEST_DB_PATH`, redeploy the API service at 0.6.0, and roll
+   back the Home Assistant integration to 0.6.0 (below). Then restart the API
+   service and Home Assistant.
 
-**Manual installs:**
+**Home Assistant integration — HACS installs** (integration component only;
+the database lives with the API, see above):
 
-1. Back up `nestquest.db` (plus `-wal`/`-shm`) before upgrading.
-2. To roll back: replace `custom_components/nestquest/` with the 0.6.0 tree,
-   restore the backed-up database, restart Home Assistant.
+1. To roll back: HACS > Integrations > NestQuest > Redownload > 0.6.0, then
+   restart Home Assistant.
+
+**Home Assistant integration — Manual installs** (integration component only;
+the database lives with the API, see above):
+
+1. To roll back: replace `custom_components/nestquest/` with the 0.6.0 tree,
+   then restart Home Assistant.
 
 **Repository operators:** git-revert the 0.7.0 release merge on `main`.
 
