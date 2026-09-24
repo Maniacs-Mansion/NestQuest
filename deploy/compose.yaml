@@ -42,6 +42,25 @@ services:
       retries: 5
       start_period: 15s
 
+  # Admin PWA (Feature 24): the Vite bundle from admin/ served by nginx
+  # (deploy/pwa/).  Traefik routes every non-API path of the public host
+  # here on port 8081; nginx itself only accepts the proxy (10.60.1.33)
+  # and this host (10.60.1.14).  The three build args are PUBLIC values
+  # (the OIDC client is a PKCE client, no secret) read from deploy/.env
+  # by compose interpolation; the image build fails if any is empty.
+  pwa:
+    build:
+      context: ..
+      dockerfile: deploy/pwa/Dockerfile
+      args:
+        VITE_AUTHENTIK_CLIENT_ID: ${NESTQUEST_AUTHENTIK_CLIENT_ID:-}
+        VITE_AUTHENTIK_ISSUER: ${NESTQUEST_AUTHENTIK_ISSUER:-}
+        VITE_API_BASE_URL: ${NESTQUEST_API_BASE_URL:-}
+    image: nestquest-pwa:latest
+    restart: unless-stopped
+    ports:
+      - "${NESTQUEST_BIND_ADDRESS:-127.0.0.1}:8081:80"
+
   # Continuous backup: streams the SQLite database on the shared named
   # volume to the Synology NAS over SFTP (config: deploy/litestream.yml).
   # The SFTP private key deploy/litestream_key is git-ignored and must be
