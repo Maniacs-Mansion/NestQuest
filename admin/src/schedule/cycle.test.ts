@@ -58,6 +58,24 @@ describe("calendar helpers", () => {
     expect(weekdayOf("2026-09-06")).toBe(6);
   });
 
+  it("weekdayOf keeps the stored Monday=0 .. Sunday=6 numbering (display order is separate)", () => {
+    // A full known week plus dates across month and year ends.
+    expect(
+      [
+        "2026-09-07",
+        "2026-09-08",
+        "2026-09-09",
+        "2026-09-10",
+        "2026-09-11",
+        "2026-09-12",
+        "2026-09-13",
+      ].map(weekdayOf),
+    ).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(weekdayOf("2026-11-01")).toBe(6); // Sunday
+    expect(weekdayOf("2027-01-01")).toBe(4); // Friday
+    expect(weekdayOf("2024-02-29")).toBe(3); // Thursday
+  });
+
   it("monthStart shifts across year ends", () => {
     expect(monthStart("2026-12-15", 1)).toBe("2027-01-01");
     expect(monthStart("2026-01-31", -1)).toBe("2025-12-01");
