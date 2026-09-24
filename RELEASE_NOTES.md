@@ -4,9 +4,21 @@
 
 ### Scope
 
-Seventh release of NestQuest, promoting the admin surface from `dev` onto
-0.6.0: the standalone admin PWA and the admin-plane API work it depends on.
+Seventh release of NestQuest, promoting the re-imagined architecture's admin
+surface from `dev` onto 0.6.0: the API deployment and identity layer, the
+admin-plane API work, and the standalone admin PWA that uses them.
 
+- **Feature 17 — API Deployment and Identity:** the NestQuest API is packaged as
+  a container (`Dockerfile`, `deploy/compose.yaml`, pinned base image and exact
+  dependencies) and deployed behind a TLS reverse proxy (the shared Traefik, ACME
+  via the Cloudflare DNS-01 challenge); the Authentik application, OIDC provider
+  and `nestquest-admins` group are wired and the API validates the provider's
+  issuer/audience/JWKS (RS256); the panel plane is restricted to the Home
+  Assistant box while the admin plane is internet-facing behind Authentik;
+  continuous backup runs as a contained Litestream sidecar over SFTP to a NAS and
+  a restore is proven; a deployment runbook (`deploy/RUNBOOK.md`) and the
+  host-firewall unit (`deploy/systemd/nestquest-api-firewall.service`) ship.
+  (PRs #183, #214, #215, #216, #218.)
 - **Feature 19 — Admin PWA:** the parent-facing admin surface is now a
   standalone mobile-first React progressive web app (`admin/`), implementing
   `design/ADMIN-SPEC.md`: Authentik OIDC authorization-code + PKCE login with
@@ -44,12 +56,14 @@ Seventh release of NestQuest, promoting the admin surface from `dev` onto
 
 - Minimum Home Assistant version: **2024.6.0**.
 - A running NestQuest API service, reachable at the base URL and panel service
-  token configured in the integration options. The API service source ships in
-  `api/`; there is still **no container image, compose file or deployment
-  runbook in this release** because Feature 17 is not part of it.
-- The admin PWA is built to run at `https://nestquest.cubecraftlabs.com`
-  behind Authentik; hosting it is part of the Feature 17 deployment, which is
-  **not** in this release.
+  token configured in the integration options. The deployable ships in this
+  release: `Dockerfile`, `deploy/compose.yaml` (API + a contained Litestream
+  backup sidecar), `api/requirements.txt`, the host-firewall unit and
+  `deploy/RUNBOOK.md`. Deploying it needs a host, the DNS/TLS path and the
+  Authentik/Synology services described in the runbook.
+- The admin PWA is built to run at `https://nestquest.cubecraftlabs.com` behind
+  Authentik. Serving the built `admin/` static bundle at that hostname is part of
+  the deployment described in the runbook.
 
 ### Breaking changes
 
@@ -65,14 +79,16 @@ Seventh release of NestQuest, promoting the admin surface from `dev` onto
 
 ### Known Limitations
 
-- **Feature 17 (API deployment and identity) is not in this release.** There
-  is no API box, TLS reverse proxy, Authentik application/provider/
-  `nestquest-admins` group, proven network separation, or backup/restore. The
-  integration and the admin PWA therefore cannot run end-to-end yet; Feature
-  19's end-to-end Authentik/HTTPS acceptance remains **unverified** until
-  Feature 17 is deployed.
-- **The admin PWA is not hosted.** `admin/` builds and is unit/integration
-  tested, but there is no deployment for it (it depends on Feature 17).
+- **The API and its identity/backup layer are deployed by the owner's
+  infrastructure, not by this release alone.** The deployment artifacts and
+  runbook ship here, but a running service still requires the host, the shared
+  reverse proxy, the Authentik application/provider/`nestquest-admins` group, the
+  backup target and the panel/admin network separation to be in place as the
+  runbook describes.
+- **Serving the admin PWA is still outstanding.** `admin/` builds and is
+  unit/integration tested and the API it talks to is live, but the built static
+  bundle must still be hosted at `https://nestquest.cubecraftlabs.com` behind
+  Authentik; until then the PWA is not reachable end-to-end.
 - **Feature 12's TouchHub/DAKOS runbook task remains physically unverified**
   (needs the wall panel).
 - Moving the household database from Home Assistant to the API box is a manual
