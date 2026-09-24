@@ -74,3 +74,12 @@ export function Trash2Glyph({ size = 16 }: { size?: number }) {
     </Glyph>
   );
 }
+
+export function AlertCircleGlyph({ size = 18 }: { size?: number }) {
+  return (
+    <Glyph size={size}>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 8v4M12 16h.01" />
+    </Glyph>
+  );
+}

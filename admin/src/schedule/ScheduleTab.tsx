@@ -4,10 +4,11 @@
  * Every day's cycle position comes from the anchor date (./cycle.ts), never
  * from ISO week numbers or week parity (D-004).
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiForbiddenError } from "../api/client";
 import { ApiRequestError, fetchChildren, type AdminChild } from "../api/definitions";
 import {
+  deletePresenceOverride,
   fetchPresenceOverrides,
   fetchPresenceSchedule,
   savePresenceSchedule,
@@ -37,6 +38,7 @@ import {
   ChevronRightGlyph,
   Trash2Glyph,
 } from "./glyphs";
+import OverrideEditor from "./OverrideEditor";
 import "./ScheduleTab.css";
 
 /** ADMIN-SPEC §1: every scroll column ends with 92px so content clears the tab bar. */
@@ -64,6 +66,12 @@ type LoadState =
   | { kind: "error"; message: string }
   | { kind: "ready"; data: Loaded };
 
+type DeleteState =
+  | { kind: "idle" }
+  | { kind: "confirming"; id: number }
+  | { kind: "deleting"; id: number }
+  | { kind: "error"; id: number; message: string };
+
 type SaveState =
   | { kind: "idle" }
   | { kind: "saving" }
@@ -85,10 +93,19 @@ async function loadSchedule(): Promise<Loaded> {
   };
 }
 
-function saveErrorMessage(error: unknown): string {
+function loadErrorMessage(error: unknown): string {
+  return error instanceof ApiForbiddenError
+    ? error.message
+    : "The schedule could not be loaded. Check your connection and try again.";
+}
+
+function saveErrorMessage(
+  error: unknown,
+  fallback = "The pattern could not be saved. Check your connection and try again.",
+): string {
   if (error instanceof ApiForbiddenError) return error.message;
   if (error instanceof ApiRequestError && error.detail) return error.detail;
-  return "The pattern could not be saved. Check your connection and try again.";
+  return fallback;
 }
 
 function ScreenHeader({ sub }: { sub: string }) {
@@ -185,7 +202,18 @@ function MonthGrid({ month, today, schedule, effective, overrides, onMonth, onTo
   );
 }
 
-function OverrideRow({ override, childName }: { override: PresenceOverride; childName: string }) {
+interface OverrideRowProps {
+  override: PresenceOverride;
+  childName: string;
+  deletion: DeleteState;
+  onAskDelete: () => void;
+  onKeep: () => void;
+  onDelete: () => void;
+}
+
+function OverrideRow({ override, childName, deletion, onAskDelete, onKeep, onDelete }: OverrideRowProps) {
+  const mine =
+    (deletion.kind === "confirming" || deletion.kind === "deleting") && deletion.id === override.id;
   return (
     <li className="schedule-row" data-testid={`override-${override.id}`}>
       <span className="schedule-row-glyph">
@@ -198,10 +226,36 @@ function OverrideRow({ override, childName }: { override: PresenceOverride; chil
         </div>
         <div className="schedule-row-meta">{override.note || "No reason given"}</div>
       </div>
-      {/* TODO(4ae0c879): the override editor wires delete; inert until then. */}
-      <button type="button" className="schedule-icon-action" aria-label="Delete override">
-        <Trash2Glyph />
-      </button>
+      {mine ? (
+        <div className="schedule-confirm" role="group" aria-label="Confirm delete">
+          <span className="schedule-confirm-text">Delete override?</span>
+          <button
+            type="button"
+            className="schedule-confirm-keep"
+            onClick={onKeep}
+            disabled={deletion.kind === "deleting"}
+          >
+            Keep
+          </button>
+          <button
+            type="button"
+            className="schedule-confirm-delete"
+            onClick={onDelete}
+            disabled={deletion.kind === "deleting"}
+          >
+            {deletion.kind === "deleting" ? "Deleting…" : "Delete"}
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="schedule-icon-action"
+          aria-label="Delete override"
+          onClick={onAskDelete}
+        >
+          <Trash2Glyph />
+        </button>
+      )}
     </li>
   );
 }
@@ -218,6 +272,23 @@ export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProp
   const [month, setMonth] = useState(() => monthStart(today));
   const [drafts, setDrafts] = useState<Record<number, PresenceScheduleBody>>({});
   const [save, setSave] = useState<SaveState>({ kind: "idle" });
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [deletion, setDeletion] = useState<DeleteState>({ kind: "idle" });
+  const addRef = useRef<HTMLButtonElement>(null);
+  const editorWasOpen = useRef(false);
+
+  // The editor replaces this screen, so Add is remounted when it closes;
+  // hand focus back to it then.
+  useEffect(() => {
+    if (editorWasOpen.current && !editorOpen) addRef.current?.focus();
+    editorWasOpen.current = editorOpen;
+  }, [editorOpen]);
+
+  /** Reload children, schedules and overrides in place (no loading flash). */
+  const refresh = () =>
+    loadSchedule()
+      .then((data) => setState({ kind: "ready", data }))
+      .catch((error: unknown) => setState({ kind: "error", message: loadErrorMessage(error) }));
 
   useEffect(() => {
     let cancelled = false;
@@ -230,16 +301,29 @@ export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProp
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        const message =
-          error instanceof ApiForbiddenError
-            ? error.message
-            : "The schedule could not be loaded. Check your connection and try again.";
-        setState({ kind: "error", message });
+        setState({ kind: "error", message: loadErrorMessage(error) });
       });
     return () => {
       cancelled = true;
     };
   }, [attempt]);
+
+  if (editorOpen && state.kind === "ready" && state.data.children.length > 0) {
+    const { children } = state.data;
+    return (
+      <OverrideEditor
+        childOptions={children}
+        initialChildId={children.find((c) => c.id === selectedId)?.id ?? children[0].id}
+        today={today}
+        onCancel={() => setEditorOpen(false)}
+        onSaved={(override) => {
+          setEditorOpen(false);
+          setSelectedId(override.child_id);
+          void refresh();
+        }}
+      />
+    );
+  }
 
   let sub = "";
   let body;
@@ -284,6 +368,22 @@ export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProp
     const toggle = (date: string) => {
       const week = cycleWeekIndex(schedule.anchor_date, date, schedule.cycle_length_weeks);
       edit({ ...schedule, pattern: togglePatternDay(schedule.pattern, week, weekdayOf(date)) });
+    };
+    const confirmDelete = (id: number) => {
+      setDeletion({ kind: "deleting", id });
+      deletePresenceOverride(id)
+        .then(() => refresh())
+        .then(() => setDeletion({ kind: "idle" }))
+        .catch((error: unknown) =>
+          setDeletion({
+            kind: "error",
+            id,
+            message: saveErrorMessage(
+              error,
+              "The override could not be deleted. Check your connection and try again.",
+            ),
+          }),
+        );
     };
     const submit = () => {
       if (!draft) return;
@@ -407,20 +507,37 @@ export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProp
 
         <div className="schedule-section-head">
           <h3 className="schedule-section-label">Overrides</h3>
-          {/* TODO(4ae0c879): the override editor wires Add; inert until then. */}
-          <button type="button" className="schedule-text-action">
+          <button
+            ref={addRef}
+            type="button"
+            className="schedule-text-action"
+            onClick={() => setEditorOpen(true)}
+          >
             Add
           </button>
         </div>
         {childOverrides.length > 0 ? (
           <ul className="schedule-card schedule-list" aria-label="Overrides">
             {childOverrides.map((override) => (
-              <OverrideRow key={override.id} override={override} childName={child.display_name} />
+              <OverrideRow
+                key={override.id}
+                override={override}
+                childName={child.display_name}
+                deletion={deletion}
+                onAskDelete={() => setDeletion({ kind: "confirming", id: override.id })}
+                onKeep={() => setDeletion({ kind: "idle" })}
+                onDelete={() => confirmDelete(override.id)}
+              />
             ))}
           </ul>
         ) : (
           <div className="schedule-card schedule-empty">No overrides for {child.display_name}.</div>
         )}
+        {deletion.kind === "error" ? (
+          <p className="schedule-save-status schedule-save-status--error" role="alert">
+            {deletion.message}
+          </p>
+        ) : null}
       </>
     );
   }

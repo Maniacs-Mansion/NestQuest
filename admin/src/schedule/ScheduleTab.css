@@ -377,3 +377,40 @@
   font-weight: 700;
   cursor: pointer;
 }
+
+/* Inline delete confirmation in an override row */
+.schedule-confirm {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.schedule-confirm-text {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--nq-a-ink-secondary);
+}
+
+.schedule-confirm-keep,
+.schedule-confirm-delete {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.schedule-confirm-keep {
+  border: 1px solid var(--nq-a-border);
+  background: var(--nq-a-surface);
+  color: var(--nq-a-ink);
+}
+
+.schedule-confirm-delete {
+  border: 0;
+  background: var(--nq-a-danger);
+  color: #fff;
+}

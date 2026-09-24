@@ -80,3 +80,47 @@ export async function fetchPresenceOverrides(
   );
   return body.overrides;
 }
+
+export interface PresenceOverrideRange {
+  child_id: number;
+  /** "YYYY-MM-DD", inclusive. */
+  start_date: string;
+  /** "YYYY-MM-DD", inclusive; never before start_date. */
+  end_date: string;
+  is_present: boolean;
+}
+
+export interface PresenceOverrideBody extends PresenceOverrideRange {
+  note?: string;
+}
+
+export const PRESENCE_OVERRIDE_CONSEQUENCE_PATH = `${PRESENCE_OVERRIDES_PATH}/consequence`;
+
+function postJson(path: string, body: unknown): Promise<Response> {
+  return apiFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * How many open upcoming tasks saving this override would remove. Computed
+ * by the API before anything is saved; completed instances never count.
+ */
+export async function previewOverrideConsequence(range: PresenceOverrideRange): Promise<number> {
+  const body = await readJson<{ removed: number }>(
+    await postJson(PRESENCE_OVERRIDE_CONSEQUENCE_PATH, range),
+  );
+  return body.removed;
+}
+
+export async function createPresenceOverride(body: PresenceOverrideBody): Promise<PresenceOverride> {
+  return readJson<PresenceOverride>(await postJson(PRESENCE_OVERRIDES_PATH, body));
+}
+
+export async function deletePresenceOverride(overrideId: number): Promise<void> {
+  await readJson<{ status: string }>(
+    await apiFetch(`${PRESENCE_OVERRIDES_PATH}/${overrideId}`, { method: "DELETE" }),
+  );
+}
