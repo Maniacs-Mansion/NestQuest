@@ -1,5 +1,73 @@
 # NestQuest Release Notes
 
+## Version 0.7.1 — 2026-09-24
+
+### Scope
+
+Patch release bringing the admin PWA follow-ups and its hosting deployment from
+`dev` onto 0.7.0.
+
+- **Feature 24 — Admin PWA Hosting:** the admin PWA's static hosting is now
+  reproducible from the repository — `deploy/pwa/Dockerfile` (multi-stage, pinned
+  `node`/`nginx` base images by digest, `VITE_AUTHENTIK_CLIENT_ID` /
+  `VITE_AUTHENTIK_ISSUER` / `VITE_API_BASE_URL` build args), `deploy/pwa/nginx.conf`
+  (SPA fallback plus a source allow-list for the reverse proxy and the host), a
+  `pwa` service in `deploy/compose.yaml` published on `:8081`, and a
+  `deploy/RUNBOOK.md` section describing the build/serve and the Traefik
+  `nestquest-app` router. (PRs #220, #221.)
+- **Feature 19 follow-up — Manage children:** the Today header's Settings button
+  now opens a Settings screen. Its **Children** section lists the household's
+  children and lets a parent add (POST `/api/v1/admin/children`), edit
+  (PATCH `.../{id}`), activate/deactivate (PATCH `.../{id}/active`) and reorder
+  them (POST `.../reorder`). (PRs #222, #223.)
+- **Feature 19 follow-up — Settings preferences:** the same screen has a
+  **Preferences** section for the planning horizon, day rollover time, notify
+  target, the morning/afternoon/end-of-day notification times and their toggles,
+  and celebration, read from `GET /api/v1/admin/settings` and saved with a partial
+  `PATCH` of only the changed fields. (PRs #224, #225, #226.)
+
+### Requirements
+
+- Minimum Home Assistant version: **2024.6.0**.
+- A running NestQuest API service as in 0.7.0 (the Feature 17 deployment); the
+  `admin/` PWA is served from the owner's deployment at
+  `https://nestquest.cubecraftlabs.com`, not by HACS.
+
+### Breaking changes
+
+- **None.** The schema is unchanged at version 8 and no migration runs.
+  `custom_components/` is unchanged from 0.7.0 apart from the manifest
+  release-version metadata — no Home Assistant entity, service, event or
+  automation surface changes. This release adds admin PWA screens and deployment
+  artifacts only.
+
+### Known Limitations
+
+- **HACS does not ship the admin PWA or the deployment artifacts.** HACS copies
+  only `custom_components/nestquest`, so upgrading via HACS changes nothing
+  functional over 0.7.0; the PWA screens and hosting are deployed from `admin/`
+  and `deploy/` per the runbook.
+- Serving the PWA and API still requires the Feature 17 deployment (host, reverse
+  proxy, Authentik, backup target) as documented in `deploy/RUNBOOK.md`.
+- **Feature 12's TouchHub/DAKOS runbook task remains physically unverified**
+  (needs the wall panel).
+- The Settings UI does not expose resetting a field to its default with `null`.
+
+### Rollback
+
+Schema is unchanged (8), so no migration is involved in either direction.
+`custom_components/` is unchanged from 0.7.0 apart from the release-version
+metadata; rolling back the integration is a plain swap, and the PWA/hosting can be
+redeployed from the 0.7.0 tree.
+
+**HACS installs:** HACS > Integrations > NestQuest > Redownload > 0.7.0, then
+restart Home Assistant.
+
+**Manual installs:** replace `custom_components/nestquest/` with the 0.7.0 tree,
+then restart Home Assistant.
+
+**Repository operators:** git-revert the 0.7.1 release merge on `main`.
+
 ## Version 0.7.0 — 2026-09-24
 
 ### Scope
