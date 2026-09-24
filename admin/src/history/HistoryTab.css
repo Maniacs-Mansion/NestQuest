@@ -48,6 +48,37 @@
   cursor: pointer;
 }
 
+.history-csv:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+/* Non-blocking CSV export failure; the tab stays usable. */
+.history-export-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: var(--nq-a-density-row-pad);
+  border-radius: var(--nq-a-density-radius);
+  background: var(--nq-a-danger-bg);
+  color: var(--nq-a-danger-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.history-export-dismiss {
+  flex: none;
+  padding: 4px 8px;
+  border: none;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 /* Scroll column: 14px 16px, bottom 92px (set inline, ADMIN-SPEC §1). */
 .history-scroll {
   display: flex;
