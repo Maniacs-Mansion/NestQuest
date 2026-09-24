@@ -27,6 +27,14 @@ Run it with compose — the SQLite file lives on the named volume
 
 ``deploy/.env`` is git-ignored and supplies the secrets (panel service
 token, Authentik OIDC settings); ``NESTQUEST_DB_PATH`` is fixed to
-``/var/lib/nestquest/nestquest.db`` by compose. The port is bound to
-localhost only — TLS/reverse proxy, Authentik, network separation,
+``/var/lib/nestquest/nestquest.db`` by compose.
+
+The published port binds ``NESTQUEST_BIND_ADDRESS`` from
+``deploy/.env`` and defaults to ``127.0.0.1`` (localhost only). In
+production TLS is terminated by the shared Traefik reverse proxy,
+which serves ``https://nestquest.cubecraftlabs.com`` (Let's Encrypt,
+auto-renewed, HTTP redirected to HTTPS) and forwards to the API box
+on port 8080 — so on that box set ``NESTQUEST_BIND_ADDRESS`` to its
+LAN address (``10.60.1.14``). Traefik only allows
+``/api/v1/panel`` from the Home Assistant host. Network separation,
 backup and restore are later Feature 17 tasks.
