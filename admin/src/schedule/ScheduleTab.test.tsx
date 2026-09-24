@@ -131,10 +131,20 @@ describe("ScheduleTab", () => {
     expect(today.className).toContain("schedule-day--today");
     expect(today.dataset.state).toBe("home");
     expect(today.getAttribute("aria-label")).toBe("Sep 23 (today): Home");
-    // September 2026 starts on a Tuesday: one leading pad after the initials.
+    // Sunday-first header; September 2026 starts on a Tuesday: two leading pads.
     const grid = screen.getByRole("group", { name: "Month grid" });
+    expect(Array.from(grid.children, (c) => c.textContent).slice(0, 7)).toEqual([
+      "S",
+      "M",
+      "T",
+      "W",
+      "T",
+      "F",
+      "S",
+    ]);
     expect(grid.children[7].tagName).toBe("SPAN");
-    expect(grid.children[8].getAttribute("data-date")).toBe("2026-09-01");
+    expect(grid.children[8].tagName).toBe("SPAN");
+    expect(grid.children[9].getAttribute("data-date")).toBe("2026-09-01");
 
     const legend = screen.getByRole("list", { name: "Legend" });
     expect(within(legend).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
