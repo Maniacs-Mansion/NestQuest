@@ -10,6 +10,8 @@ assignee set inside the core edit's ONE transaction
 - an empty list, a duplicate, an unknown child or an inactive child is
   422 and NOTHING is written — the stored assignees (and any other
   field supplied in the same body) are unchanged;
+- a JSON boolean, float or numeric string id is 422 on create and edit
+  (never coerced to an int) and nothing is written;
 - an omitted ``assignee_child_ids`` leaves the assignees unchanged;
 - an assignment change regenerates the definition's future instances
   through the existing core path;
@@ -39,6 +41,9 @@ from tests.admin_jwt_harness import (
 _dao_rules = importlib.import_module("nestquest_core.dao_rules")
 _dao_instances = importlib.import_module("nestquest_core.dao_instances")
 _materialize = importlib.import_module("nestquest_core.materialize")
+_quest_definitions = importlib.import_module(
+    "nestquest_core.quest_definitions"
+)
 
 #: The panel service token the harness app is configured with.
 HARNESS_PANEL_TOKEN = "admin-test-panel-token"
@@ -243,6 +248,66 @@ async def test_rejected_assignee_list_is_422_and_changes_nothing(
     ) == {ada, bo}
     dao = _dao_rules.QuestDefinitionsDao(admin_assignees.database)
     assert (await dao.get(definition_id)).title == "Brush teeth"
+
+
+#: JSON ids the lax ``int`` parser would coerce (``true`` -> 1).
+_COERCIBLE_IDS = [True, 1.0, "1"]
+
+
+@pytest.mark.parametrize("coercible", _COERCIBLE_IDS)
+async def test_edit_rejects_coercible_assignee_ids_and_changes_nothing(
+    admin_assignees: SimpleNamespace, coercible: object
+) -> None:
+    """A bool, float or numeric-string id edit is 422; nothing changes."""
+    client = admin_assignees.client
+    ada, bo = await _create_children(client, ("Ada", "Bo"))
+    # Assign bo only, so a coerced id 1 (ada) would be a visible change.
+    definition_id = await _create_definition(client, [bo])
+    assert ada == 1
+
+    response = await client.patch(
+        _edit_path(definition_id),
+        json={"title": "Renamed", "assignee_child_ids": [coercible]},
+        headers=_admin_headers(),
+    )
+
+    assert response.status_code == 422
+    assert await _stored_assignee_ids(
+        admin_assignees.database, definition_id
+    ) == {bo}
+    dao = _dao_rules.QuestDefinitionsDao(admin_assignees.database)
+    assert (await dao.get(definition_id)).title == "Brush teeth"
+
+
+@pytest.mark.parametrize("coercible", _COERCIBLE_IDS)
+async def test_create_rejects_coercible_assignee_ids_and_persists_nothing(
+    admin_assignees: SimpleNamespace, coercible: object
+) -> None:
+    """A bool, float or numeric-string id create is 422; nothing is written."""
+    client = admin_assignees.client
+    ada, bo = await _create_children(client, ("Ada", "Bo"))
+    assert ada == 1
+    existing_id = await _create_definition(client, [bo])
+
+    response = await client.post(
+        "/api/v1/admin/quest-definitions",
+        json={
+            "title": "Tidy the den",
+            "rule": {"rule_type": "daily"},
+            "assignee_child_ids": [coercible],
+            "windows": ["morning"],
+        },
+        headers=_admin_headers(),
+    )
+
+    assert response.status_code == 422
+    bundles = await _quest_definitions.list_active_definitions(
+        admin_assignees.database
+    )
+    assert [bundle.definition.id for bundle in bundles] == [existing_id]
+    assert await _stored_assignee_ids(
+        admin_assignees.database, existing_id
+    ) == {bo}
 
 
 async def test_rejected_assignees_on_unknown_definition_is_404(

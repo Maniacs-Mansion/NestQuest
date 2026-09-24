@@ -252,7 +252,13 @@ import datetime
 from typing import Annotated, Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, StrictBool, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from api import transitions as api_transitions
 from api.auth import require_admin
@@ -457,11 +463,13 @@ class AdminQuestDefinitionCreateRequest(BaseModel):
     date the child is absent).  ``windows`` entries are a window name (``morning``) or a two-item
     ``[window, due_time]`` pair whose due time is a strict 24-hour
     HH:MM (or ``null`` for none) — both forms the core normalizes.
+    Assignee ids are strict JSON integers: a boolean, float or numeric
+    string is 422, never coerced to a child id.
     """
 
     title: str
     rule: AdminRuleRequest
-    assignee_child_ids: list[int]
+    assignee_child_ids: list[StrictInt]
     windows: list[str | tuple[str, str | None]]
     description: str | None = None
     icon: str | None = None
@@ -483,6 +491,7 @@ class AdminQuestDefinitionEditRequest(BaseModel):
     REPLACES the whole assignee set (non-empty, every id an existing
     active child — create's contract; a rejection changes nothing).  An
     omitted (or ``null``) ``skip_on_away`` keeps the stored value.
+    Assignee ids are strict JSON integers, as on create.
     """
 
     title: str | None = None
@@ -491,7 +500,7 @@ class AdminQuestDefinitionEditRequest(BaseModel):
     rule: AdminRuleRequest | None = None
     windows: list[str | tuple[str, str | None]] | None = None
     skip_on_away: StrictBool | None = None
-    assignee_child_ids: list[int] | None = None
+    assignee_child_ids: list[StrictInt] | None = None
 
 
 class AdminQuestDefinitionActiveRequest(BaseModel):
