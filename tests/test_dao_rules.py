@@ -847,6 +847,7 @@ def test_definition_update_cannot_change_assignee_or_active(
             "description",
             "icon",
             "due_time",
+            "skip_on_away",
         }
         assert await definitions.update(
             definition.id, title="A2"
@@ -860,6 +861,72 @@ def test_definition_update_cannot_change_assignee_or_active(
         return fetched
 
     _with_db(tmp_path, "definition-update-shape.db")(_body)
+
+
+def test_definition_update_toggles_skip_on_away_and_omission_keeps_it(
+    tmp_path,
+) -> None:
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        definition = await definitions.create("A", rule.id, NOW)
+        assert definition.skip_on_away is True
+        assert await definitions.update(
+            definition.id, skip_on_away=False
+        ) == 1
+        assert (await definitions.get(definition.id)).skip_on_away is False
+        # Omitting the flag (None) leaves the stored False untouched.
+        assert await definitions.update(definition.id, title="A2") == 1
+        kept = await definitions.get(definition.id)
+        assert kept.title == "A2"
+        assert kept.skip_on_away is False
+        assert await definitions.update(definition.id) == 0
+        assert await definitions.update(
+            definition.id, skip_on_away=True
+        ) == 1
+        assert (await definitions.get(definition.id)).skip_on_away is True
+
+    _with_db(tmp_path, "definition-update-skip-on-away.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [2, -1, 0.0, 1.5, "1", "true", b"\x01"])
+def test_skip_on_away_rejected_unless_zero_or_one_at_every_write(
+    tmp_path, bad
+) -> None:
+    """Every DAO entry point taking the flag rejects non-0/1 values.
+
+    This is the only guard on migrated databases, whose column was
+    added without the fresh-schema CHECK constraint.
+    """
+    async def _body(database, rules, definitions, children, child):
+        rule = await rules.create("daily", "2026-09-14")
+        definition = await definitions.create("A", rule.id, NOW)
+        with pytest.raises(ValueError, match="skip_on_away must be 0 or 1"):
+            await definitions.create("B", rule.id, NOW, skip_on_away=bad)
+        with pytest.raises(ValueError, match="skip_on_away must be 0 or 1"):
+            await definitions.create_with_rule_and_windows(
+                "C",
+                schedule_rule_to_storage(
+                    ScheduleRule(
+                        rule_type=RuleType.DAILY, start_date="2026-09-14"
+                    )
+                ),
+                NOW,
+                [child.id],
+                [("morning", None)],
+                skip_on_away=bad,
+            )
+        with pytest.raises(ValueError, match="skip_on_away must be 0 or 1"):
+            await definitions.edit_definition(
+                definition.id, title="A2", skip_on_away=bad
+            )
+        with pytest.raises(ValueError, match="skip_on_away must be 0 or 1"):
+            await definitions.update(
+                definition.id, title="A2", skip_on_away=bad
+            )
+        stored = await definitions.list_all()
+        assert [(d.title, d.skip_on_away) for d in stored] == [("A", True)]
+
+    _with_db(tmp_path, "definition-skip-on-away-invalid.db")(_body)
 
 
 def test_definition_update_no_fields_returns_zero(tmp_path) -> None:
