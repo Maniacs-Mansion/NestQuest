@@ -48,17 +48,6 @@
   border: 0;
 }
 
-.admin-placeholder {
-  margin: 0;
-  padding: 13px;
-  background: var(--nq-a-surface);
-  border: 1px solid var(--nq-a-border);
-  border-radius: 8px;
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--nq-a-ink-secondary);
-}
-
 .admin-tabbar {
   position: fixed;
   inset: auto 0 0;
