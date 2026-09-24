@@ -266,8 +266,16 @@ committed `deploy/litestream.yml` (`host-key`, the NAS's ECDSA key), so no
       -A DOCKER-USER -p tcp --dport 8080 -j DROP                      # every other source
 
   The rules are persisted by the systemd oneshot unit
-  **`nestquest-api-firewall.service`** on the API box (enabled; ordered
-  after `docker.service`, it applies the three rules at every boot).
+  **`nestquest-api-firewall.service`**, committed as
+  `deploy/systemd/nestquest-api-firewall.service` (ordered after
+  `docker.service`, it idempotently applies the three rules at every
+  boot). Install and enable it on the API box, from the repository
+  checkout, **before** exposing the API:
+
+      sudo cp deploy/systemd/nestquest-api-firewall.service /etc/systemd/system/ \
+        && sudo systemctl daemon-reload \
+        && sudo systemctl enable --now nestquest-api-firewall.service
+
   The HA box and every other client must use the Traefik hostname,
   never `:8080` directly. Check it:
 
@@ -282,10 +290,12 @@ committed `deploy/litestream.yml` (`host-key`, the NAS's ECDSA key), so no
       # public path still works:
       curl -s -o /dev/null -w '%{http_code}\n' https://nestquest.cubecraftlabs.com/health   # 200
 
-  On a rebuilt API box, recreate and enable the unit before exposing the
-  API (`sudo systemctl enable --now nestquest-api-firewall.service`); the
-  deployed unit is the authoritative copy
-  (`systemctl cat nestquest-api-firewall.service`).
+  On a rebuilt API box, install the unit with the commands above before
+  exposing the API. The committed file is the authoritative copy; the
+  deployed unit must match it:
+
+      diff deploy/systemd/nestquest-api-firewall.service \
+        /etc/systemd/system/nestquest-api-firewall.service   # no output
 
 ## 7. Backup (Litestream to the Synology NAS)
 

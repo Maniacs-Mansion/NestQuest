@@ -56,7 +56,7 @@ services:
   # (uid/gid 999, owner of the volume) with a read-only root filesystem,
   # no privilege escalation and no Linux capabilities.
   litestream:
-    image: litestream/litestream:0.5.17
+    image: litestream/litestream:0.5.17@sha256:4b02b9859a6b6b4087d8b8944e15f7e984bd7957cba322bbeee38b0e27b9656a
     restart: unless-stopped
     command: ["replicate", "-config", "/etc/litestream.yml"]
     user: "999:999"
