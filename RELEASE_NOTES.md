@@ -1,5 +1,107 @@
 # NestQuest Release Notes
 
+## Version 0.7.0 — 2026-09-24
+
+### Scope
+
+Seventh release of NestQuest, promoting the admin surface from `dev` onto
+0.6.0: the standalone admin PWA and the admin-plane API work it depends on.
+
+- **Feature 19 — Admin PWA:** the parent-facing admin surface is now a
+  standalone mobile-first React progressive web app (`admin/`), implementing
+  `design/ADMIN-SPEC.md`: Authentik OIDC authorization-code + PKCE login with
+  an explicit refusal for a user outside `nestquest-admins`; an installable
+  PWA (manifest + service worker); and the Today, Definitions, Schedule and
+  History screens. Every mutating action goes through the API admin routes;
+  the API remains the security boundary (D-003/D-012). Today shows the
+  household snapshot; Definitions supports create/edit with multi-select
+  assignees, a recurrence rule with interval and per-window due times, a
+  skip-on-away toggle, a shipped Lucide icon subset and a backend-computed
+  occurrence preview; Schedule has a presence month grid (cycle position from
+  the anchor date, never ISO parity, D-004) and an override editor with a live
+  "removes N upcoming tasks" consequence count; History has All/Reversals/
+  Missed filters, day-grouped rows, per-period stats, CSV export and the
+  append-only footer. Undo reverses a completion, and live updates arrive over
+  the admin SSE stream without a manual reload. (PRs #187–#210, plus the
+  feature-review fix #212.)
+- **Feature 21 — Admin Today Snapshot API:** `GET /api/v1/admin/snapshot`
+  serves the Today view's household snapshot on the admin plane (reusing the
+  core snapshot builder with missed instances included, D-009). (PRs #190/#191.)
+- **Feature 22 — Admin Definitions Read and skip_on_away:**
+  `GET /api/v1/admin/quest-definitions` lists all definitions (active and
+  inactive), and a persisted per-definition `skip_on_away` boolean is accepted
+  by create/update and honoured by materialization. Adds an optional
+  `assignee_child_ids` to the edit route so the PWA can reassign children.
+  (PRs #193, #194, #196, #197.)
+- **Feature 23 — Admin API Completion (preview, presence, live):** a bounded
+  rule occurrence-preview route; presence-schedule and presence-override
+  reads; a live override consequence count computed from the same core
+  generator the materializer uses; and an admin-plane transition SSE stream
+  (`GET /api/v1/admin/events`) off the one in-process publisher. (PRs
+  #199–#203.)
+
+### Requirements
+
+- Minimum Home Assistant version: **2024.6.0**.
+- A running NestQuest API service, reachable at the base URL and panel service
+  token configured in the integration options. The API service source ships in
+  `api/`; there is still **no container image, compose file or deployment
+  runbook in this release** because Feature 17 is not part of it.
+- The admin PWA is built to run at `https://nestquest.cubecraftlabs.com`
+  behind Authentik; hosting it is part of the Feature 17 deployment, which is
+  **not** in this release.
+
+### Breaking changes
+
+- **Schema version advances 7 → 8.** Migration 8 adds the additive
+  `skip_on_away` column to `quest_definitions` (default 1, so every existing
+  definition keeps today's skip-when-absent behaviour). The migration runs on
+  the first start of this version.
+- **Once migrated, a plain downgrade to 0.6.0 is impossible** — older builds
+  refuse a newer schema version. **Back up `nestquest.db` (plus `-wal`/`-shm`)
+  before upgrading**; see Rollback.
+- No Home Assistant entity, service, event or automation surface changes in
+  this release. The API's new admin routes are additive.
+
+### Known Limitations
+
+- **Feature 17 (API deployment and identity) is not in this release.** There
+  is no API box, TLS reverse proxy, Authentik application/provider/
+  `nestquest-admins` group, proven network separation, or backup/restore. The
+  integration and the admin PWA therefore cannot run end-to-end yet; Feature
+  19's end-to-end Authentik/HTTPS acceptance remains **unverified** until
+  Feature 17 is deployed.
+- **The admin PWA is not hosted.** `admin/` builds and is unit/integration
+  tested, but there is no deployment for it (it depends on Feature 17).
+- **Feature 12's TouchHub/DAKOS runbook task remains physically unverified**
+  (needs the wall panel).
+- Moving the household database from Home Assistant to the API box is a manual
+  file copy (the schema is unchanged by that move beyond the v8 migration).
+- Single household; single API service.
+
+### Rollback
+
+**Schema version advances 7 → 8.** Migration 8 is additive, but a migrated
+database **cannot** be read by 0.6.0 or earlier (they refuse a newer schema
+version). **Back up `nestquest.db` (plus `-wal`/`-shm`) before upgrading.** To
+return to 0.6.0 you must restore that backup; a plain downgrade is impossible
+once migrated.
+
+**HACS installs:**
+
+1. Before upgrading, stop HA and back up `nestquest.db` (plus `-wal`/`-shm`)
+   from the HA config directory.
+2. To roll back: HACS > Integrations > NestQuest > Redownload > 0.6.0, restore
+   the backed-up database, restart Home Assistant.
+
+**Manual installs:**
+
+1. Back up `nestquest.db` (plus `-wal`/`-shm`) before upgrading.
+2. To roll back: replace `custom_components/nestquest/` with the 0.6.0 tree,
+   restore the backed-up database, restart Home Assistant.
+
+**Repository operators:** git-revert the 0.7.0 release merge on `main`.
+
 ## Version 0.6.0 — 2026-09-23
 
 ### Scope
