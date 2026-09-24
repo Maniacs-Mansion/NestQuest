@@ -329,3 +329,39 @@
   background: var(--nq-brand-gradient);
   color: #fff;
 }
+
+/* Preferences: one box per notification — its toggle, then its time. */
+.settings-notification {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--nq-a-divider);
+  border-radius: var(--nq-a-density-radius);
+}
+
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--nq-a-tap-min);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.settings-toggle > input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+}
+
+.settings-notice {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--nq-a-density-radius);
+  background: var(--nq-a-divider);
+  color: var(--nq-a-ink-secondary);
+  font-size: 12.5px;
+  font-weight: 700;
+}
