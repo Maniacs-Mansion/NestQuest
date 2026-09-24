@@ -1,0 +1,367 @@
+/* Settings — pushed screen over the Today tab (and the tab bar), like the
+   presence override editor. Compact density list, roomy form card. */
+
+.settings-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  overflow-y: auto;
+  background: var(--nq-a-page);
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  background: var(--nq-a-surface);
+  border-bottom: 1px solid var(--nq-a-border);
+}
+
+.settings-back {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: var(--nq-a-tap-min);
+  height: var(--nq-a-tap-min);
+  margin: -6px 0 -6px -12px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--nq-a-ink);
+  cursor: pointer;
+}
+
+.settings-title {
+  margin: 0;
+  font-size: var(--nq-a-size-screen);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.settings-sub {
+  margin: 2px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--nq-a-ink-secondary);
+}
+
+/* Scroll column: 14px 16px, bottom 92px (set inline, ADMIN-SPEC §1). */
+.settings-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nq-a-density-gap);
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 14px 16px;
+}
+
+.settings-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-section-label {
+  margin: 0;
+  font-size: var(--nq-a-size-label);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: var(--nq-a-track-label);
+  color: var(--nq-a-ink-secondary);
+}
+
+.settings-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--nq-a-radius-pill);
+  background: var(--nq-brand-gradient);
+  color: #fff;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.settings-card {
+  background: var(--nq-a-surface);
+  border: 1px solid var(--nq-a-border);
+  border-radius: var(--nq-a-density-radius);
+}
+
+.settings-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-list > li + li {
+  border-top: 1px solid var(--nq-a-divider);
+}
+
+.settings-child {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: var(--nq-a-density-row-pad);
+}
+
+.settings-child--inactive .settings-child-name {
+  color: var(--nq-a-ink-tertiary);
+}
+
+.settings-swatch {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--nq-a-radius-pill);
+  border: 1px solid rgba(9, 9, 11, 0.12);
+}
+
+.settings-child-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-child-name {
+  font-size: var(--nq-a-size-row);
+  font-weight: 700;
+}
+
+.settings-child-meta {
+  margin-top: 1px;
+  font-size: var(--nq-a-size-meta);
+  font-weight: 600;
+  color: var(--nq-a-ink-tertiary);
+}
+
+.settings-pill {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: var(--nq-a-radius-pill);
+  background: var(--nq-a-divider);
+  color: var(--nq-a-ink-secondary);
+  font-size: var(--nq-a-size-meta);
+  font-weight: 700;
+}
+
+.settings-pill--active {
+  background: #dcfce7;
+  color: var(--nq-a-success);
+}
+
+.settings-child-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  width: 100%;
+}
+
+.settings-icon-button,
+.settings-action {
+  min-height: 36px;
+  border: 1px solid var(--nq-a-border);
+  border-radius: var(--nq-a-density-radius);
+  background: var(--nq-a-surface);
+  color: var(--nq-a-ink);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.settings-icon-button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  padding: 0;
+}
+
+.settings-action {
+  padding: 0 12px;
+}
+
+.settings-icon-button:disabled,
+.settings-action:disabled,
+.settings-add:disabled,
+.settings-back:disabled,
+.settings-cancel:disabled,
+.settings-save:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.settings-empty,
+.settings-status {
+  padding: 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--nq-a-ink-secondary);
+  text-align: center;
+}
+
+.settings-status--error {
+  color: var(--nq-a-danger-strong);
+}
+
+.settings-status p {
+  margin: 0 0 10px;
+}
+
+.settings-action-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--nq-a-density-radius);
+  background: var(--nq-a-danger-bg);
+  color: var(--nq-a-danger-strong);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+/* Add / edit form: roomy density, 18px padding, 16px gaps. */
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px;
+}
+
+.settings-form-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.settings-label {
+  font-size: var(--nq-a-size-label);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: var(--nq-a-track-label);
+  color: var(--nq-a-ink-secondary);
+}
+
+.settings-input {
+  width: 100%;
+  min-height: var(--nq-a-tap-min);
+  padding: 13px;
+  border: 1px solid var(--nq-a-border);
+  border-radius: 10px;
+  background: var(--nq-a-surface);
+  color: var(--nq-a-ink);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.settings-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-swatch-option {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: var(--nq-a-radius-pill);
+  cursor: pointer;
+}
+
+.settings-swatch-option[aria-pressed="true"] {
+  border-color: var(--nq-a-ink);
+  box-shadow: inset 0 0 0 2px var(--nq-a-surface);
+}
+
+.settings-error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--nq-a-density-radius);
+  background: var(--nq-a-danger-bg);
+  color: var(--nq-a-danger-strong);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.settings-form-footer {
+  display: flex;
+  gap: 10px;
+}
+
+.settings-cancel,
+.settings-save {
+  padding: 15px 12px;
+  border-radius: 12px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.settings-cancel {
+  flex: 1;
+  border: 1px solid var(--nq-a-border);
+  background: var(--nq-a-surface);
+  color: var(--nq-a-ink);
+}
+
+.settings-save {
+  flex: 2;
+  border: 0;
+  background: var(--nq-brand-gradient);
+  color: #fff;
+}
+
+/* Preferences: one box per notification — its toggle, then its time. */
+.settings-notification {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--nq-a-divider);
+  border-radius: var(--nq-a-density-radius);
+}
+
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--nq-a-tap-min);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.settings-toggle > input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+}
+
+.settings-notice {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--nq-a-density-radius);
+  background: var(--nq-a-divider);
+  color: var(--nq-a-ink-secondary);
+  font-size: 12.5px;
+  font-weight: 700;
+}
