@@ -1,9 +1,17 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import App from "./App";
 
 describe("NestQuest Admin shell", () => {
-  afterEach(cleanup);
+  beforeEach(() => {
+    // The Today tab fetches the admin snapshot; keep the shell tests offline.
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
 
   it("renders the title and all four tab labels", () => {
     render(<App />);
@@ -14,12 +22,10 @@ describe("NestQuest Admin shell", () => {
     }
   });
 
-  it("starts on the Today placeholder and switches on tab click", () => {
+  it("starts on the Today screen and switches on tab click", () => {
     render(<App />);
 
-    expect(screen.getByRole("tabpanel").textContent).toContain(
-      "Today placeholder",
-    );
+    expect(screen.getByRole("heading", { name: "Today" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("tab", { name: "History" }));
 
