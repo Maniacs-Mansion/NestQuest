@@ -414,6 +414,30 @@
   gap: 6px;
 }
 
+.defs-icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--nq-a-tap-min), 1fr));
+  gap: 6px;
+}
+
+.defs-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--nq-a-tap-min);
+  border: 1px solid var(--nq-a-border);
+  border-radius: var(--nq-a-density-radius);
+  background: var(--nq-a-surface);
+  color: var(--nq-a-ink);
+  cursor: pointer;
+}
+
+.defs-icon--on {
+  border-color: transparent;
+  background: var(--nq-brand-gradient);
+  color: #fff;
+}
+
 .defs-due-times {
   display: flex;
   flex-direction: column;

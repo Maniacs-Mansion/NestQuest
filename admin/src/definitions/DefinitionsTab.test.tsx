@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import DefinitionsTab from "./DefinitionsTab";
+import { DEFINITION_ICONS, DefinitionIcon } from "./definitionIcons";
 import type { AdminChild, DefinitionRule, QuestDefinition } from "../api/definitions";
 import { storeTokens } from "../auth/oidc";
 
@@ -134,7 +135,7 @@ function fakeApi(initial: QuestDefinition[]) {
         id: 99,
         title: body.title,
         description: null,
-        icon: null,
+        icon: body.icon ?? null,
         is_active: true,
         skip_on_away: body.skip_on_away,
         rule: body.rule,
@@ -158,6 +159,7 @@ function fakeApi(initial: QuestDefinition[]) {
           ? {
               ...d,
               title: body.title ?? d.title,
+              icon: "icon" in body ? body.icon : d.icon,
               skip_on_away: body.skip_on_away ?? d.skip_on_away,
               rule: body.rule ?? d.rule,
               // Like the API: a sent list replaces the whole set; an absent one keeps it.
@@ -331,6 +333,7 @@ describe("DefinitionsTab", () => {
         path: "/api/v1/admin/quest-definitions",
         body: {
           title: "Feed the cat",
+          icon: null,
           rule: {
             rule_type: "weekly",
             interval: 2,
@@ -419,6 +422,7 @@ describe("DefinitionsTab", () => {
         path: "/api/v1/admin/quest-definitions/11",
         body: {
           title: "Take out the bins",
+          icon: null,
           rule: {
             rule_type: "monthly_day",
             interval: 1,
@@ -436,9 +440,6 @@ describe("DefinitionsTab", () => {
         },
       },
     ]);
-    // The icon is never sent, so it is carried through unchanged.
-    expect(api.writes()[0].body).not.toHaveProperty("icon");
-
     await screen.findByText("Take out the bins");
     expect(api.listFetches()).toBe(2);
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -916,5 +917,171 @@ describe("DefinitionsTab occurrence preview", () => {
     });
     await waitFor(() => expect(previewText()).toContain("Tue 6 Oct"));
     expect(api.previews()).toHaveLength(1);
+  });
+});
+
+describe("DefinitionsTab icon picker", () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  /** The Lucide name a row renders, or null for the generic fallback glyph. */
+  function rowIcon(row: HTMLElement): string | null {
+    const svg = row.querySelector(".defs-row-glyph svg");
+    expect(svg).not.toBeNull();
+    return svg!.getAttribute("data-icon");
+  }
+
+  function iconRadio(s: HTMLElement, label: string): HTMLElement {
+    return within(within(s).getByRole("radiogroup", { name: "Icon" })).getByRole("radio", {
+      name: label,
+    });
+  }
+
+  it("ships the curated subset, and every entry renders an SVG", () => {
+    expect(DEFINITION_ICONS.map((entry) => entry.name)).toEqual([
+      "bed",
+      "bath",
+      "shower-head",
+      "toilet",
+      "brush",
+      "smile",
+      "shirt",
+      "washing-machine",
+      "utensils",
+      "cooking-pot",
+      "apple",
+      "brush-cleaning",
+      "spray-can",
+      "trash-2",
+      "recycle",
+      "sofa",
+      "house",
+      "backpack",
+      "book-open",
+      "pencil",
+      "music",
+      "dog",
+      "cat",
+      "fish",
+      "sprout",
+      "droplets",
+      "bike",
+      "volleyball",
+      "gamepad-2",
+      "star",
+      "heart",
+      "sun",
+      "moon",
+      "clock",
+      "calendar",
+      "list-checks",
+    ]);
+    expect(DEFINITION_ICONS.length).toBeGreaterThanOrEqual(24);
+    expect(DEFINITION_ICONS.length).toBeLessThanOrEqual(40);
+    for (const { name } of DEFINITION_ICONS) {
+      const { container, unmount } = render(<DefinitionIcon name={name} />);
+      const svg = container.querySelector("svg");
+      expect(svg, name).not.toBeNull();
+      expect(svg!.getAttribute("data-icon")).toBe(name);
+      expect(svg!.querySelectorAll("path, circle, rect, line, polyline, ellipse").length).toBeGreaterThan(0);
+      unmount();
+    }
+  });
+
+  it("a chosen icon is POSTed for a new task and renders on its row", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    const s = sheet();
+    expect(iconRadio(s, "No icon").getAttribute("aria-checked")).toBe("true");
+
+    fireEvent.change(within(s).getByRole("textbox", { name: "Title" }), {
+      target: { value: "Make the bed" },
+    });
+    fireEvent.click(within(s).getByRole("button", { name: /Assigned children/ }));
+    fireEvent.click(within(s).getByRole("checkbox", { name: "Declan" }));
+    fireEvent.click(within(s).getByRole("button", { name: "Morning" }));
+    fireEvent.click(iconRadio(s, "Bed"));
+    expect(iconRadio(s, "Bed").getAttribute("aria-checked")).toBe("true");
+    expect(iconRadio(s, "Bed").className).toContain("defs-icon--on");
+    expect(iconRadio(s, "No icon").getAttribute("aria-checked")).toBe("false");
+
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+
+    expect(api.writes()).toHaveLength(1);
+    expect(api.writes()[0].method).toBe("POST");
+    expect((api.writes()[0].body as { icon: string }).icon).toBe("bed");
+    expect(rowIcon(await screen.findByTestId("definition-99"))).toBe("bed");
+  });
+
+  it("a chosen icon is PATCHed for an existing task without breaking the assignee omit", async () => {
+    await renderReady();
+    expect(rowIcon(screen.getByTestId("definition-11"))).toBeNull();
+    fireEvent.click(screen.getByTestId("definition-11"));
+    const s = sheet();
+    expect(iconRadio(s, "No icon").getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(iconRadio(s, "Bins"));
+
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+
+    expect(screen.queryByTestId("unassign-confirm")).toBeNull();
+    expect(api.writes()).toHaveLength(1);
+    const { method, path, body } = api.writes()[0];
+    expect(method).toBe("PATCH");
+    expect(path).toBe("/api/v1/admin/quest-definitions/11");
+    expect((body as { icon: string }).icon).toBe("trash-2");
+    // Inactive "Old" stays assigned: the unchanged selection is still omitted.
+    expect(body).not.toHaveProperty("assignee_child_ids");
+    await waitFor(() => expect(rowIcon(screen.getByTestId("definition-11"))).toBe("trash-2"));
+  });
+
+  it("an unchanged icon is still sent on edit and shows as selected", async () => {
+    await renderReady();
+    expect(rowIcon(screen.getByTestId("definition-10"))).toBe("smile");
+    fireEvent.click(screen.getByTestId("definition-10"));
+    const s = sheet();
+    expect(iconRadio(s, "Smile").getAttribute("aria-checked")).toBe("true");
+    fireEvent.change(within(s).getByRole("textbox", { name: "Title" }), {
+      target: { value: "Brush teeth well" },
+    });
+
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+
+    expect((api.writes()[0].body as { icon: string }).icon).toBe("smile");
+  });
+
+  it("an unknown legacy icon falls back to the generic glyph and is kept on save", async () => {
+    const legacy: QuestDefinition = { ...BRUSH, id: 20, icon: "rocket-ship-9000" };
+    await renderReady([legacy]);
+    const row = screen.getByTestId("definition-20");
+    expect(rowIcon(row)).toBeNull();
+
+    fireEvent.click(row);
+    const s = sheet();
+    const group = within(s).getByRole("radiogroup", { name: "Icon" });
+    for (const radio of within(group).getAllByRole("radio")) {
+      expect(radio.getAttribute("aria-checked")).toBe("false");
+    }
+
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+
+    expect((api.writes()[0].body as { icon: string }).icon).toBe("rocket-ship-9000");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(rowIcon(screen.getByTestId("definition-20"))).toBeNull();
   });
 });
