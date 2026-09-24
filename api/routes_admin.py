@@ -290,6 +290,16 @@ an omitted field is never passed to
 :func:`nestquest_core.children.edit_child` and stays unchanged — while
 an explicit ``null`` IS passed and is rejected by the core rather than
 silently ignored.
+
+The EVENTS route (``GET /events``) is the admin plane's live
+transition stream for the Admin PWA: the SAME four transitions
+(quest-completed, quest-uncompleted, quest-missed, child-day-complete)
+off the SAME in-process publisher as the panel plane, framed by the
+shared :func:`api.sse.transition_event_stream` helper.  It inherits the
+router's ONE :func:`~api.auth.require_admin` check (the Authorization
+header — the PWA reads it with a fetch-based reader because
+``EventSource`` cannot set headers), so the panel service token is
+refused here exactly as on every other admin route.
 """
 from __future__ import annotations
 
@@ -297,6 +307,7 @@ import datetime
 from typing import Annotated, Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import (
     BaseModel,
     StrictBool,
@@ -325,6 +336,7 @@ from api.nestquest_core import (
     core_snapshot,
     core_sweep,
 )
+from api.sse import transition_event_stream
 
 #: All admin-plane routes share this router; the ONE admin dependency
 #: (service-token refusal + JWT verification + nestquest-admins group
@@ -2203,6 +2215,27 @@ async def admin_snapshot(request: Request) -> AdminSnapshotResponse:
             for child in snapshot.children
         ],
     )
+
+
+
+@router.get(
+    "/events",
+    summary="Stream admin transition events (SSE)",
+)
+async def admin_events(request: Request) -> StreamingResponse:
+    """Stream the app's transition events to an admin client
+    (Server-Sent Events).
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own), so an unauthenticated or
+    panel-token request is refused before any stream is established.
+
+    Returns the shared :func:`api.sse.transition_event_stream` response
+    off the app's single in-process publisher (``app.state.publisher``)
+    — the same publisher, framing and teardown as the panel stream.
+    """
+    return transition_event_stream(request)
 
 
 __all__ = ["router"]
