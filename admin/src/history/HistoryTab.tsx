@@ -53,7 +53,8 @@ interface Loaded {
 type LoadState =
   | { kind: "loading" }
   | { kind: "error"; message: string }
-  | { kind: "ready"; data: Loaded };
+  /** `key` is the (filter, start, end) the rows were loaded for. */
+  | { kind: "ready"; data: Loaded; key: string };
 
 /**
  * The selected filter's rows plus the period stats. Stats always come from
@@ -167,15 +168,13 @@ export default function HistoryTab({ today = localTodayIso() }: { today?: string
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const exportingRef = useRef(false);
-  /** The next load is a refresh in place: keep the current rows, no loading state. */
-  const silentNext = useRef(false);
   const start = shiftIso(today, -(RANGE_DAYS - 1));
+  const key = `${filter}|${start}|${today}`;
 
   // A quest transition is a new history row (or changes a derived missed row);
   // a day-complete adds none. The refetch keeps the active filter and range.
   useTransitions((event: TransitionEvent) => {
     if (event.type === "nestquest_child_day_complete") return;
-    silentNext.current = true;
     setAttempt((n) => n + 1);
   });
 
@@ -202,12 +201,13 @@ export default function HistoryTab({ today = localTodayIso() }: { today?: string
 
   useEffect(() => {
     let cancelled = false;
-    const silent = silentNext.current;
-    silentNext.current = false;
-    if (!silent) setState({ kind: "loading" });
+    // Rows already loaded for this (filter, range) stay on screen while they
+    // refresh; any other rows give way to the loading state.
+    const isCurrent = (prev: LoadState) => prev.kind === "ready" && prev.key === key;
+    setState((prev) => (isCurrent(prev) ? prev : { kind: "loading" }));
     loadHistory(filter, start, today)
       .then((data) => {
-        if (!cancelled) setState({ kind: "ready", data });
+        if (!cancelled) setState({ kind: "ready", data, key });
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -216,31 +216,35 @@ export default function HistoryTab({ today = localTodayIso() }: { today?: string
             ? error.message
             : "The history could not be loaded. Check your connection and try again.";
         // A failed refresh keeps the rows already on screen.
-        setState((prev) => (silent && prev.kind === "ready" ? prev : { kind: "error", message }));
+        setState((prev) => (isCurrent(prev) ? prev : { kind: "error", message }));
       });
     return () => {
       cancelled = true;
     };
-  }, [filter, start, today, attempt]);
+  }, [filter, start, today, key, attempt]);
+
+  // Never render one filter's rows under another's chip, even for the render
+  // before the load effect runs.
+  const shown: LoadState = state.kind === "ready" && state.key !== key ? { kind: "loading" } : state;
 
   let body;
-  if (state.kind === "loading") {
+  if (shown.kind === "loading") {
     body = (
       <div className="history-status" role="status" data-testid="history-loading">
         Loading history…
       </div>
     );
-  } else if (state.kind === "error") {
+  } else if (shown.kind === "error") {
     body = (
       <div className="history-status history-status--error" role="alert" data-testid="history-error">
-        <p>{state.message}</p>
+        <p>{shown.message}</p>
         <button type="button" className="history-retry" onClick={() => setAttempt((n) => n + 1)}>
           Try again
         </button>
       </div>
     );
   } else {
-    const groups = groupByDay(state.data.rows);
+    const groups = groupByDay(shown.data.rows);
     body =
       groups.length > 0 ? (
         groups.map((group) => (
@@ -274,7 +278,7 @@ export default function HistoryTab({ today = localTodayIso() }: { today?: string
             </button>
           </div>
         ) : null}
-        {state.kind === "ready" ? <StatRow stats={state.data.stats} /> : null}
+        {shown.kind === "ready" ? <StatRow stats={shown.data.stats} /> : null}
         <div className="history-chips" role="group" aria-label="Filter events">
           {FILTERS.map((item) => (
             <button

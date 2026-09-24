@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import HistoryTab, { FOOTER_NOTE, computeStats } from "./HistoryTab";
 import type { HistoryFilter, HistoryRow } from "../api/history";
 import { storeTokens } from "../auth/oidc";
@@ -524,5 +524,108 @@ describe("HistoryTab live updates", () => {
     for (const row of screen.getAllByTestId("history-row")) {
       expect(within(row).queryByRole("button")).toBeNull();
     }
+  });
+
+  describe("a filter change interleaved with a quest transition", () => {
+    // Both land before the load effect runs, so one load serves both.
+    async function interleave(order: "sse-first" | "chip-first") {
+      await act(async () => {
+        const click = () => fireEvent.click(screen.getByRole("button", { name: "Reversals" }));
+        if (order === "chip-first") click();
+        streams[0].push(frame("nestquest_quest_uncompleted", PAYLOAD));
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        if (order === "sse-first") click();
+      });
+    }
+
+    async function renderLive() {
+      render(
+        <TransitionsProvider>
+          <HistoryTab today={TODAY} />
+        </TransitionsProvider>,
+      );
+      await screen.findByTestId("stat-on-time");
+      await waitFor(() => expect(streams).toHaveLength(1));
+      expect(screen.getAllByTestId("history-row")).toHaveLength(ROWS.all.length);
+    }
+
+    function titles(): string[] {
+      return screen.getAllByTestId("history-row").map((el) => el.textContent ?? "");
+    }
+
+    for (const order of ["sse-first", "chip-first"] as const) {
+      it(`${order}: shows loading, then only the active filter's rows`, async () => {
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const route = fetchMock.getMockImplementation()!;
+        await renderLive();
+        fetchMock.mockImplementation((url: string) => {
+          const parsed = new URL(url, "http://x");
+          if (parsed.searchParams.get("filter") === "reversals") {
+            return gate.then(() => route(url));
+          }
+          return route(url);
+        });
+
+        await interleave(order);
+        expect(screen.getByRole("button", { name: "Reversals" }).getAttribute("aria-pressed")).toBe("true");
+        // The previous filter's rows never show under the new chip.
+        expect(screen.getByTestId("history-loading")).toBeTruthy();
+        expect(screen.queryAllByTestId("history-row")).toHaveLength(0);
+
+        release();
+        await screen.findByTestId("stat-on-time");
+        expect(titles()).toHaveLength(1);
+        expect(titles()[0]).toContain("Make bed · Maeve");
+        expect(screen.getAllByTestId("history-dot")[0].className).toContain("history-dot--uncompleted");
+      });
+
+      it(`${order}: a failed filter-change load shows the error state, not stale rows`, async () => {
+        const route = fetchMock.getMockImplementation()!;
+        await renderLive();
+        fetchMock.mockImplementation((url: string) => {
+          const parsed = new URL(url, "http://x");
+          if (parsed.pathname === "/api/v1/admin/history") {
+            return Promise.resolve(jsonResponse({ detail: "boom" }, 500));
+          }
+          return route(url);
+        });
+
+        await interleave(order);
+        const error = await screen.findByTestId("history-error");
+        expect(error.textContent).toContain("The history could not be loaded");
+        expect(screen.getByRole("button", { name: "Reversals" }).getAttribute("aria-pressed")).toBe("true");
+        expect(screen.queryAllByTestId("history-row")).toHaveLength(0);
+        expect(screen.queryByTestId("stat-on-time")).toBeNull();
+      });
+    }
+  });
+
+  it("a failed transition refresh keeps the active filter's rows on screen", async () => {
+    render(
+      <TransitionsProvider>
+        <HistoryTab today={TODAY} />
+      </TransitionsProvider>,
+    );
+    await screen.findByTestId("stat-on-time");
+    await waitFor(() => expect(streams).toHaveLength(1));
+    const route = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string) => {
+      if (new URL(url, "http://x").pathname === "/api/v1/admin/history") {
+        return Promise.resolve(jsonResponse({ detail: "boom" }, 500));
+      }
+      return route(url);
+    });
+    const before = historyRequests().length;
+
+    streams[0].push(frame("nestquest_quest_uncompleted", PAYLOAD));
+    // The "all" filter plus the missed stats query.
+    await waitFor(() => expect(historyRequests().length).toBe(before + 2));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.queryByTestId("history-error")).toBeNull();
+    expect(screen.queryByTestId("history-loading")).toBeNull();
+    expect(screen.getAllByTestId("history-row")).toHaveLength(ROWS.all.length);
   });
 });
