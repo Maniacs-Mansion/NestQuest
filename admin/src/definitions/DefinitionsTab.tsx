@@ -1,8 +1,6 @@
 /**
- * Definitions ("Tasks") tab — list + edit sheet (design/ADMIN-SPEC.md §3.1–3.2).
- *
- * The icon picker (§3.3) is a separate task: an existing definition's icon is
- * carried through unchanged by never sending it.
+ * Definitions ("Tasks") tab — list + edit sheet with icon picker
+ * (design/ADMIN-SPEC.md §3.1–3.3).
  */
 import {
   useEffect,
@@ -44,6 +42,7 @@ import {
   PlusGlyph,
   TaskGlyph,
 } from "./glyphs";
+import { DEFINITION_ICONS, DefinitionIcon } from "./definitionIcons";
 import "./DefinitionsTab.css";
 
 /** ADMIN-SPEC §1: every scroll column ends with 92px so content clears the tab bar. */
@@ -78,6 +77,8 @@ const WEEKDAY_LONG = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "S
 
 interface Draft {
   title: string;
+  /** A Lucide name; a legacy value outside the subset is kept until replaced. */
+  icon: string | null;
   assigneeIds: number[];
   repeats: Repeats;
   interval: string;
@@ -117,6 +118,7 @@ function newDraft(activeChildren: AdminChild[]): Draft {
   const today = new Date();
   return {
     title: "",
+    icon: null,
     assigneeIds: activeChildren.length === 1 ? [activeChildren[0].id] : [],
     repeats: "daily",
     interval: "1",
@@ -141,6 +143,7 @@ function draftFrom(definition: QuestDefinition, activeChildren: AdminChild[]): D
   for (const w of definition.windows) dueTimes[w.window] = w.due_time ?? "";
   return {
     title: definition.title,
+    icon: definition.icon,
     // Inactive children cannot be submitted (the API rejects them with 422).
     assigneeIds: definition.assignees.map((a) => a.id).filter((id) => active.has(id)),
     repeats: REPEATS_BY_RULE[rule.rule_type],
@@ -233,6 +236,7 @@ function buildBody(draft: Draft, keepsAssignees = false): DefinitionCreateBody |
   );
   return {
     title,
+    icon: draft.icon,
     rule,
     assignee_child_ids: [...draft.assigneeIds],
     windows,
@@ -319,7 +323,7 @@ function DefinitionRow({
         onClick={onOpen}
       >
         <span className="defs-row-glyph">
-          <TaskGlyph />
+          <DefinitionIcon name={definition.icon} />
         </span>
         <span className="defs-row-text">
           <span className="defs-row-title">{definition.title}</span>
@@ -556,6 +560,35 @@ function EditSheet({
               value={draft.title}
               onChange={(e) => update({ title: e.target.value })}
             />
+          </Field>
+
+          <Field label="Icon" id="defs-label-icon">
+            <div className="defs-icon-grid" role="radiogroup" aria-labelledby="defs-label-icon">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={draft.icon === null}
+                aria-label="No icon"
+                className={draft.icon === null ? "defs-icon defs-icon--on" : "defs-icon"}
+                onClick={() => update({ icon: null })}
+              >
+                <TaskGlyph size={18} />
+              </button>
+              {DEFINITION_ICONS.map(({ name, label, Icon }) => (
+                <button
+                  key={name}
+                  type="button"
+                  role="radio"
+                  aria-checked={draft.icon === name}
+                  aria-label={label}
+                  data-icon-option={name}
+                  className={draft.icon === name ? "defs-icon defs-icon--on" : "defs-icon"}
+                  onClick={() => update({ icon: name })}
+                >
+                  <Icon size={18} aria-hidden="true" focusable="false" />
+                </button>
+              ))}
+            </div>
           </Field>
 
           <Field label="Assigned children" id="defs-label-children">
