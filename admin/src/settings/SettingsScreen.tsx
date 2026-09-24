@@ -262,7 +262,12 @@ function preferencesDraft(settings: HouseholdSettings): PreferencesDraft {
 /** Only the fields that differ from `loaded`, or a validation message. */
 function buildChanges(draft: PreferencesDraft, loaded: HouseholdSettings): SettingsChanges | string {
   const horizon = draft.horizon_days.trim();
-  if (!/^\d+$/.test(horizon)) return "Planning horizon must be a whole number of days.";
+  const horizonDays = Number(horizon);
+  // A digit string too long for a safe integer would become Infinity, which
+  // JSON serializes as null, and the API reads null as "reset to default".
+  if (!/^\d+$/.test(horizon) || !Number.isSafeInteger(horizonDays) || horizonDays < 1) {
+    return "Planning horizon must be a whole number of days, at least 1.";
+  }
   const times: [TimeField, string][] = [
     ["day_rollover_time", "Day rollover"],
     ...NOTIFICATIONS.map((n): [TimeField, string] => [n.time, `${n.label} time`]),
@@ -273,7 +278,7 @@ function buildChanges(draft: PreferencesDraft, loaded: HouseholdSettings): Setti
 
   const next: HouseholdSettings = {
     ...draft,
-    horizon_days: Number(horizon),
+    horizon_days: horizonDays,
     notify_target: draft.notify_target.trim(),
   };
   const changes: SettingsChanges = {};

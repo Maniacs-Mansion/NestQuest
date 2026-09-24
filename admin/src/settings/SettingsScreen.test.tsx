@@ -432,14 +432,18 @@ describe("SettingsScreen — preferences", () => {
 
   it("a 422 shows the API detail naming the field and keeps the edit", async () => {
     const { form, onClose } = await renderPreferences();
-    fireEvent.change(field(form, "Planning horizon (days)"), { target: { value: "0" } });
-    writeResponse = () => jsonResponse({ detail: "horizon_days must be >= 1" }, 422);
+    fireEvent.change(field(form, "Notify target"), { target: { value: "notify.nobody" } });
+    writeResponse = () => jsonResponse({ detail: "notify_target is not a notify service" }, 422);
     save(form);
     const message = await screen.findByTestId("preferences-message");
-    expect(message.textContent).toBe("The preferences could not be saved: horizon_days must be >= 1");
+    expect(message.textContent).toBe(
+      "The preferences could not be saved: notify_target is not a notify service",
+    );
     expect(message.getAttribute("role")).toBe("alert");
-    expect(field(form, "Planning horizon (days)").value).toBe("0");
-    expect(writes()).toEqual([{ method: "PATCH", path: SETTINGS_PATH, body: { horizon_days: 0 } }]);
+    expect(field(form, "Notify target").value).toBe("notify.nobody");
+    expect(writes()).toEqual([
+      { method: "PATCH", path: SETTINGS_PATH, body: { notify_target: "notify.nobody" } },
+    ]);
     expect(onClose).not.toHaveBeenCalled();
   });
 
@@ -453,12 +457,17 @@ describe("SettingsScreen — preferences", () => {
     expect(checkbox(form, "Celebration").checked).toBe(true);
   });
 
-  it("a malformed horizon is rejected before any request", async () => {
+  it.each([
+    ["empty", ""],
+    ["zero", "0"],
+    ["oversized (Infinity would serialize as null and reset the field)", "9".repeat(400)],
+    ["past the safe-integer range", "123456789012345678901"],
+  ])("a %s horizon is rejected before any request", async (_case, value) => {
     const { form } = await renderPreferences();
-    fireEvent.change(field(form, "Planning horizon (days)"), { target: { value: "" } });
+    fireEvent.change(field(form, "Planning horizon (days)"), { target: { value } });
     save(form);
     expect(screen.getByTestId("preferences-message").textContent).toBe(
-      "Planning horizon must be a whole number of days.",
+      "Planning horizon must be a whole number of days, at least 1.",
     );
     expect(writes()).toEqual([]);
   });
