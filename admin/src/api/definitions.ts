@@ -103,7 +103,7 @@ function readDetail(body: unknown): string | null {
   return null;
 }
 
-async function readJson<T>(response: Response): Promise<T> {
+export async function readJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let body: unknown = null;
     try {
