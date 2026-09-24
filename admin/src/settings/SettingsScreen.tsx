@@ -1,11 +1,13 @@
 /**
  * Settings — a pushed screen opened from the Today header's Settings button.
  *
- * Its one section so far is Children: list, add, edit, deactivate/reactivate
- * and reorder the household's child profiles. Every write refetches the list.
+ * Children: list, add, edit, deactivate/reactivate and reorder the
+ * household's child profiles. Every write refetches the list.
  *
- * TODO: the other household settings (horizon days, day rollover time,
- * notification config) are a separate later task.
+ * Preferences: the household settings (planning horizon, day rollover,
+ * notifications). Save patches only the changed fields.
+ *
+ * One write at a time across both sections.
  */
 import {
   useEffect,
@@ -24,6 +26,12 @@ import {
   type ChildEditBody,
 } from "../api/children";
 import { ApiRequestError, fetchChildren, type AdminChild } from "../api/definitions";
+import {
+  fetchSettings,
+  updateSettings,
+  type HouseholdSettings,
+  type SettingsChanges,
+} from "../api/settings";
 import { FOCUSABLE, inertOutside } from "../schedule/OverrideEditor";
 import { ArrowDownGlyph, ArrowUpGlyph, ChevronLeftGlyph, PlusGlyph } from "./glyphs";
 import "./SettingsScreen.css";
@@ -219,6 +227,171 @@ function ChildForm({
   );
 }
 
+type PreferencesState =
+  | { kind: "loading" }
+  | { kind: "error"; message: string }
+  | { kind: "ready"; settings: HouseholdSettings };
+
+type TimeField =
+  | "day_rollover_time"
+  | "morning_summary_time"
+  | "afternoon_reminder_time"
+  | "end_of_day_report_time";
+
+type ToggleField =
+  | "morning_summary_enabled"
+  | "afternoon_reminder_enabled"
+  | "end_of_day_report_enabled"
+  | "celebration_enabled";
+
+const NOTIFICATIONS: { label: string; time: TimeField; toggle: ToggleField }[] = [
+  { label: "Morning summary", time: "morning_summary_time", toggle: "morning_summary_enabled" },
+  { label: "Afternoon reminder", time: "afternoon_reminder_time", toggle: "afternoon_reminder_enabled" },
+  { label: "End-of-day report", time: "end_of_day_report_time", toggle: "end_of_day_report_enabled" },
+];
+
+const HH_MM = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** The form's working copy: the number is text so it can be mid-edit. */
+type PreferencesDraft = Omit<HouseholdSettings, "horizon_days"> & { horizon_days: string };
+
+function preferencesDraft(settings: HouseholdSettings): PreferencesDraft {
+  return { ...settings, horizon_days: String(settings.horizon_days) };
+}
+
+/** Only the fields that differ from `loaded`, or a validation message. */
+function buildChanges(draft: PreferencesDraft, loaded: HouseholdSettings): SettingsChanges | string {
+  const horizon = draft.horizon_days.trim();
+  const horizonDays = Number(horizon);
+  // A digit string too long for a safe integer would become Infinity, which
+  // JSON serializes as null, and the API reads null as "reset to default".
+  if (!/^\d+$/.test(horizon) || !Number.isSafeInteger(horizonDays) || horizonDays < 1) {
+    return "Planning horizon must be a whole number of days, at least 1.";
+  }
+  const times: [TimeField, string][] = [
+    ["day_rollover_time", "Day rollover"],
+    ...NOTIFICATIONS.map((n): [TimeField, string] => [n.time, `${n.label} time`]),
+  ];
+  for (const [key, label] of times) {
+    if (!HH_MM.test(draft[key])) return `${label} must be a time like 07:30.`;
+  }
+
+  const next: HouseholdSettings = {
+    ...draft,
+    horizon_days: horizonDays,
+    notify_target: draft.notify_target.trim(),
+  };
+  const changes: SettingsChanges = {};
+  for (const key of Object.keys(loaded) as (keyof HouseholdSettings)[]) {
+    if (next[key] !== loaded[key]) (changes as Record<string, unknown>)[key] = next[key];
+  }
+  if (Object.keys(changes).length === 0) return "No changes to save.";
+  return changes;
+}
+
+function PreferencesForm({
+  settings,
+  saving,
+  locked,
+  message,
+  onSubmit,
+}: {
+  settings: HouseholdSettings;
+  saving: boolean;
+  /** Another write is in flight. */
+  locked: boolean;
+  message: { kind: "error" | "info"; text: string } | null;
+  onSubmit: (changes: SettingsChanges | string) => void;
+}) {
+  const [draft, setDraft] = useState<PreferencesDraft>(() => preferencesDraft(settings));
+  const update = (patch: Partial<PreferencesDraft>) => setDraft((d) => ({ ...d, ...patch }));
+  const disabled = saving || locked;
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    onSubmit(buildChanges(draft, settings));
+  }
+
+  function timeInput(key: TimeField, label: string) {
+    return (
+      <label className="settings-field">
+        <span className="settings-label">{label}</span>
+        <input
+          className="settings-input"
+          type="time"
+          value={draft[key]}
+          disabled={disabled}
+          onChange={(event) => update({ [key]: event.target.value })}
+        />
+      </label>
+    );
+  }
+
+  function toggle(key: ToggleField, label: string) {
+    return (
+      <label className="settings-toggle">
+        <input
+          type="checkbox"
+          checked={draft[key]}
+          disabled={disabled}
+          onChange={(event) => update({ [key]: event.target.checked })}
+        />
+        <span>{label}</span>
+      </label>
+    );
+  }
+
+  return (
+    <form className="settings-card settings-form" aria-label="Preferences" onSubmit={submit} noValidate>
+      <label className="settings-field">
+        <span className="settings-label">Planning horizon (days)</span>
+        <input
+          className="settings-input"
+          type="number"
+          min={1}
+          step={1}
+          inputMode="numeric"
+          value={draft.horizon_days}
+          disabled={disabled}
+          onChange={(event) => update({ horizon_days: event.target.value })}
+        />
+      </label>
+      {timeInput("day_rollover_time", "Day rollover")}
+      <label className="settings-field">
+        <span className="settings-label">Notify target</span>
+        <input
+          className="settings-input"
+          type="text"
+          value={draft.notify_target}
+          disabled={disabled}
+          onChange={(event) => update({ notify_target: event.target.value })}
+        />
+      </label>
+      {NOTIFICATIONS.map((n) => (
+        <div key={n.toggle} className="settings-notification">
+          {toggle(n.toggle, n.label)}
+          {timeInput(n.time, `${n.label} time`)}
+        </div>
+      ))}
+      {toggle("celebration_enabled", "Celebration")}
+      {message ? (
+        <p
+          className={message.kind === "error" ? "settings-error" : "settings-notice"}
+          role={message.kind === "error" ? "alert" : "status"}
+          data-testid="preferences-message"
+        >
+          {message.text}
+        </p>
+      ) : null}
+      <div className="settings-form-footer">
+        <button type="submit" className="settings-save" disabled={disabled} aria-busy={saving}>
+          {saving ? "Saving…" : "Save preferences"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 function ChildRow({
   child,
   index,
@@ -314,6 +487,12 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
   const [formError, setFormError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [preferences, setPreferences] = useState<PreferencesState>({ kind: "loading" });
+  const [preferencesAttempt, setPreferencesAttempt] = useState(0);
+  const [preferencesMessage, setPreferencesMessage] = useState<{
+    kind: "error" | "info";
+    text: string;
+  } | null>(null);
   // A ref, not state: two taps in one frame must not both see `busy === null`.
   const inFlight = useRef(false);
   const screenRef = useRef<HTMLDivElement>(null);
@@ -355,6 +534,22 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
       cancelled = true;
     };
   }, [attempt]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPreferences({ kind: "loading" });
+    fetchSettings()
+      .then((settings) => {
+        if (!cancelled) setPreferences({ kind: "ready", settings });
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setPreferences({ kind: "error", message: errorMessage(error, "Preferences could not be loaded") });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [preferencesAttempt]);
 
   function onKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
     if (event.key === "Escape") {
@@ -425,6 +620,29 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
         ? await run("form", () => createChild(body as ChildCreateBody), "The child could not be added")
         : await run("form", () => updateChild(form.id, body), "The child could not be saved");
     if (saved) closeForm();
+  }
+
+  async function savePreferences(changes: SettingsChanges | string) {
+    if (typeof changes === "string") {
+      setPreferencesMessage({ kind: changes === "No changes to save." ? "info" : "error", text: changes });
+      return;
+    }
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy("preferences");
+    setPreferencesMessage(null);
+    try {
+      const settings = await updateSettings(changes);
+      setPreferences({ kind: "ready", settings });
+      setPreferencesMessage({ kind: "info", text: "Preferences saved." });
+    } catch (error) {
+      setPreferencesMessage({
+        kind: "error",
+        text: errorMessage(error, "The preferences could not be saved"),
+      });
+    }
+    inFlight.current = false;
+    setBusy(null);
   }
 
   function move(children: AdminChild[], index: number, delta: -1 | 1) {
@@ -554,6 +772,39 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
           </div>
         ) : null}
         {body}
+        <div className="settings-section-head">
+          <h3 className="settings-section-label">Preferences</h3>
+        </div>
+        {preferences.kind === "loading" ? (
+          <div className="settings-status" role="status" data-testid="preferences-loading">
+            Loading preferences…
+          </div>
+        ) : preferences.kind === "error" ? (
+          <div
+            className="settings-status settings-status--error"
+            role="alert"
+            data-testid="preferences-error"
+          >
+            <p>{preferences.message}</p>
+            <button
+              type="button"
+              className="settings-action"
+              onClick={() => setPreferencesAttempt((n) => n + 1)}
+            >
+              Try again
+            </button>
+          </div>
+        ) : (
+          <PreferencesForm
+            // A saved response remounts the form so its draft matches the store.
+            key={JSON.stringify(preferences.settings)}
+            settings={preferences.settings}
+            saving={busy === "preferences"}
+            locked={busy !== null && busy !== "preferences"}
+            message={preferencesMessage}
+            onSubmit={(changes) => void savePreferences(changes)}
+          />
+        )}
       </div>
     </div>
   );
