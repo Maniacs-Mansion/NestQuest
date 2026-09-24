@@ -31,6 +31,23 @@
   padding: 14px 16px 92px; /* bottom padding clears the 70px tab bar */
 }
 
+/* A built screen supplies its own header and 92px-padded scroll column. */
+.admin-panel--screen {
+  padding: 0;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .admin-placeholder {
   margin: 0;
   padding: 13px;
