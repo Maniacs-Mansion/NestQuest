@@ -53,9 +53,6 @@ from __future__ import annotations
 
 import datetime
 import importlib
-import json
-
-from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -70,6 +67,7 @@ from api.nestquest_core import (
     core_snapshot,
 )
 from api import transitions as api_transitions
+from api.sse import transition_event_stream
 
 #: The instance DAO, imported on the app's core copy for the
 #: child-mismatch guard on the complete route.
@@ -328,23 +326,6 @@ async def panel_complete_instance(
     return {"status": str(result)}
 
 
-async def _sse_stream(request: Request) -> AsyncIterator[str]:
-    """Yield the SSE frames for every published transition event.
-
-    One subscriber of the app's single publisher (resolved off
-    ``app.state.publisher``); each event becomes one
-    ``event: <type>\\ndata: <json>\\n\\n`` frame.  Breaking out of the
-    publisher's subscription (on client disconnect) tears the
-    subscription down cleanly — no queue is leaked.
-    """
-    publisher = request.app.state.publisher
-    async for event_type, payload in publisher.subscribe():
-        yield (
-            f"event: {event_type}\n"
-            f"data: {json.dumps(payload)}\n\n"
-        )
-
-
 @router.get(
     "/events",
     summary="Stream panel transition events (SSE)",
@@ -357,17 +338,13 @@ async def panel_events(request: Request) -> StreamingResponse:
     :func:`~api.dependencies.require_panel_token` dependency — the ONE
     token check; this handler performs NO auth of its own).
 
-    Returns a ``text/event-stream`` response whose body is produced by
-    :func:`_sse_stream` off the app's single in-process publisher
-    (``app.state.publisher``, installed in the lifespan).  The stream
-    ends when the client disconnects, at which point the subscription
-    is torn down (its queue removed) with nothing leaked.
+    Returns the shared :func:`api.sse.transition_event_stream` response
+    off the app's single in-process publisher (``app.state.publisher``,
+    installed in the lifespan).  The stream ends when the client
+    disconnects, at which point the subscription is torn down (its
+    queue removed) with nothing leaked.
     """
-    return StreamingResponse(
-        _sse_stream(request),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache"},
-    )
+    return transition_event_stream(request)
 
 
 __all__ = ["router"]
