@@ -191,6 +191,17 @@ def _validate_definition_id(value: object) -> int:
     return value
 
 
+def _validate_skip_on_away(value: object) -> bool:
+    """Reject a non-bool ``skip_on_away`` before any write.
+
+    The DAO's ``int()`` would otherwise silently coerce strings and
+    numerics ("0", 1) into a state the caller never asked for.
+    """
+    if not isinstance(value, bool):
+        raise ValueError(f"skip_on_away must be a real bool, got {value!r}")
+    return value
+
+
 def _validate_child_id(value: object) -> int:
     """Reject non-int child ids (bools included) before any lookup.
 
@@ -212,6 +223,7 @@ async def create_quest_definition(
     *,
     description: str | None = None,
     icon: str | None = None,
+    skip_on_away: bool = True,
 ) -> CreatedQuestDefinition:
     """Create a quest definition (rule + assignees + windows) atomically.
 
@@ -231,6 +243,7 @@ async def create_quest_definition(
     window_specs = _normalize_windows(windows)
     description_value = _validate_text(description, "description")
     icon_value = _validate_text(icon, "icon")
+    skip_on_away_value = _validate_skip_on_away(skip_on_away)
 
     storage = schedule_rule_to_storage(rule)
     dao = QuestDefinitionsDao(database)
@@ -243,6 +256,7 @@ async def create_quest_definition(
             window_specs,
             description=description_value,
             icon=icon_value,
+            skip_on_away=skip_on_away_value,
         )
     except ValueError as error:
         # The DAO's assignee check names only the child; re-raise so the
@@ -271,6 +285,7 @@ async def edit_quest_definition(
     icon: str | None | object = _UNSET,
     rule: ScheduleRule | object = _UNSET,
     windows: list[str | tuple[str, str | None]] | object = _UNSET,
+    skip_on_away: bool | None = None,
     today: datetime.date | None = None,
     horizon_days: int | None = None,
 ) -> CreatedQuestDefinition:
@@ -285,7 +300,9 @@ async def edit_quest_definition(
     ``schedule_rules`` row is updated, never orphaned or duplicated.  A
     provided ``windows`` list REPLACES the whole window set (each entry
     a ``const.QUEST_WINDOWS`` name, optionally with a strict HH:MM due
-    time), matching create's non-empty contract.  Assignment is NOT
+    time), matching create's non-empty contract.  A provided
+    ``skip_on_away`` (a real bool) replaces the stored flag; ``None``
+    leaves it unchanged.  Assignment is NOT
     settable here.  Raises ValueError when the definition does not
     exist or any argument is rejected.
 
@@ -331,6 +348,10 @@ async def edit_quest_definition(
     if windows is not _UNSET:
         window_specs = _normalize_windows(windows)
 
+    skip_on_away_value: bool | object = _UNSET
+    if skip_on_away is not None:
+        skip_on_away_value = _validate_skip_on_away(skip_on_away)
+
     dao = QuestDefinitionsDao(database)
     try:
         snapshot = await dao.edit_definition(
@@ -340,6 +361,7 @@ async def edit_quest_definition(
             icon=icon_value,
             rule=rule_storage,
             windows=window_specs,
+            skip_on_away=skip_on_away_value,
         )
     except ValueError as error:
         # The DAO's missing-definition error names only the id; re-raise

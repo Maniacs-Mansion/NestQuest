@@ -657,6 +657,133 @@ def test_materialize_honours_overrides(tmp_path) -> None:
     _with_db(tmp_path, "materialize-override.db")(_body)
 
 
+async def _absent_midweek_setup(database, skip_on_away: bool):
+    """One child absent on days 2..4 of a future week, one daily quest.
+
+    Returns ``(child_id, definition_id, start, end_iso, absent_dates)``.
+    """
+    from custom_components.nestquest.core.dao_presence import (
+        PresenceOverridesDao,
+    )
+
+    child = await ChildrenDao(database).create("Ada", NOW)
+    start = _future_monday()
+    end_iso = (start + datetime.timedelta(days=6)).isoformat()
+    absent = {
+        (start + datetime.timedelta(days=offset)).isoformat()
+        for offset in (2, 3, 4)
+    }
+    await PresenceOverridesDao(database).create(
+        child.id, min(absent), max(absent), False, note="away"
+    )
+    created = await create_quest_definition(
+        database,
+        "Daily chore",
+        ScheduleRule(rule_type=RuleType.DAILY, start_date=start.isoformat()),
+        [child.id],
+        ["morning"],
+        skip_on_away=skip_on_away,
+    )
+    assert created.definition.skip_on_away is skip_on_away
+    return child.id, created.definition.id, start, end_iso, absent
+
+
+def test_materialize_skip_on_away_true_skips_absent_dates(tmp_path) -> None:
+    async def _body(database):
+        child_id, _, start, end_iso, absent = await _absent_midweek_setup(
+            database, skip_on_away=True
+        )
+        count = await materialize(database, start.isoformat(), end_iso)
+        records = await QuestInstancesDao(database).list_by_date_range(
+            child_id, start.isoformat(), end_iso
+        )
+        due_dates = {record.due_date for record in records}
+        assert count == 4
+        assert due_dates.isdisjoint(absent)
+        assert len(due_dates) == 4
+
+    _with_db(tmp_path, "skip-on-away-true.db")(_body)
+
+
+def test_materialize_skip_on_away_false_generates_absent_dates(
+    tmp_path,
+) -> None:
+    async def _body(database):
+        child_id, _, start, end_iso, absent = await _absent_midweek_setup(
+            database, skip_on_away=False
+        )
+        count = await materialize(database, start.isoformat(), end_iso)
+        records = await QuestInstancesDao(database).list_by_date_range(
+            child_id, start.isoformat(), end_iso
+        )
+        due_dates = {record.due_date for record in records}
+        assert count == 7
+        assert absent <= due_dates
+        assert len(due_dates) == 7
+
+    _with_db(tmp_path, "skip-on-away-false.db")(_body)
+
+
+def test_edit_skip_on_away_regenerates_absent_dates(tmp_path) -> None:
+    """Toggling the flag through the edit path rebuilds future instances."""
+    async def _body(database):
+        child_id, definition_id, start, end_iso, absent = (
+            await _absent_midweek_setup(database, skip_on_away=True)
+        )
+        await materialize(database, start.isoformat(), end_iso)
+        dao = QuestInstancesDao(database)
+
+        async def due_dates() -> set[str]:
+            records = await dao.list_by_date_range(
+                child_id, start.isoformat(), end_iso
+            )
+            return {record.due_date for record in records}
+
+        assert (await due_dates()).isdisjoint(absent)
+
+        edited = await edit_quest_definition(
+            database, definition_id, skip_on_away=False
+        )
+        assert edited.definition.skip_on_away is False
+        assert absent <= await due_dates()
+
+        # None leaves the stored flag unchanged.
+        unchanged = await edit_quest_definition(
+            database, definition_id, title="Daily chore (renamed)"
+        )
+        assert unchanged.definition.skip_on_away is False
+
+        edited = await edit_quest_definition(
+            database, definition_id, skip_on_away=True
+        )
+        assert edited.definition.skip_on_away is True
+        assert (await due_dates()).isdisjoint(absent)
+
+    _with_db(tmp_path, "skip-on-away-edit.db")(_body)
+
+
+def test_skip_on_away_rejects_non_bool(tmp_path) -> None:
+    async def _body(database):
+        child = await ChildrenDao(database).create("Ada", NOW)
+        rule = ScheduleRule(rule_type=RuleType.DAILY, start_date="2026-01-01")
+        with pytest.raises(ValueError, match="skip_on_away must be a real bool"):
+            await create_quest_definition(
+                database, "Chore", rule, [child.id], ["morning"],
+                skip_on_away=1,
+            )
+        created = await create_quest_definition(
+            database, "Chore", rule, [child.id], ["morning"]
+        )
+        with pytest.raises(ValueError, match="skip_on_away must be a real bool"):
+            await edit_quest_definition(
+                database, created.definition.id, skip_on_away="false"
+            )
+        stored = await QuestDefinitionsDao(database).get(created.definition.id)
+        assert stored.skip_on_away is True
+
+    _with_db(tmp_path, "skip-on-away-validation.db")(_body)
+
+
 def test_materialize_rejects_malformed_or_inverted_bounds(tmp_path) -> None:
     async def _body(database):
         start = (_future_monday()).isoformat()

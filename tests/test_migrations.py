@@ -153,7 +153,9 @@ def test_migration_list_shape() -> None:
     migration 3 brings pre-D-008 definitions to the multi-assignee
     model, migration 4 adds the windows table, migration 5 rebuilds
     quest_instances onto the widened (definition, child, date, window)
-    key, and migration 6 adds actor_child_id to completion_events.
+    key, migration 6 adds actor_child_id to completion_events,
+    migration 7 adds the meta_state table and migration 8 adds
+    skip_on_away to quest_definitions.
     """
     assert MIGRATIONS[0] == SCHEMA_V1_STATEMENTS
     assert callable(MIGRATIONS[1])
@@ -162,7 +164,8 @@ def test_migration_list_shape() -> None:
     assert callable(MIGRATIONS[4])
     assert callable(MIGRATIONS[5])
     assert MIGRATIONS[6] == SCHEMA_V7_META_STATE_DDL
-    assert len(MIGRATIONS) == 7
+    assert callable(MIGRATIONS[7])
+    assert len(MIGRATIONS) == 8
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +567,13 @@ def test_v2_definitions_rebuilt_to_multi_assignee(tmp_path) -> None:
             database.fetch_all("PRAGMA table_info(quest_definitions)")
         )
         assert "child_id" not in {c[1] for c in columns}
+        # The rebuilt row reads the pre-flag behaviour: skip on away.
+        skip = _run(
+            database.fetch_one(
+                "SELECT skip_on_away FROM quest_definitions WHERE id = 1"
+            )
+        )
+        assert skip == (1,)
         # The single assignee moved into the assignees table.
         assignees = _run(
             database.fetch_all(
@@ -633,6 +643,87 @@ def test_v2_definitions_rebuilt_to_multi_assignee(tmp_path) -> None:
                 "(definition_id, child_id) VALUES (2, 1)"
             )
         )
+    finally:
+        _run(database.close())
+
+
+# ---------------------------------------------------------------------------
+# Migration 8: skip_on_away on quest_definitions (Feature 22)
+# ---------------------------------------------------------------------------
+
+
+def _seed_v7_database(database) -> None:
+    """Build a genuine version-7 database holding one definition.
+
+    Migrations 1..7 run first; the fresh v1 DDL already carries
+    ``skip_on_away`` (canonical shape), so the column is dropped to
+    reproduce the exact pre-migration-8 table a shipped v7 file holds,
+    and a definition row is written through that old column list.
+    """
+    assert _migrate(database, MIGRATIONS[:7]) == 7
+    _run(
+        database.execute(
+            "ALTER TABLE quest_definitions DROP COLUMN skip_on_away"
+        )
+    )
+    columns = _run(database.fetch_all("PRAGMA table_info(quest_definitions)"))
+    assert "skip_on_away" not in {c[1] for c in columns}
+    _run(
+        database.execute(
+            "INSERT INTO schedule_rules (id, rule_type, interval, "
+            "start_date) VALUES (1, 'daily', 1, '2026-09-01')"
+        )
+    )
+    _run(
+        database.execute(
+            "INSERT INTO quest_definitions (id, title, schedule_rule_id, "
+            "is_active, created_at) VALUES (1, 'Dishes', 1, 1, "
+            "'2026-09-01T00:00:00+00:00')"
+        )
+    )
+
+
+def test_v7_definitions_gain_skip_on_away_defaulting_true(tmp_path) -> None:
+    from custom_components.nestquest.core.dao_rules import (
+        QuestDefinitionsDao,
+    )
+
+    database = _open_db(tmp_path / "v7-upgrade.db")
+    try:
+        _seed_v7_database(database)
+        before = _version(database)
+        assert before == 7
+
+        final = _migrate(database)
+
+        assert final == before + 1
+        assert _version(database) == before + 1
+        columns = {
+            c[1]: c
+            for c in _run(
+                database.fetch_all("PRAGMA table_info(quest_definitions)")
+            )
+        }
+        assert "skip_on_away" in columns
+        # (cid, name, type, notnull, dflt_value, pk)
+        assert columns["skip_on_away"][2:5] == ("INTEGER", 1, "1")
+        record = _run(QuestDefinitionsDao(database).get(1))
+        assert record is not None
+        assert record.title == "Dishes"
+        assert record.skip_on_away is True
+    finally:
+        _run(database.close())
+
+
+def test_skip_on_away_migration_is_noop_on_fresh_schema(tmp_path) -> None:
+    """A fresh file already has the column; step 8 only stamps."""
+    database = _open_db(tmp_path / "fresh-v8.db")
+    try:
+        assert _migrate(database) == len(MIGRATIONS)
+        columns = _run(
+            database.fetch_all("PRAGMA table_info(quest_definitions)")
+        )
+        assert [c[1] for c in columns].count("skip_on_away") == 1
     finally:
         _run(database.close())
 
