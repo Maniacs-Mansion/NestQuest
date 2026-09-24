@@ -99,7 +99,7 @@ repository. What it must contain:
 | panel | ``Host(`nestquest.cubecraftlabs.com`) && PathPrefix(`/api/v1/panel`)`` | `ipAllowList`, `sourceRange: ["10.60.1.80/32"]` (HA box only) | `http://10.60.1.14:8080` |
 | admin (everything else: `/health`, `/docs`, `/openapi.json`, `/api/v1/admin/*`) | ``Host(`nestquest.cubecraftlabs.com`)`` | none — public; the API itself enforces Authentik JWTs (section 4) | `http://10.60.1.14:8080` |
 
-Both routers use the HTTPS entrypoint with `tls.certResolver: myresolver`
+Both routers use the HTTPS entrypoint `websecure` with `tls.certResolver: myresolver`
 (HTTP is redirected to HTTPS by the shared Traefik). The panel router's
 rule is longer, so Traefik's default rule-length priority evaluates it
 before the catch-all admin router; if you set explicit priorities, keep
@@ -113,14 +113,14 @@ http:
   routers:
     nestquest-panel:
       rule: "Host(`nestquest.cubecraftlabs.com`) && PathPrefix(`/api/v1/panel`)"
-      entryPoints: [<https entrypoint>]
+      entryPoints: [websecure]
       middlewares: [nestquest-panel-allowlist]
       service: nestquest-api
       tls:
         certResolver: myresolver
     nestquest-admin:
       rule: "Host(`nestquest.cubecraftlabs.com`)"
-      entryPoints: [<https entrypoint>]
+      entryPoints: [websecure]
       service: nestquest-api
       tls:
         certResolver: myresolver
@@ -255,8 +255,37 @@ committed `deploy/litestream.yml` (`host-key`, the NAS's ECDSA key), so no
 
       nslookup nestquest.cubecraftlabs.com 10.60.1.101   # Address: 10.60.1.33
 
-- The API box publishes `8080` only on `10.60.1.14`; the HA box and
-  everyone else must use the Traefik hostname, never `:8080` directly.
+- **Direct `:8080` access is firewalled.** The API box publishes `8080`
+  on `10.60.1.14`, which alone would let any LAN host bypass Traefik and
+  the panel `ipAllowList`. This is enforced on the API box in Docker's
+  `DOCKER-USER` chain (which Docker evaluates before its own forwarding
+  rules for published ports), in this order:
+
+      -A DOCKER-USER -s 10.60.1.33/32 -p tcp --dport 8080 -j RETURN   # Traefik on nukapi-03
+      -A DOCKER-USER -s 10.60.1.14/32 -p tcp --dport 8080 -j RETURN   # the API box itself
+      -A DOCKER-USER -p tcp --dport 8080 -j DROP                      # every other source
+
+  The rules are persisted by the systemd oneshot unit
+  **`nestquest-api-firewall.service`** on the API box (enabled; ordered
+  after `docker.service`, it applies the three rules at every boot).
+  The HA box and every other client must use the Traefik hostname,
+  never `:8080` directly. Check it:
+
+      sudo systemctl is-enabled nestquest-api-firewall.service   # enabled
+      sudo systemctl is-active nestquest-api-firewall.service    # active
+      sudo iptables -S DOCKER-USER                               # the three rules above, in that order
+
+      # on nukapi-03 (10.60.1.33) — allowed:
+      curl -s -o /dev/null -w '%{http_code}\n' http://10.60.1.14:8080/health   # 200
+      # on any other LAN host, e.g. 10.60.1.101 — dropped:
+      curl -s -m 5 -o /dev/null -w '%{http_code}\n' http://10.60.1.14:8080/health   # 000, timeout
+      # public path still works:
+      curl -s -o /dev/null -w '%{http_code}\n' https://nestquest.cubecraftlabs.com/health   # 200
+
+  On a rebuilt API box, recreate and enable the unit before exposing the
+  API (`sudo systemctl enable --now nestquest-api-firewall.service`); the
+  deployed unit is the authoritative copy
+  (`systemctl cat nestquest-api-firewall.service`).
 
 ## 7. Backup (Litestream to the Synology NAS)
 
@@ -305,7 +334,8 @@ API** once so the volume exists and is owned by uid 999:
 
 Do not start `litestream` yet — it would begin replicating the new,
 empty database the API just created. The swap in step 4 moves that empty
-file aside.
+file aside, and step 5 creates and starts the sidecar with
+`dc up -d litestream` once the API is healthy.
 
 **1. Stop writers** — both the API and the sidecar (Litestream must not
 replicate while the file is being replaced):
@@ -356,16 +386,23 @@ on the volume:
 
     dc start api
     dc ps api            # wait for "healthy"
-    dc start litestream
+    dc up -d litestream
+    dc ps litestream     # Up
     dc logs --tail 20 litestream
+
+Use `dc up -d litestream`, not `dc start`: on a fresh box step 0 never
+created the sidecar container, and `start` cannot start a container that
+does not exist. `up -d` creates it if needed (or starts the existing one),
+so continuous replication is back online on both paths.
 
 The sidecar resumes replication from the restored position (it logs
 `detected database behind replica` / `fetched latest L0 file from
 replica`, then continues normally).
 
 **6. Verify through the API** — the panel snapshot lists the restored
-children. From the HA box (the only allowed panel client), or on the API
-box against `10.60.1.14:8080` directly:
+children. On the API box against `10.60.1.14:8080` directly (other LAN
+hosts, including the HA box, are dropped on `:8080` by the section 6
+firewall; from the HA box use the Traefik hostname instead):
 
     PANEL_TOKEN=$(grep '^NESTQUEST_PANEL_TOKEN=' deploy/.env | cut -d= -f2-)
     curl -s -H "Authorization: Bearer $PANEL_TOKEN" \
