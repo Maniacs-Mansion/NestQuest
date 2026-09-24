@@ -14,3 +14,7 @@ frontend/node_modules/
 *.db
 *.db-wal
 *.db-shm
+
+# Dedicated Litestream SFTP backup keypair — lives only on the API box.
+deploy/*key*
+deploy/litestream_key*

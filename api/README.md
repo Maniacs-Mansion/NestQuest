@@ -36,5 +36,48 @@ which serves ``https://nestquest.cubecraftlabs.com`` (Let's Encrypt,
 auto-renewed, HTTP redirected to HTTPS) and forwards to the API box
 on port 8080 — so on that box set ``NESTQUEST_BIND_ADDRESS`` to its
 LAN address (``10.60.1.14``). Traefik only allows
-``/api/v1/panel`` from the Home Assistant host. Network separation,
-backup and restore are later Feature 17 tasks.
+``/api/v1/panel`` from the Home Assistant host. Network separation
+and the full restore runbook are later Feature 17 tasks.
+
+## Continuous backup (Litestream)
+
+Compose also runs a ``litestream`` sidecar
+(``litestream/litestream:0.5.17``, config ``deploy/litestream.yml``).
+It mounts the same ``nestquest-db`` volume and continuously replicates
+``/var/lib/nestquest/nestquest.db`` over SFTP to the Synology NAS
+``CubeCraft-SRVR1`` (``joshua@10.60.1.50``), directory
+``/volume1/homes/Joshua/nestquest-backups`` (``/homes/Joshua/...`` in
+the NAS's chrooted SFTP view) — so the backup is outside the Docker
+host and its volume. A snapshot is taken daily and a week of
+snapshots plus incremental changes is retained; the NAS host key is
+pinned in the config.
+
+The SFTP login uses a dedicated keypair that lives only on the API
+box and is git-ignored. Create it once, before ``up``:
+
+    ssh-keygen -t ed25519 -N "" -C nestquest-litestream -f deploy/litestream_key
+
+then append ``restrict `` + the contents of ``deploy/litestream_key.pub``
+to ``joshua@10.60.1.50:~/.ssh/authorized_keys``. Compose mounts the
+private key read-only at ``/etc/litestream/sftp_key``. The sidecar runs
+as uid/gid 999 (the API's ``nestquest`` user), so give it the key:
+
+    sudo chown 999:999 deploy/litestream_key && chmod 600 deploy/litestream_key
+
+The sidecar needs WRITE access to the database volume: Litestream adds
+its own ``_litestream_seq``/``_litestream_lock`` tables to the database,
+writes the ``-wal``/``-shm`` files and checkpoints the WAL, and fails
+with "unable to open database file" on a read-only mount. That access
+is contained rather than removed — the sidecar runs as the non-root
+volume owner with a read-only root filesystem, ``no-new-privileges``
+and all Linux capabilities dropped.
+
+Check replication with
+``docker compose -f deploy/compose.yaml logs litestream`` or
+``docker compose -f deploy/compose.yaml exec litestream litestream ltx /var/lib/nestquest/nestquest.db``.
+To restore (high level): stop the ``api`` service, run
+``litestream restore -config /etc/litestream.yml -o <new path>
+/var/lib/nestquest/nestquest.db`` from a litestream container with the
+same mounts, verify the restored file, move it into place on the
+volume (removing any stale ``-wal``/``-shm`` files), and start ``api``
+again.

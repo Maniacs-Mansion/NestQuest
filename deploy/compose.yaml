@@ -42,5 +42,38 @@ services:
       retries: 5
       start_period: 15s
 
+  # Continuous backup: streams the SQLite database on the shared named
+  # volume to the Synology NAS over SFTP (config: deploy/litestream.yml).
+  # The SFTP private key deploy/litestream_key is git-ignored and must be
+  # created on the API box before starting (see api/README.md).
+  #
+  # The database volume is mounted READ-WRITE on purpose: Litestream
+  # cannot run against a read-only mount ("unable to open database file
+  # (14)", even with its metadata moved elsewhere) because it writes its
+  # _litestream_seq/_litestream_lock tables into the database, opens the
+  # -wal/-shm files for writing, and checkpoints the WAL.  The write
+  # access is contained instead: it runs as the API's own non-root user
+  # (uid/gid 999, owner of the volume) with a read-only root filesystem,
+  # no privilege escalation and no Linux capabilities.
+  litestream:
+    image: litestream/litestream:0.5.17
+    restart: unless-stopped
+    command: ["replicate", "-config", "/etc/litestream.yml"]
+    user: "999:999"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - nestquest-db:/var/lib/nestquest
+      - ./litestream.yml:/etc/litestream.yml:ro
+      - ./litestream_key:/etc/litestream/sftp_key:ro
+
 volumes:
   nestquest-db:
