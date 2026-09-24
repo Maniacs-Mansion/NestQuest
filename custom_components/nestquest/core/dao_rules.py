@@ -105,6 +105,19 @@ def _validate_window(window: str) -> None:
         )
 
 
+def _validate_skip_on_away(value: object) -> int:
+    """Return ``value`` as 0/1, raising ValueError for anything else.
+
+    The fresh-schema CHECK constraint enforces this in SQLite, but a
+    migrated database gained the column through ``ADD COLUMN`` without
+    it, so every DAO write path validates here instead.  Accepts a bool
+    or the ints 0/1; floats, strings and other ints are rejected.
+    """
+    if not isinstance(value, int) or value not in (0, 1):
+        raise ValueError(f"skip_on_away must be 0 or 1, got {value!r}")
+    return int(value)
+
+
 @dataclass(frozen=True)
 class ScheduleRuleRecord:
     """One row of ``schedule_rules``."""
@@ -152,6 +165,7 @@ class QuestDefinitionRecord:
     due_time: str | None
     is_active: bool
     created_at: str
+    skip_on_away: bool
 
 
 @dataclass(frozen=True)
@@ -187,7 +201,7 @@ _RULE_COLUMNS = (
 )
 _DEFINITION_COLUMNS = (
     "id, title, description, icon, schedule_rule_id, due_time, "
-    "is_active, created_at"
+    "is_active, created_at, skip_on_away"
 )
 _WINDOW_COLUMNS = "definition_id, window, due_time"
 
@@ -216,6 +230,7 @@ def _definition_from_row(row: tuple) -> QuestDefinitionRecord:
         due_time=row[5],
         is_active=bool(row[6]),
         created_at=row[7],
+        skip_on_away=bool(row[8]),
     )
 
 
@@ -632,6 +647,7 @@ class QuestDefinitionsDao:
         due_time: str | None = None,
         is_active: bool = True,
         assignee_child_ids: list[int] | None = None,
+        skip_on_away: bool = True,
     ) -> QuestDefinitionRecord:
         """Insert one definition and return the record as stored.
 
@@ -644,6 +660,7 @@ class QuestDefinitionsDao:
         empty list or None creates an unassigned definition, which
         callers may fill via :meth:`add_assignee`.
         """
+        skip_on_away_value = _validate_skip_on_away(skip_on_away)
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 await self._validate_rule_exists(schedule_rule_id)
@@ -652,7 +669,8 @@ class QuestDefinitionsDao:
                 result = await self._database.execute(
                     "INSERT INTO quest_definitions (title, description, "
                     "icon, schedule_rule_id, due_time, is_active, "
-                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "created_at, skip_on_away) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         title,
                         description,
@@ -661,6 +679,7 @@ class QuestDefinitionsDao:
                         due_time,
                         int(is_active),
                         created_at,
+                        skip_on_away_value,
                     ),
                 )
                 definition_id = result.lastrowid
@@ -684,6 +703,7 @@ class QuestDefinitionsDao:
         *,
         description: str | None = None,
         icon: str | None = None,
+        skip_on_away: bool = True,
     ) -> QuestDefinitionSnapshot:
         """Insert a rule, definition, assignees and windows atomically.
 
@@ -713,6 +733,7 @@ class QuestDefinitionsDao:
         _validate_date(schedule_rule.start_date, "start_date")
         if schedule_rule.end_date is not None:
             _validate_date(schedule_rule.end_date, "end_date")
+        skip_on_away_value = _validate_skip_on_away(skip_on_away)
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 for child_id in assignee_child_ids:
@@ -721,8 +742,18 @@ class QuestDefinitionsDao:
                 result = await self._database.execute(
                     "INSERT INTO quest_definitions (title, description, "
                     "icon, schedule_rule_id, due_time, is_active, "
-                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (title, description, icon, rule_id, None, 1, created_at),
+                    "created_at, skip_on_away) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        title,
+                        description,
+                        icon,
+                        rule_id,
+                        None,
+                        1,
+                        created_at,
+                        skip_on_away_value,
+                    ),
                 )
                 definition_id = result.lastrowid
                 for child_id in assignee_child_ids:
@@ -764,8 +795,10 @@ class QuestDefinitionsDao:
         icon: str | None | object = _UNSET,
         rule: ScheduleRuleStorage | object = _UNSET,
         windows: list[tuple[str, str | None]] | object = _UNSET,
+        skip_on_away: bool | object = _UNSET,
+        assignee_child_ids: list[int] | object = _UNSET,
     ) -> QuestDefinitionSnapshot:
-        """Edit a definition's metadata, rule and windows atomically.
+        """Edit a definition's metadata, rule, windows and assignees atomically.
 
         Mirrors :meth:`create_with_rule_and_windows`: everything runs
         inside ONE transaction under the connection lock, and the
@@ -774,9 +807,10 @@ class QuestDefinitionsDao:
         ``_UNSET`` meaning "leave this field alone"; ``None`` writes SQL
         NULL so optional metadata (description, icon) can be cleared.
 
-        - ``title``/``description``/``icon`` update the definition row
-          in place; the definition-level ``due_time`` column is never
-          written (per-window due times supersede it, D-008).
+        - ``title``/``description``/``icon``/``skip_on_away`` update the
+          definition row in place; the definition-level ``due_time``
+          column is never written (per-window due times supersede it,
+          D-008).
         - ``rule`` (a pre-validated :class:`ScheduleRuleStorage`)
           overwrites the referenced ``schedule_rules`` row in place: the
           definition keeps its ``schedule_rule_id``, so no new or
@@ -785,13 +819,19 @@ class QuestDefinitionsDao:
           are deleted and the given set re-inserted, so missing windows
           are added, changed due times updated and removed windows
           dropped.
+        - ``assignee_child_ids`` REPLACES the whole assignee set: every
+          id is validated as existing-and-active BEFORE any write (the
+          same check :meth:`add_assignee` applies), then links for
+          children no longer listed are removed and links for newly
+          listed children inserted; unchanged links are left alone.
 
-        Assignment is deliberately not settable here (multi-assignee is
-        managed by :meth:`add_assignee`/:meth:`remove_assignee`), and
-        activation is untouched.  Raises ValueError when the definition
-        does not exist.  Edits change future instances only: no
+        Activation is untouched.  Raises ValueError when the definition
+        does not exist or an assignee is rejected; either way the
+        transaction rolls back and nothing is written.  Edits change future instances only: no
         ``quest_instances`` or ``completion_events`` row is touched.
         """
+        if skip_on_away is not _UNSET:
+            skip_on_away = _validate_skip_on_away(skip_on_away)
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 definition = await self.get(definition_id)
@@ -799,6 +839,9 @@ class QuestDefinitionsDao:
                     raise ValueError(
                         f"quest definition {definition_id} does not exist"
                     )
+                if assignee_child_ids is not _UNSET:
+                    for child_id in assignee_child_ids:
+                        await self._validate_assignable_child(child_id)
                 assignments: list[str] = []
                 parameters: list[object] = []
                 for column, value in (
@@ -809,6 +852,9 @@ class QuestDefinitionsDao:
                     if value is not _UNSET:
                         assignments.append(f"{column} = ?")
                         parameters.append(value)
+                if skip_on_away is not _UNSET:
+                    assignments.append("skip_on_away = ?")
+                    parameters.append(skip_on_away)
                 if assignments:
                     parameters.append(definition_id)
                     await self._database.execute(
@@ -844,6 +890,10 @@ class QuestDefinitionsDao:
                             "VALUES (?, ?, ?)",
                             (definition_id, window, due_time),
                         )
+                if assignee_child_ids is not _UNSET:
+                    await self._replace_assignees(
+                        definition_id, assignee_child_ids
+                    )
                 updated = await self.get(definition_id)
                 assignees = await self.list_assignees(definition_id)
                 window_records = await self.list_windows(definition_id)
@@ -858,6 +908,36 @@ class QuestDefinitionsDao:
             assignees=assignees,
             windows=window_records,
         )
+
+    async def _replace_assignees(
+        self, definition_id: int, child_ids: list[int]
+    ) -> None:
+        """Make the definition's assignee links exactly ``child_ids``.
+
+        Removes the links for children not in ``child_ids`` and inserts
+        the missing ones.  MUST be called inside the connection lock and
+        an open transaction, after the ids were validated as assignable.
+        """
+        rows = await self._database.fetch_all(
+            "SELECT child_id FROM quest_definition_assignees "
+            "WHERE definition_id = ?",
+            (definition_id,),
+        )
+        current = {row[0] for row in rows}
+        wanted = set(child_ids)
+        for child_id in sorted(current - wanted):
+            await self._database.execute(
+                "DELETE FROM quest_definition_assignees "
+                "WHERE definition_id = ? AND child_id = ?",
+                (definition_id, child_id),
+            )
+        for child_id in child_ids:
+            if child_id not in current:
+                await self._database.execute(
+                    "INSERT INTO quest_definition_assignees "
+                    "(definition_id, child_id) VALUES (?, ?)",
+                    (definition_id, child_id),
+                )
 
     async def _validate_rule_exists(self, schedule_rule_id: int) -> None:
         """Raise ValueError unless the rule exists.
@@ -907,6 +987,13 @@ class QuestDefinitionsDao:
         )
         return [_definition_from_row(row) for row in rows]
 
+    async def list_all(self) -> list[QuestDefinitionRecord]:
+        """Return every definition, active AND inactive, oldest first."""
+        rows = await self._database.fetch_all(
+            f"SELECT {_DEFINITION_COLUMNS} FROM quest_definitions ORDER BY id"
+        )
+        return [_definition_from_row(row) for row in rows]
+
     async def _snapshots_for(
         self, definitions: list[QuestDefinitionRecord]
     ) -> list[QuestDefinitionSnapshot]:
@@ -951,6 +1038,18 @@ class QuestDefinitionsDao:
                 definitions = await self.list_active()
                 return await self._snapshots_for(definitions)
 
+    async def list_snapshots_all(self) -> list[QuestDefinitionSnapshot]:
+        """Return every definition (active AND inactive) with its rule,
+        assignees and windows, all read inside one locked transaction.
+
+        Mirrors :meth:`list_snapshots_active` over :meth:`list_all`
+        (oldest first), with the same coherence guarantee.
+        """
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                definitions = await self.list_all()
+                return await self._snapshots_for(definitions)
+
     async def read_snapshots_active(self) -> list[QuestDefinitionSnapshot]:
         """Return every active definition's snapshot WITHOUT locking.
 
@@ -990,13 +1089,16 @@ class QuestDefinitionsDao:
         description: str | None | object = _UNSET,
         icon: str | None | object = _UNSET,
         due_time: str | None | object = _UNSET,
+        skip_on_away: bool | None = None,
     ) -> int:
         """Update the given fields; returns rows updated (0 if absent).
 
         Arguments default to the module sentinel ``_UNSET`` meaning
         "leave this column alone"; passing ``None`` explicitly writes
         SQL NULL, so callers can remove optional metadata
-        (description, icon, due_time).  Assignment and activation are
+        (description, icon, due_time).  ``skip_on_away`` is NOT NULL,
+        so its ``None`` default leaves it unchanged; a supplied value
+        must be 0/1 (a bool).  Assignment and activation are
         deliberately NOT settable here: they have their own explicit
         operations (:meth:`add_assignee`, :meth:`remove_assignee`,
         :meth:`set_active`) so they stay separately loggable and
@@ -1013,6 +1115,9 @@ class QuestDefinitionsDao:
             if value is not _UNSET:
                 assignments.append(f"{column} = ?")
                 parameters.append(value)
+        if skip_on_away is not None:
+            assignments.append("skip_on_away = ?")
+            parameters.append(_validate_skip_on_away(skip_on_away))
         if not assignments:
             return 0
         parameters.append(definition_id)

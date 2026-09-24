@@ -1,0 +1,123 @@
+/* Shell layout — mobile-first (390x844 reference), plain CubeCraft styling. */
+
+.admin-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.admin-header {
+  background: var(--nq-a-surface);
+  border-bottom: 1px solid var(--nq-a-border);
+  padding: 14px 16px;
+}
+
+.admin-title {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.admin-subline {
+  margin: 2px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--nq-a-ink-secondary);
+}
+
+.admin-panel {
+  flex: 1;
+  padding: 14px 16px 92px; /* bottom padding clears the 70px tab bar */
+}
+
+/* A built screen supplies its own header and 92px-padded scroll column. */
+.admin-panel--screen {
+  padding: 0;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.admin-tabbar {
+  position: fixed;
+  inset: auto 0 0;
+  display: flex;
+  min-height: calc(var(--nq-a-tabbar-height) + 12px);
+  padding: 8px 4px calc(12px + env(safe-area-inset-bottom));
+  background: var(--nq-a-surface);
+  border-top: 1px solid var(--nq-a-border);
+}
+
+.admin-tab {
+  flex: 1;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--nq-a-ink-secondary);
+  cursor: pointer;
+  padding: 6px 4px;
+}
+
+.admin-tab.active {
+  font-weight: 700;
+  color: var(--nq-brand-blue);
+}
+/* Auth screens (login, errors, refusal). */
+
+.admin-login,
+.admin-error,
+.admin-refusal,
+.admin-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 100%;
+  padding: 32px 16px;
+  text-align: center;
+}
+
+.admin-login-button {
+  margin-top: 8px;
+  padding: 12px 24px;
+  border: none;
+  border-radius: 8px;
+  background: var(--nq-a-accent, #2563eb);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.admin-error,
+.admin-refusal {
+  color: var(--nq-a-ink, inherit);
+}
+
+.admin-refusal h1,
+.admin-error h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.admin-refusal p,
+.admin-error p {
+  margin: 0;
+  max-width: 34em;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--nq-a-ink-secondary);
+}

@@ -7,9 +7,14 @@
 # path here, and the secret values (panel service token, Authentik
 # OIDC settings) from ``deploy/.env`` — a git-ignored file you create
 # from ``deploy/.env.example`` (placeholder names only; never commit
-# real values).  TLS/reverse proxy, Authentik wiring and network
-# separation are later Feature 17 tasks; the port is bound to
-# localhost only until those land.
+# real values).
+#
+# TLS is terminated by the shared Traefik reverse proxy on another
+# host, which forwards to this service on port 8080.  The published
+# port binds NESTQUEST_BIND_ADDRESS (read from deploy/.env, the
+# project directory's env file): it defaults to 127.0.0.1 so an
+# unconfigured deployment is never exposed; set it to the host's LAN
+# address on the API box so the proxy can reach it.
 services:
   api:
     build:
@@ -19,7 +24,7 @@ services:
     init: true
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${NESTQUEST_BIND_ADDRESS:-127.0.0.1}:8080:8080"
     environment:
       # The SQLite file inside the named volume; fixed, not a secret.
       NESTQUEST_DB_PATH: /var/lib/nestquest/nestquest.db

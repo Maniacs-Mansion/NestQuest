@@ -322,6 +322,7 @@ def test_quest_definitions_columns_types_and_constraints(tmp_path) -> None:
             ("due_time", "TEXT", 0, None, 0),
             ("is_active", "INTEGER", 1, "1", 0),
             ("created_at", "TEXT", 1, None, 0),
+            ("skip_on_away", "INTEGER", 1, "1", 0),
         ]
     finally:
         _run(database.close())
@@ -629,6 +630,30 @@ def test_schedule_rules_rule_type_check_enforced(tmp_path) -> None:
         _apply(database)
         with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
             _insert_rule(database, rule_type="biweekly", weekday_set=None)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize("bad_flag", [2, -1])
+def test_quest_definitions_skip_on_away_check_enforced(
+    tmp_path, bad_flag
+) -> None:
+    database = _open_db(tmp_path / f"skip-on-away-{bad_flag}.db")
+    try:
+        _apply(database)
+        _child(database)
+        _insert_rule(database)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_definition(database, skip_on_away=bad_flag)
+        definition_id = _insert_definition(database, skip_on_away=0)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _run(
+                database.execute(
+                    "UPDATE quest_definitions SET skip_on_away = ? "
+                    "WHERE id = ?",
+                    (bad_flag, definition_id),
+                )
+            )
     finally:
         _run(database.close())
 

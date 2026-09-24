@@ -30,8 +30,9 @@ widened (definition_id, child_id, due_date, window) key, and migration
 6 rebuilds ``completion_events`` with the D-008 ``actor_child_id``
 column.  Migration 7 adds the generic ``nestquest_meta_state``
 key/value table for integration-owned bookkeeping (Feature 11's
-missed-sweep watermark).  Each callable migration runs inside its own
-transaction
+missed-sweep watermark).  Migration 8 adds the ``skip_on_away``
+column to ``quest_definitions`` (Feature 22), defaulting to 1.  Each
+callable migration runs inside its own transaction
 together with its version stamp, so a crash mid-step rolls the
 statements and the stamp back together.
 
@@ -400,6 +401,28 @@ async def _add_actor_child_id(
         await database.execute("PRAGMA foreign_keys = ON")
 
 
+async def _add_skip_on_away(
+    database: NestQuestDatabase, target_version: int
+) -> None:
+    """Add the ``skip_on_away`` column to ``quest_definitions``.
+
+    Strictly additive: ``ALTER TABLE ... ADD COLUMN`` with a NOT NULL
+    DEFAULT 1, so existing rows read as 1 (skip absent dates — the
+    behaviour before the flag existed).  Fresh databases already carry
+    the column from the canonical DDL, so the ALTER is guarded and the
+    step only stamps there.
+    """
+    async with database.transaction():
+        if not await _table_has_column(
+            database, "quest_definitions", "skip_on_away"
+        ):
+            await database.execute(
+                "ALTER TABLE quest_definitions ADD COLUMN "
+                "skip_on_away INTEGER NOT NULL DEFAULT 1"
+            )
+        await stamp_schema_version(database, target_version)
+
+
 #: The ordered migration list.  Append-only: never edit an applied
 #: entry, add the next one instead.  (Migration 1's content was
 #: rewritten pre-release per D-007 — no version 1 database shipped.)
@@ -423,6 +446,10 @@ MIGRATIONS: Sequence[MigrationStep] = [
     # fresh databases (which already made it in migration 1) and
     # pre-v7 databases.  Strictly additive; no existing table changes.
     list(SCHEMA_V7_META_STATE_DDL),
+    # Migration 8 (Feature 22): the skip_on_away flag on
+    # quest_definitions — an additive column defaulting to 1, so every
+    # pre-existing definition keeps today's skip-when-absent behaviour.
+    _add_skip_on_away,
 ]
 
 

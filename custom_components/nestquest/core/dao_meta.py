@@ -42,3 +42,37 @@ class MetaStateDao:
                     "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
                     (key, value),
                 )
+
+    async def claim(self, key: str, value: str) -> bool:
+        """Atomically set ``key`` to ``value`` unless it already is.
+
+        The single upsert statement carries a ``WHERE`` guard on the
+        conflict path (``t.value IS NOT excluded.value``), so the
+        read-compare-write is ONE SQLite statement — atomic at the
+        DATABASE level, not just within one process: two connections
+        (two processes sharing one SQLite file) cannot both observe
+        "not yet set" and both write, because the second writer's
+        statement re-evaluates the guard against the first writer's
+        committed value and matches zero rows.
+
+        Returns True only when THIS call changed the row: the first
+        claimant wins and every later claimant of the same value
+        returns False.  A DIFFERENT value always wins (an advance, e.g.
+        the sweep watermark moving to a new date) and re-arms the
+        same-value loser check for the new value.
+
+        Runs under the shared connection lock and inside one
+        transaction, like :meth:`set`; ``cursor.rowcount`` (1 for a
+        matched write, 0 for a guarded no-op) is captured by the
+        wrapper on the executor thread, so no sqlite3 object crosses
+        back to the event loop.
+        """
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                result = await self._database.execute(
+                    f"INSERT INTO {_TABLE} (key, value) VALUES (?, ?) "
+                    "ON CONFLICT (key) DO UPDATE SET value = excluded.value "
+                    f"WHERE {_TABLE}.value IS NOT excluded.value",
+                    (key, value),
+                )
+        return result.rowcount == 1

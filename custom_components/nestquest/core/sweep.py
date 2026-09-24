@@ -26,12 +26,17 @@ later completed simply gains its completion event; history keeps both
 rows (append-only), and the sweep's later runs skip it via the
 no-completion-event rule.
 
-The whole watermark read → query → build → write span runs inside the
+The whole watermark read → query → build span runs inside the
 per-database sweep lock (one lock per connection wrapper and running
 loop, the settings store's pattern): an overlapping startup sweep and
-a rollover sweep queue instead of interleaving, and the loser re-reads
-the watermark INSIDE the lock — sees the winner's date — and announces
-nothing twice.
+a rollover sweep of the SAME process queue instead of interleaving.
+The announce decision itself is the DATABASE-level claim
+(:meth:`MetaStateDao.claim`), so two PROCESSES sharing one SQLite file
+(the integration's rollover sweep and the API service's scheduler)
+cannot both announce the same missed batch either: both may read the
+old watermark and build the events, but the single conditional upsert
+lets exactly one of them win the claim — the loser returns [] and
+announces nothing.
 
 The caller supplies ``today`` as a plain :class:`datetime.date`: the
 household-local calendar date, read from ``hass.config.time_zone`` by
@@ -60,11 +65,11 @@ LOGGER = logging.getLogger(__name__)
 SWEEP_WATERMARK_KEY = "missed_sweep_last_run_date"
 
 #: One asyncio.Lock per (connection wrapper, running loop), mirroring
-#: the settings store's pattern: the whole watermark read → query →
-#: build → write span is one critical section, so an overlapping
-#: startup sweep and rollover sweep queue instead of double-announcing.
-#: The loser re-reads the watermark INSIDE the lock, sees the winner's
-#: date, and fires nothing.
+#: the settings store's pattern: the watermark read → query → build
+#: span is one critical section, so an overlapping startup sweep and
+#: rollover sweep of the SAME process queue instead of interleaving.
+#: Same-process callers are fully serialised by it; the cross-process
+#: case is closed by the database-level claim, not by this lock.
 _SWEEP_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
 
 
@@ -99,15 +104,24 @@ async def run_missed_sweep(
     the caller decides how to publish them and announces nothing on
     its own.
 
-    The whole watermark read → query → build → write span runs inside
-    the per-database sweep lock: an overlapping startup sweep and a
-    rollover sweep queue instead of interleaving, and the loser
-    re-reads the watermark inside the lock — sees the winner's date —
-    and announces nothing twice.  Every event in one run shares one
+    The watermark read → query → build span runs inside the
+    per-database sweep lock, so overlapping callers of ONE process
+    queue instead of interleaving.  The announce decision is the
+    DATABASE-level claim (:meth:`MetaStateDao.claim` — a single
+    conditional upsert on the watermark, atomic across processes):
+    every caller builds the events optimistically, then only the
+    caller whose claim actually advanced the watermark returns them;
+    a loser (another process already announced for ``today``) returns
+    [] and announces nothing twice.  Every event in one run shares one
     ``occurred_at`` stamp (one run, one announcement moment), and the
     payload comes from the shared
     :func:`~.events._instance_payload` builder so the shape can never
     drift from the documented §3 contract.
+
+    Failure ordering: the watermark is advanced ONLY by the claim,
+    AFTER the events are fully built — a failure before the claim
+    leaves the watermark unadvanced, so a later run re-sweeps the same
+    window and nothing is lost.
     """
     today_iso = today.isoformat()
     dao = MetaStateDao(database)
@@ -134,10 +148,23 @@ async def run_missed_sweep(
                     ),
                 )
             )
-        await dao.set(SWEEP_WATERMARK_KEY, today_iso)
+        # The database-level claim gates the announcement: only the
+        # caller that actually advanced the watermark may publish the
+        # built events, so two processes racing one SQLite file cannot
+        # both announce the same missed batch.  A same-value loser's
+        # claim matches zero rows and this run announces nothing.
+        claimed = await dao.claim(SWEEP_WATERMARK_KEY, today_iso)
+        if not claimed:
+            LOGGER.info(
+                "NestQuest missed sweep for %s lost the watermark claim; "
+                "announcing nothing",
+                today_iso,
+            )
+            return []
     LOGGER.info(
         "NestQuest missed sweep for %s built %d event(s)",
         today_iso,
         len(events),
     )
     return events
+

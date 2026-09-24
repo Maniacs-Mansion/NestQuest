@@ -22,18 +22,23 @@ the children layer owns that guardrail).  Deleting a nonexistent
 override raises ValueError prefixed ``override_id:`` so a caller can
 distinguish "unknown id" from a rejected argument the same way the
 quest-definitions layer prefixes ``definition_id:``.
+
+The admin plane's presence READS go through here too
+(:func:`get_presence_schedule`, :func:`list_presence_overrides`), so a
+reader never touches the DAO directly either.
 """
 from __future__ import annotations
 
 import datetime
 
+from .dao_children import ChildrenDao
 from .dao_presence import (
     PresenceOverrideRecord,
     PresenceOverridesDao,
     PresenceSchedulesDao,
 )
 from .db import NestQuestDatabase
-from .materialize import regenerate_for_child
+from .materialize import count_removed_by_override, regenerate_for_child
 from .presence import PresenceOverride, PresenceSchedule
 
 
@@ -128,6 +133,78 @@ async def create_presence_override(
         database, override.child_id, today=today, horizon_days=horizon_days
     )
     return record
+
+
+async def preview_presence_override_consequence(
+    database: NestQuestDatabase,
+    child_id: int,
+    start_date: object,
+    end_date: object,
+    is_present: bool,
+    *,
+    today: datetime.date | None = None,
+    horizon_days: int | None = None,
+) -> int:
+    """Return how many upcoming instances saving this override removes.
+
+    The admin override editor's live consequence warning, computed
+    BEFORE anything is saved: the arguments build the SAME
+    :class:`~.presence.PresenceOverride` :func:`create_presence_override`
+    builds (so a malformed or inverted range, or a non-bool
+    ``is_present``, raises the same ValueError), then
+    :func:`~.materialize.count_removed_by_override` compares what the
+    materialization walk generates for the child with and without it.
+    Nothing is written.  An unknown child reads ``child N does not
+    exist``; an INACTIVE child has no instances to remove (the walk's
+    write path never materializes one), so it counts 0.
+    ``today``/``horizon_days`` resolve as the post-save regeneration
+    resolves them.
+    """
+    override = PresenceOverride(child_id, start_date, end_date, is_present)
+    child = await ChildrenDao(database).get(override.child_id)
+    if child is None:
+        raise ValueError(f"child {override.child_id} does not exist")
+    if not child.is_active:
+        return 0
+    return await count_removed_by_override(
+        database, override, today=today, horizon_days=horizon_days
+    )
+
+
+async def get_presence_schedule(
+    database: NestQuestDatabase, child_id: int
+) -> PresenceSchedule | None:
+    """Return the child's presence schedule decoded, or None when unset.
+
+    None means the child exists and has no schedule row — present
+    every day (Feature 05).  An unknown child raises ValueError
+    (``child N does not exist``) rather than reading as present.
+    """
+    record = await PresenceSchedulesDao(database).get_by_child(child_id)
+    if record is None:
+        return None
+    return PresenceSchedule.decode(
+        record.child_id, record.anchor_date, record.pattern
+    )
+
+
+async def list_presence_overrides(
+    database: NestQuestDatabase,
+    *,
+    child_id: int | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> list[PresenceOverrideRecord]:
+    """Return the household's presence overrides, optionally filtered.
+
+    ``child_id`` narrows to one child (unknown: ``child N does not
+    exist``); ``start``/``end`` keep the overrides overlapping that
+    closed range (strict YYYY-MM-DD, ``end >= start``).  Ordered by
+    start date, then child id, then id.
+    """
+    return await PresenceOverridesDao(database).list_filtered(
+        child_id=child_id, start=start, end=end
+    )
 
 
 async def delete_presence_override(

@@ -4,8 +4,9 @@ Sits between the Feature 09 service gate and the typed
 :class:`~.dao_rules.QuestDefinitionsDao`: callers get validation and the
 all-or-nothing create/edit here, and never touch the DAO SQL directly.
 :func:`create_quest_definition` is the create path,
-:func:`edit_quest_definition` the edit path, :func:`assign_child` and
-:func:`unassign_child` the assignment paths, and
+:func:`edit_quest_definition` the edit path (which may also replace the
+whole assignee set), :func:`assign_child` and
+:func:`unassign_child` the single-child assignment paths, and
 :func:`set_quest_definition_active` the deactivate/reactivate path.
 There is no permission check here (that is Feature 09).
 
@@ -191,6 +192,17 @@ def _validate_definition_id(value: object) -> int:
     return value
 
 
+def _validate_skip_on_away(value: object) -> bool:
+    """Reject a non-bool ``skip_on_away`` before any write.
+
+    The DAO's ``int()`` would otherwise silently coerce strings and
+    numerics ("0", 1) into a state the caller never asked for.
+    """
+    if not isinstance(value, bool):
+        raise ValueError(f"skip_on_away must be a real bool, got {value!r}")
+    return value
+
+
 def _validate_child_id(value: object) -> int:
     """Reject non-int child ids (bools included) before any lookup.
 
@@ -212,6 +224,7 @@ async def create_quest_definition(
     *,
     description: str | None = None,
     icon: str | None = None,
+    skip_on_away: bool = True,
 ) -> CreatedQuestDefinition:
     """Create a quest definition (rule + assignees + windows) atomically.
 
@@ -231,6 +244,7 @@ async def create_quest_definition(
     window_specs = _normalize_windows(windows)
     description_value = _validate_text(description, "description")
     icon_value = _validate_text(icon, "icon")
+    skip_on_away_value = _validate_skip_on_away(skip_on_away)
 
     storage = schedule_rule_to_storage(rule)
     dao = QuestDefinitionsDao(database)
@@ -243,6 +257,7 @@ async def create_quest_definition(
             window_specs,
             description=description_value,
             icon=icon_value,
+            skip_on_away=skip_on_away_value,
         )
     except ValueError as error:
         # The DAO's assignee check names only the child; re-raise so the
@@ -271,10 +286,12 @@ async def edit_quest_definition(
     icon: str | None | object = _UNSET,
     rule: ScheduleRule | object = _UNSET,
     windows: list[str | tuple[str, str | None]] | object = _UNSET,
+    skip_on_away: bool | None = None,
+    assignee_child_ids: list[int] | object = _UNSET,
     today: datetime.date | None = None,
     horizon_days: int | None = None,
 ) -> CreatedQuestDefinition:
-    """Edit a quest definition's metadata, rule and windows atomically.
+    """Edit a quest definition's metadata, rule, windows and assignees atomically.
 
     Arguments default to the sentinel ``_UNSET`` meaning "leave this
     field alone".  A provided ``title`` is validated like create's
@@ -285,9 +302,16 @@ async def edit_quest_definition(
     ``schedule_rules`` row is updated, never orphaned or duplicated.  A
     provided ``windows`` list REPLACES the whole window set (each entry
     a ``const.QUEST_WINDOWS`` name, optionally with a strict HH:MM due
-    time), matching create's non-empty contract.  Assignment is NOT
-    settable here.  Raises ValueError when the definition does not
-    exist or any argument is rejected.
+    time), matching create's non-empty contract.  A provided
+    ``skip_on_away`` (a real bool) replaces the stored flag; ``None``
+    leaves it unchanged.  A provided ``assignee_child_ids`` REPLACES the
+    whole assignee set under create's contract (a non-empty list of
+    distinct plain ints, each an existing ACTIVE child — the DAO checks
+    that inside the edit's transaction): newly listed children are
+    assigned and unlisted ones unassigned.  Raises ValueError when the
+    definition does not exist or any argument is rejected; a rejection
+    writes nothing, so the stored assignees (and every other field)
+    stay unchanged.
 
     Returns the updated definition together with its decoded rule,
     assignees and windows — all read back inside the DAO's transaction,
@@ -331,6 +355,14 @@ async def edit_quest_definition(
     if windows is not _UNSET:
         window_specs = _normalize_windows(windows)
 
+    assignee_ids: list[int] | object = _UNSET
+    if assignee_child_ids is not _UNSET:
+        assignee_ids = _validate_assignee_ids(assignee_child_ids)
+
+    skip_on_away_value: bool | object = _UNSET
+    if skip_on_away is not None:
+        skip_on_away_value = _validate_skip_on_away(skip_on_away)
+
     dao = QuestDefinitionsDao(database)
     try:
         snapshot = await dao.edit_definition(
@@ -340,14 +372,18 @@ async def edit_quest_definition(
             icon=icon_value,
             rule=rule_storage,
             windows=window_specs,
+            skip_on_away=skip_on_away_value,
+            assignee_child_ids=assignee_ids,
         )
     except ValueError as error:
-        # The DAO's missing-definition error names only the id; re-raise
-        # so the public contract names the field the caller passed (matching
-        # assign/unassign/deactivate).
+        # The DAO's missing-definition and assignee errors name only the
+        # id; re-raise so the public contract names the field the caller
+        # passed (matching create/assign/unassign/deactivate).
         message = str(error)
         if message.startswith("quest definition "):
             raise ValueError(f"definition_id: {message}") from error
+        if message.startswith("child "):
+            raise ValueError(f"assignee_child_ids: {message}") from error
         raise
 
     decoded_rule = schedule_rule_from_storage(
@@ -555,6 +591,21 @@ async def list_active_definitions(
     """
     dao = QuestDefinitionsDao(database)
     snapshots = await dao.list_snapshots_active()
+    return [_bundle_snapshot(snapshot) for snapshot in snapshots]
+
+
+async def list_all_definitions(
+    database: NestQuestDatabase,
+) -> list[CreatedQuestDefinition]:
+    """Return EVERY definition, active AND inactive (rich view).
+
+    Mirrors :func:`list_active_definitions` without the activity
+    filter: ordered by rising definition id, each entry the same
+    :class:`CreatedQuestDefinition` snapshot, read by the DAO inside one
+    locked transaction.
+    """
+    dao = QuestDefinitionsDao(database)
+    snapshots = await dao.list_snapshots_all()
     return [_bundle_snapshot(snapshot) for snapshot in snapshots]
 
 
