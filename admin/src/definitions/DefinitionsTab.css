@@ -353,6 +353,16 @@
   color: var(--nq-brand-blue);
 }
 
+.defs-picker-option--locked {
+  color: var(--nq-a-ink-secondary);
+  cursor: default;
+}
+
+.defs-picker-note {
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .defs-repeats {
   display: flex;
   gap: 8px;
@@ -491,6 +501,24 @@
   display: flex;
   gap: 8px;
   margin-top: 16px;
+}
+
+.defs-confirm {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--nq-a-density-radius);
+  background: var(--nq-a-danger-bg);
+  color: var(--nq-a-danger-strong);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.defs-confirm p {
+  margin: 0;
+}
+
+.defs-confirm .defs-sheet-footer {
+  margin-top: 10px;
 }
 
 .defs-cancel,

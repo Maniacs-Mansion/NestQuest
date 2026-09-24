@@ -152,6 +152,14 @@ function fakeApi(initial: QuestDefinition[]) {
               title: body.title ?? d.title,
               skip_on_away: body.skip_on_away ?? d.skip_on_away,
               rule: body.rule ?? d.rule,
+              // Like the API: a sent list replaces the whole set; an absent one keeps it.
+              assignees:
+                "assignee_child_ids" in body
+                  ? CHILDREN.filter((c) => body.assignee_child_ids.includes(c.id)).map((c) => ({
+                      id: c.id,
+                      display_name: c.display_name,
+                    }))
+                  : d.assignees,
             }
           : d,
       );
@@ -360,9 +368,13 @@ describe("DefinitionsTab", () => {
     expect((within(s).getByLabelText("Afternoon due time") as HTMLInputElement).value).toBe(
       "16:00",
     );
-    // The inactive child "Old" is not offered and not submitted.
+    // The inactive child "Old" is shown locked, not offered as a checkbox.
     fireEvent.click(within(s).getByRole("button", { name: /Assigned children/ }));
     expect(within(s).queryByRole("checkbox", { name: "Old" })).toBeNull();
+    const locked = within(s).getByTestId("inactive-assignee-4");
+    expect(locked.textContent).toContain("Old");
+    expect(locked.textContent).toContain("Inactive");
+    expect(locked.getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(within(s).getByRole("checkbox", { name: "Maeve" }));
 
     fireEvent.change(within(s).getByRole("textbox", { name: "Title" }), {
@@ -382,8 +394,11 @@ describe("DefinitionsTab", () => {
     });
     fireEvent.click(within(s).getByRole("switch", { name: "Skip on away days" }));
 
+    // Changing the selection would drop "Old": confirm before sending.
+    fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    expect(api.writes()).toHaveLength(0);
     await act(async () => {
-      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+      fireEvent.click(within(s).getByRole("button", { name: "Unassign and save" }));
     });
 
     expect(api.writes()).toEqual([
@@ -415,6 +430,125 @@ describe("DefinitionsTab", () => {
     await screen.findByText("Take out the bins");
     expect(api.listFetches()).toBe(2);
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("editing only the title omits assignee_child_ids and keeps an inactive assignee", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByTestId("definition-11"));
+    const s = sheet();
+    expect(within(s).getByText(/Also assigned \(inactive\): Old\./)).toBeTruthy();
+    fireEvent.change(within(s).getByRole("textbox", { name: "Title" }), {
+      target: { value: "Bins out" },
+    });
+
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+
+    expect(screen.queryByTestId("unassign-confirm")).toBeNull();
+    expect(api.writes()).toHaveLength(1);
+    const body = api.writes()[0].body as Record<string, unknown>;
+    expect(api.writes()[0].method).toBe("PATCH");
+    expect(body.title).toBe("Bins out");
+    expect(body).not.toHaveProperty("assignee_child_ids");
+
+    await screen.findByText("Bins out");
+    expect(meta(screen.getByTestId("definition-11"))).toBe(
+      "Declan, Old · Every 2 weeks on Mon, Thu · Afternoon",
+    );
+  });
+
+  it("changing the active selection with an inactive assignee asks first", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByTestId("definition-11"));
+    const s = sheet();
+    fireEvent.click(within(s).getByRole("button", { name: /Assigned children/ }));
+    fireEvent.click(within(s).getByRole("checkbox", { name: "Rory" }));
+
+    fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    const confirm = within(s).getByTestId("unassign-confirm");
+    expect(confirm.textContent).toContain("Saving will unassign Old.");
+    expect(document.activeElement).toBe(confirm);
+    expect(api.writes()).toHaveLength(0);
+
+    // Going back sends nothing and restores the normal footer.
+    fireEvent.click(within(confirm).getByRole("button", { name: "Go back" }));
+    expect(within(s).queryByTestId("unassign-confirm")).toBeNull();
+    expect(api.writes()).toHaveLength(0);
+
+    fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Unassign and save" }));
+    });
+    expect(api.writes()).toHaveLength(1);
+    expect((api.writes()[0].body as { assignee_child_ids: number[] }).assignee_child_ids).toEqual([
+      1, 3,
+    ]);
+  });
+
+  it("reverting the selection to the original omits assignee_child_ids without asking", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByTestId("definition-11"));
+    const s = sheet();
+    fireEvent.click(within(s).getByRole("button", { name: /Assigned children/ }));
+    fireEvent.click(within(s).getByRole("checkbox", { name: "Rory" }));
+    fireEvent.click(within(s).getByRole("checkbox", { name: "Rory" }));
+
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+    expect(screen.queryByTestId("unassign-confirm")).toBeNull();
+    expect(api.writes()).toHaveLength(1);
+    expect(api.writes()[0].body).not.toHaveProperty("assignee_child_ids");
+  });
+
+  it("focus moves into the sheet on open and returns to the row on Escape", async () => {
+    await renderReady();
+    const row = screen.getByTestId("definition-10");
+    row.focus();
+    fireEvent.click(row);
+    const s = sheet();
+    expect(document.activeElement).toBe(within(s).getByRole("heading", { name: "Edit task" }));
+
+    fireEvent.keyDown(s, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(row);
+    expect(api.writes()).toHaveLength(0);
+  });
+
+  it("Tab and Shift+Tab wrap within the sheet", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByTestId("definition-10"));
+    const s = sheet();
+    const title = within(s).getByRole("textbox", { name: "Title" });
+    const save = within(s).getByRole("button", { name: "Save changes" });
+
+    save.focus();
+    fireEvent.keyDown(s, { key: "Tab" });
+    expect(document.activeElement).toBe(title);
+
+    fireEvent.keyDown(s, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(save);
+  });
+
+  it("Escape does not close the sheet while saving", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByTestId("definition-10"));
+    let release: (response: Response) => void = () => {};
+    api.fetchMock.mockImplementationOnce(
+      () => new Promise<Response>((resolve) => (release = resolve)),
+    );
+    const s = sheet();
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+    fireEvent.keyDown(s, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    await act(async () => {
+      release(jsonResponse(BRUSH));
+    });
+    await vi.waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("the skip-on-away toggle reflects and persists a false value", async () => {

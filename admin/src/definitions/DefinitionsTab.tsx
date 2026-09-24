@@ -4,7 +4,13 @@
  * The icon picker (§3.3) and the occurrence preview are separate tasks: an
  * existing definition's icon is carried through unchanged by never sending it.
  */
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import { ApiForbiddenError } from "../api/client";
 import {
   ApiRequestError,
@@ -14,6 +20,7 @@ import {
   updateDefinition,
   type AdminChild,
   type DefinitionCreateBody,
+  type DefinitionEditBody,
   type DefinitionRule,
   type QuestDefinition,
   type WindowEntry,
@@ -202,10 +209,14 @@ function buildRule(draft: Draft): DefinitionRule | string {
   }
 }
 
-function buildBody(draft: Draft): DefinitionCreateBody | string {
+/**
+ * `keepsAssignees`: an edit whose active selection is unchanged sends no
+ * assignee list, so an empty selection is fine when inactive children remain.
+ */
+function buildBody(draft: Draft, keepsAssignees = false): DefinitionCreateBody | string {
   const title = draft.title.trim();
   if (!title) return "Give the task a title.";
-  if (draft.assigneeIds.length === 0) return "Assign at least one child.";
+  if (draft.assigneeIds.length === 0 && !keepsAssignees) return "Assign at least one child.";
   if (draft.windows.length === 0) return "Pick at least one window.";
   const rule = buildRule(draft);
   if (typeof rule === "string") return rule;
@@ -230,6 +241,13 @@ function saveErrorMessage(error: unknown): string {
 function toggle<T>(list: T[], value: T): T[] {
   return list.includes(value) ? list.filter((item) => item !== value) : [...list, value];
 }
+
+function sameIds(a: number[], b: number[]): boolean {
+  return a.length === b.length && a.every((id) => b.includes(id));
+}
+
+const FOCUSABLE =
+  'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
 
 /* ── List ───────────────────────────────────────────────────────────── */
 
@@ -334,11 +352,58 @@ function EditSheet({
   const [draft, setDraft] = useState<Draft>(() =>
     target === "new" ? newDraft(activeChildren) : draftFrom(target, activeChildren),
   );
+  // The active selection as loaded: while it is unchanged, the PATCH omits
+  // assignee_child_ids, because the API replaces the whole set and inactive
+  // children cannot be sent back.
+  const [originalActiveIds] = useState(() => draft.assigneeIds);
+  const inactiveAssignees =
+    target === "new"
+      ? []
+      : target.assignees.filter((a) => !activeChildren.some((child) => child.id === a.id));
   const [pickerOpen, setPickerOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // A ref, not state: two taps in one frame must not both see `saving === false`.
   const inFlight = useRef(false);
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const confirmRef = useRef<HTMLDivElement>(null);
+
+  // Modal focus: move in on open, hand back to the trigger on close.
+  useEffect(() => {
+    const trigger = document.activeElement as HTMLElement | null;
+    titleRef.current?.focus();
+    return () => {
+      if (trigger && trigger.isConnected) trigger.focus();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (confirming) confirmRef.current?.focus();
+  }, [confirming]);
+
+  function onKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (!inFlight.current) onCancel();
+      return;
+    }
+    if (event.key !== "Tab" || !sheetRef.current) return;
+    const focusable = Array.from(sheetRef.current.querySelectorAll<HTMLElement>(FOCUSABLE));
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const current = document.activeElement;
+    const outside = !focusable.includes(current as HTMLElement);
+    if (event.shiftKey && (current === first || outside)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (current === last || outside)) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
 
   const update = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }));
 
@@ -347,19 +412,32 @@ function EditSheet({
     .map((child) => ({ id: child.id, display_name: child.display_name }));
   const orderedWindows = WINDOW_ORDER.filter((w) => draft.windows.includes(w));
 
-  async function save() {
+  async function save(confirmed = false) {
     if (inFlight.current) return;
-    const body = buildBody(draft);
+    const keepsAssignees = target !== "new" && sameIds(draft.assigneeIds, originalActiveIds);
+    const body = buildBody(draft, keepsAssignees);
     if (typeof body === "string") {
       setError(body);
+      setConfirming(false);
       return;
     }
+    if (target !== "new" && !keepsAssignees && inactiveAssignees.length > 0 && !confirmed) {
+      setError(null);
+      setConfirming(true);
+      return;
+    }
+    setConfirming(false);
     inFlight.current = true;
     setSaving(true);
     setError(null);
     try {
-      if (target === "new") await createDefinition(body);
-      else await updateDefinition(target.id, body);
+      if (target === "new") {
+        await createDefinition(body);
+      } else {
+        const edit: DefinitionEditBody = { ...body };
+        if (keepsAssignees) delete edit.assignee_child_ids;
+        await updateDefinition(target.id, edit);
+      }
       onSaved();
     } catch (err) {
       setError(saveErrorMessage(err));
@@ -378,13 +456,15 @@ function EditSheet({
         }}
       />
       <div
+        ref={sheetRef}
         className="defs-sheet"
         role="dialog"
         aria-modal="true"
         aria-labelledby="defs-sheet-title"
+        onKeyDown={onKeyDown}
       >
         <div className="defs-grabber" aria-hidden="true" />
-        <h3 className="defs-sheet-title" id="defs-sheet-title">
+        <h3 className="defs-sheet-title" id="defs-sheet-title" ref={titleRef} tabIndex={-1}>
           {target === "new" ? "New task" : "Edit task"}
         </h3>
         <div className="defs-fields">
@@ -431,7 +511,24 @@ function EditSheet({
                     </li>
                   );
                 })}
+                {inactiveAssignees.map((assignee) => (
+                  <li
+                    key={assignee.id}
+                    className="defs-picker-option defs-picker-option--locked"
+                    aria-disabled="true"
+                    data-testid={`inactive-assignee-${assignee.id}`}
+                  >
+                    <span>{assignee.display_name}</span>
+                    <span className="defs-picker-note">Inactive</span>
+                  </li>
+                ))}
               </ul>
+            ) : null}
+            {inactiveAssignees.length > 0 ? (
+              <p className="defs-hint">
+                Also assigned (inactive): {inactiveAssignees.map((a) => a.display_name).join(", ")}.
+                Kept unless you change the selection.
+              </p>
             ) : null}
           </Field>
 
@@ -594,14 +691,39 @@ function EditSheet({
           </p>
         ) : null}
 
-        <div className="defs-sheet-footer">
-          <button type="button" className="defs-cancel" onClick={onCancel} disabled={saving}>
-            Cancel
-          </button>
-          <button type="button" className="defs-save" onClick={save} disabled={saving}>
-            {saving ? "Saving…" : "Save changes"}
-          </button>
-        </div>
+        {confirming ? (
+          <div
+            className="defs-confirm"
+            role="group"
+            aria-labelledby="defs-confirm-text"
+            data-testid="unassign-confirm"
+            ref={confirmRef}
+            tabIndex={-1}
+          >
+            <p id="defs-confirm-text">
+              Saving will unassign{" "}
+              {inactiveAssignees.map((a) => a.display_name).join(", ")}. Inactive children can't be
+              assigned again until they are reactivated.
+            </p>
+            <div className="defs-sheet-footer">
+              <button type="button" className="defs-cancel" onClick={() => setConfirming(false)}>
+                Go back
+              </button>
+              <button type="button" className="defs-save" onClick={() => save(true)}>
+                Unassign and save
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="defs-sheet-footer">
+            <button type="button" className="defs-cancel" onClick={onCancel} disabled={saving}>
+              Cancel
+            </button>
+            <button type="button" className="defs-save" onClick={() => save()} disabled={saving}>
+              {saving ? "Saving…" : "Save changes"}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
