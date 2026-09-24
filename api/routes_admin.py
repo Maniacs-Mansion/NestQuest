@@ -251,7 +251,7 @@ import datetime
 from typing import Annotated, Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, StrictBool, field_validator, model_validator
 
 from api import transitions as api_transitions
 from api.auth import require_admin
@@ -363,9 +363,16 @@ class AdminQuestDefinitionResponse(BaseModel):
     description: str | None
     icon: str | None
     is_active: bool
+    skip_on_away: bool
     rule: AdminRuleResponse
     assignees: list[AdminAssigneeResponse]
     windows: list[AdminDefinitionWindowResponse]
+
+
+class AdminQuestDefinitionListResponse(BaseModel):
+    """The definitions list: every definition, active AND inactive, by id."""
+
+    definitions: list[AdminQuestDefinitionResponse]
 
 
 class AdminChildCreateRequest(BaseModel):
@@ -444,8 +451,9 @@ class AdminQuestDefinitionCreateRequest(BaseModel):
     ``title``, ``rule``, ``assignee_child_ids`` and ``windows`` are
     required (the core rejects an empty title, a non-list or empty
     assignee/window list, and unknown window names); ``description``
-    and ``icon`` are optional and default to NULL through the core.
-    ``windows`` entries are a window name (``morning``) or a two-item
+    and ``icon`` are optional and default to NULL through the core, and
+    ``skip_on_away`` is optional and defaults to true (no instance on a
+    date the child is absent).  ``windows`` entries are a window name (``morning``) or a two-item
     ``[window, due_time]`` pair whose due time is a strict 24-hour
     HH:MM (or ``null`` for none) — both forms the core normalizes.
     """
@@ -456,6 +464,7 @@ class AdminQuestDefinitionCreateRequest(BaseModel):
     windows: list[str | tuple[str, str | None]]
     description: str | None = None
     icon: str | None = None
+    skip_on_away: StrictBool = True
 
 
 class AdminQuestDefinitionEditRequest(BaseModel):
@@ -470,7 +479,8 @@ class AdminQuestDefinitionEditRequest(BaseModel):
     ``rule`` or ``windows`` is passed and rejected by the core.  A
     supplied ``windows`` list REPLACES the whole window set, and
     ``assignees`` are deliberately absent — assignment is not settable
-    through this route.
+    through this route.  An omitted (or ``null``) ``skip_on_away``
+    keeps the stored value.
     """
 
     title: str | None = None
@@ -478,6 +488,7 @@ class AdminQuestDefinitionEditRequest(BaseModel):
     icon: str | None = None
     rule: AdminRuleRequest | None = None
     windows: list[str | tuple[str, str | None]] | None = None
+    skip_on_away: StrictBool | None = None
 
 
 class AdminQuestDefinitionActiveRequest(BaseModel):
@@ -957,6 +968,7 @@ def _quest_definition_response(
         description=bundle.definition.description,
         icon=bundle.definition.icon,
         is_active=bundle.definition.is_active,
+        skip_on_away=bundle.definition.skip_on_away,
         rule=_rule_response(bundle.rule),
         assignees=[
             AdminAssigneeResponse(id=child.id, display_name=child.display_name)
@@ -1168,6 +1180,32 @@ async def admin_reorder_children(
     return {"status": "ok"}
 
 
+@router.get(
+    "/quest-definitions",
+    summary="List quest definitions",
+    response_model=AdminQuestDefinitionListResponse,
+)
+async def admin_list_quest_definitions(
+    request: Request,
+) -> AdminQuestDefinitionListResponse:
+    """Return every quest definition in rising id order.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: one
+    :func:`nestquest_core.quest_definitions.list_all_definitions` call,
+    active AND inactive definitions included (the admin screen manages
+    both), each serialized exactly as the create/edit responses are.
+    """
+    state: DatabaseState = request.app.state.db
+    bundles = await core_quest_definitions.list_all_definitions(
+        state.database
+    )
+    return AdminQuestDefinitionListResponse(
+        definitions=[_quest_definition_response(bundle) for bundle in bundles]
+    )
+
+
 @router.post(
     "/quest-definitions",
     summary="Create a quest definition",
@@ -1202,6 +1240,7 @@ async def admin_create_quest_definition(
             body.windows,
             description=body.description,
             icon=body.icon,
+            skip_on_away=body.skip_on_away,
         )
     except ValueError as error:
         _raise_quest_definition_error(error)

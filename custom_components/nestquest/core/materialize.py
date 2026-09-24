@@ -18,7 +18,8 @@ The walk is deterministic and idempotent:
   :class:`~.presence.PresenceEngine` from that same coherent read.
 - For each date in the range, each definition whose decoded rule
   :func:`~.recurrence.occurs_on` on that date, each assignee who is
-  ``is_present`` on that date and each declared window, one instance is
+  ``is_present`` on that date (or every assignee, when the definition's
+  ``skip_on_away`` is off) and each declared window, one instance is
   written through :class:`~.dao_instances.QuestInstancesDao.upsert_if_valid`
   with a ``generated_at`` stamp shared by the whole batch (one coherent
   time per run).
@@ -208,7 +209,8 @@ async def materialize(
 
     definitions = [
         (snapshot.definition.id, _decode_rule(snapshot),
-         snapshot.assignees, snapshot.windows)
+         snapshot.assignees, snapshot.windows,
+         snapshot.definition.skip_on_away)
         for snapshot in snapshots
     ]
 
@@ -229,13 +231,15 @@ async def materialize(
     cursor = start
     while cursor <= end:
         iso = cursor.isoformat()
-        for definition_id, rule, assignees, windows in definitions:
+        for (
+            definition_id, rule, assignees, windows, skip_on_away
+        ) in definitions:
             if not occurs_on(rule, cursor):
                 continue
             for child in assignees:
                 if child_filter is not None and child.id not in child_filter:
                     continue
-                if not engine.is_present(child.id, cursor):
+                if skip_on_away and not engine.is_present(child.id, cursor):
                     continue
                 for window in windows:
                     written = await instances.upsert_if_valid(
