@@ -36,8 +36,8 @@ which serves ``https://nestquest.cubecraftlabs.com`` (Let's Encrypt,
 auto-renewed, HTTP redirected to HTTPS) and forwards to the API box
 on port 8080 — so on that box set ``NESTQUEST_BIND_ADDRESS`` to its
 LAN address (``10.60.1.14``). Traefik only allows
-``/api/v1/panel`` from the Home Assistant host. Network separation
-and the full restore runbook are later Feature 17 tasks.
+``/api/v1/panel`` from the Home Assistant host. The full deployment,
+restore and verification procedure is in ``deploy/RUNBOOK.md``.
 
 ## Continuous backup (Litestream)
 
