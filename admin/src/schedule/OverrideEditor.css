@@ -1,0 +1,220 @@
+/* Presence override editor — roomy density pushed screen
+   (design/ADMIN-SPEC.md §6). Covers the tab bar like a pushed route. */
+
+.override-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  overflow-y: auto;
+  background: var(--nq-a-page);
+}
+
+.override-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  background: var(--nq-a-surface);
+  border-bottom: 1px solid var(--nq-a-border);
+}
+
+.override-back {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: var(--nq-a-tap-min);
+  height: var(--nq-a-tap-min);
+  margin: -6px 0 -6px -12px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--nq-a-ink);
+  cursor: pointer;
+}
+
+.override-title {
+  margin: 0;
+  font-size: var(--nq-a-size-screen);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.override-sub {
+  margin: 2px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--nq-a-ink-secondary);
+}
+
+.override-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 16px 16px 24px;
+}
+
+/* Form card: roomy density, 18px padding, 16px gaps. */
+.override-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px;
+  background: var(--nq-a-surface);
+  border: 1px solid var(--nq-a-border);
+  border-radius: 12px;
+}
+
+.override-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.override-label {
+  font-size: var(--nq-a-size-label);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: var(--nq-a-track-label);
+  color: var(--nq-a-ink-secondary);
+}
+
+.override-segments {
+  display: grid;
+  gap: 6px;
+}
+
+.override-segments--3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.override-segments--2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.override-segment {
+  min-height: var(--nq-a-tap-min);
+  padding: 0 8px;
+  border: 1px solid var(--nq-a-border);
+  border-radius: 10px;
+  background: var(--nq-a-surface);
+  color: var(--nq-a-ink-secondary);
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.override-segment--gradient[aria-pressed="true"] {
+  border-color: transparent;
+  background: var(--nq-brand-gradient);
+  color: #fff;
+}
+
+.override-segment--ink[aria-pressed="true"] {
+  border-color: #18181d;
+  background: #18181d;
+  color: #fff;
+}
+
+.override-dates {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.override-input {
+  width: 100%;
+  min-height: var(--nq-a-tap-min);
+  padding: 13px;
+  border: 1px solid var(--nq-a-border);
+  border-radius: 10px;
+  background: var(--nq-a-surface);
+  color: var(--nq-a-ink);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.override-date {
+  font-weight: 700;
+}
+
+/* Consequence warning */
+.override-warning {
+  display: flex;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--nq-a-warning-border);
+  border-radius: 12px;
+  background: var(--nq-a-warning-bg);
+}
+
+.override-warning-glyph {
+  flex: none;
+  display: flex;
+  color: var(--nq-a-warning-ink);
+}
+
+.override-warning-headline {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--nq-a-warning-ink);
+}
+
+.override-warning-body {
+  margin: 3px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--nq-a-warning-ink-2);
+}
+
+.override-error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--nq-a-density-radius);
+  background: var(--nq-a-danger-bg);
+  color: var(--nq-a-danger-strong);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+/* Footer: Cancel (flex 1) + Save override (flex 2), 15px vertical padding. */
+.override-footer {
+  display: flex;
+  gap: 10px;
+}
+
+.override-cancel,
+.override-save {
+  padding: 15px 12px;
+  border-radius: 12px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.override-cancel {
+  flex: 1;
+  border: 1px solid var(--nq-a-border);
+  background: var(--nq-a-surface);
+  color: var(--nq-a-ink);
+}
+
+.override-save {
+  flex: 2;
+  border: 0;
+  background: var(--nq-brand-gradient);
+  color: #fff;
+}
+
+.override-cancel:disabled,
+.override-save:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
