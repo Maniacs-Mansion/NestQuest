@@ -690,6 +690,12 @@ async def test_pattern_patch_unknown_id_is_404(
         ({"anchor_date": None}, "anchor_date"),
         ({"pattern": {}}, "pattern"),
         ({"pattern": None}, "pattern"),
+        ({"pattern": {"0": [7]}}, "pattern"),  # weekday out of 0..6
+        # Strict JSON integer weekdays: no bool, string or float coercion.
+        ({"pattern": {"0": [True]}}, "pattern"),
+        ({"pattern": {"0": [False]}}, "pattern"),
+        ({"pattern": {"0": ["1"]}}, "pattern"),
+        ({"pattern": {"0": [1.0]}}, "pattern"),
     ],
 )
 async def test_rejected_pattern_patch_is_422_and_changes_nothing(
@@ -882,6 +888,11 @@ async def test_pattern_and_override_for_unknown_child_are_404(
         (_pattern_body(anchor_date="2026-13-40"), "anchor_date"),
         (_pattern_body(anchor_date="05/01/2026"), "anchor_date"),
         (_pattern_body(pattern={"0": [7]}), "pattern"),  # weekday out of 0..6
+        # Strict JSON integer weekdays: no bool, string or float coercion.
+        (_pattern_body(pattern={"0": [True]}), "pattern"),
+        (_pattern_body(pattern={"0": [False]}), "pattern"),
+        (_pattern_body(pattern={"0": ["1"]}), "pattern"),
+        (_pattern_body(pattern={"0": [1.0]}), "pattern"),
         (_pattern_body(pattern={"nope": [0]}), "pattern"),  # non-int week
         (_pattern_body(pattern={"0": "0,2,4"}), "pattern"),  # not a list
         (_pattern_body(kind="sometimes"), "kind"),

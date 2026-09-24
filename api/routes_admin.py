@@ -623,15 +623,16 @@ class AdminPresencePatternCreateRequest(BaseModel):
     covers that week (Monday=0); every week of the cycle must be
     covered, which the PRESENCE MODEL enforces at construction, not
     this shape — as it does the non-blank ``name`` and the
-    ``home``/``away`` ``kind``.  ``cycle_length_weeks`` is a strict
-    JSON integer: ``2.0`` or ``"2"`` is a 422, not a silent coercion.
+    ``home``/``away`` ``kind``.  ``cycle_length_weeks`` and the weekday
+    values are strict JSON integers: ``2.0``, ``"2"`` or ``true`` is a
+    422, not a silent coercion.
     """
 
     name: str
     kind: str
     cycle_length_weeks: StrictInt
     anchor_date: str
-    pattern: dict[int, list[int]]
+    pattern: dict[int, list[StrictInt]]
 
 
 class AdminPresencePatternEditRequest(BaseModel):
@@ -646,7 +647,7 @@ class AdminPresencePatternEditRequest(BaseModel):
     kind: str | None = None
     cycle_length_weeks: StrictInt | None = None
     anchor_date: str | None = None
-    pattern: dict[int, list[int]] | None = None
+    pattern: dict[int, list[StrictInt]] | None = None
 
 
 class AdminPresencePatternResponse(BaseModel):
