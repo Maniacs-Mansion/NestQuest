@@ -45,7 +45,7 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-const FOCUSABLE =
+export const FOCUSABLE =
   'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
 
 /**
@@ -53,7 +53,7 @@ const FOCUSABLE =
  * <body>), so the tab bar behind the pushed screen cannot take focus.
  * Returns the undo.
  */
-function inertOutside(root: HTMLElement): () => void {
+export function inertOutside(root: HTMLElement): () => void {
   const made: HTMLElement[] = [];
   for (let node: HTMLElement = root; node.parentElement && node !== document.body; node = node.parentElement) {
     for (const sibling of Array.from(node.parentElement.children)) {

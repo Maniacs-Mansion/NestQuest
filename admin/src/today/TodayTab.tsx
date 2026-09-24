@@ -12,6 +12,7 @@ import { ApiForbiddenError } from "../api/client";
 import { ApiRequestError } from "../api/definitions";
 import { uncompleteInstance } from "../api/instances";
 import { useTransitions } from "../api/useTransitions";
+import SettingsScreen from "../settings/SettingsScreen";
 import {
   formatClockTime,
   formatDueTime,
@@ -43,15 +44,22 @@ function isOverdueOpen(instance: SnapshotInstance): boolean {
   return instance.overdue && instance.state === "open";
 }
 
-function ScreenHeader({ sub }: { sub: string }) {
+function ScreenHeader({ sub, onSettings }: { sub: string; onSettings: () => void }) {
   return (
     <header className="today-header">
       <div>
         <h2 className="today-title">Today</h2>
         <p className="today-sub">{sub}</p>
       </div>
-      {/* Settings screen is a later task; the control is not wired yet. */}
-      <button type="button" className="today-icon-button" aria-label="Settings">
+      {/* Opens the Settings screen. Only its Children section exists so far.
+          TODO: horizon days, day rollover time and notification config are a
+          separate later task. */}
+      <button
+        type="button"
+        className="today-icon-button"
+        aria-label="Settings"
+        onClick={onSettings}
+      >
         <SettingsGlyph />
       </button>
     </header>
@@ -221,6 +229,7 @@ export default function TodayTab() {
   const [undoingId, setUndoingId] = useState<number | null>(null);
   const undoingRef = useRef(false);
   const [undoError, setUndoError] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   function refresh() {
     silentNext.current = true;
@@ -326,7 +335,7 @@ export default function TodayTab() {
 
   return (
     <div className="today-screen">
-      <ScreenHeader sub={sub} />
+      <ScreenHeader sub={sub} onSettings={() => setSettingsOpen(true)} />
       <div
         className="today-scroll"
         data-testid="today-scroll"
@@ -342,6 +351,15 @@ export default function TodayTab() {
         ) : null}
         {body}
       </div>
+      {settingsOpen ? (
+        <SettingsScreen
+          onClose={() => {
+            setSettingsOpen(false);
+            // Child names and order feed the snapshot.
+            refresh();
+          }}
+        />
+      ) : null}
     </div>
   );
 }
