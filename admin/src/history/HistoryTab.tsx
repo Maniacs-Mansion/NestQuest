@@ -4,9 +4,9 @@
  * Rows are read-only: events are never edited or deleted, and a reversal is
  * its own row (D-005).
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiForbiddenError } from "../api/client";
-import { fetchHistory, type HistoryFilter, type HistoryRow } from "../api/history";
+import { exportHistoryCsv, fetchHistory, type HistoryFilter, type HistoryRow } from "../api/history";
 import { localTodayIso } from "../schedule/cycle";
 import { dayLabel, groupByDay, rowMeta, rowTime, shiftIso } from "./format";
 import { DownloadGlyph, LockGlyph } from "./glyphs";
@@ -70,15 +70,37 @@ async function loadHistory(filter: HistoryFilter, start: string, end: string): P
   };
 }
 
-function ScreenHeader() {
+/** Offer a Blob as a file download without navigating the page. */
+export function offerDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  try {
+    anchor.click();
+  } finally {
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
+}
+
+function ScreenHeader({ exporting, onExport }: { exporting: boolean; onExport: () => void }) {
   return (
     <header className="history-header">
       <div>
         <h2 className="history-title">History</h2>
         <p className="history-sub">Append-only event log · last {RANGE_DAYS} days</p>
       </div>
-      {/* TODO(e5133d0f): export the filtered range as CSV; inert until then. */}
-      <button type="button" className="history-csv" data-testid="history-csv">
+      <button
+        type="button"
+        className="history-csv"
+        data-testid="history-csv"
+        disabled={exporting}
+        aria-busy={exporting}
+        onClick={onExport}
+      >
         <DownloadGlyph />
         CSV
       </button>
@@ -140,7 +162,31 @@ export default function HistoryTab({ today = localTodayIso() }: { today?: string
   const [filter, setFilter] = useState<HistoryFilter>("all");
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [attempt, setAttempt] = useState(0);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const exportingRef = useRef(false);
   const start = shiftIso(today, -(RANGE_DAYS - 1));
+
+  /** Download the CSV for the active filter over the displayed range. */
+  async function exportCsv() {
+    if (exportingRef.current) return;
+    exportingRef.current = true;
+    setExporting(true);
+    setExportError(null);
+    try {
+      const { blob, filename } = await exportHistoryCsv(filter, start, today);
+      offerDownload(blob, filename);
+    } catch (error: unknown) {
+      setExportError(
+        error instanceof ApiForbiddenError
+          ? error.message
+          : "The CSV export failed. Check your connection and try again.",
+      );
+    } finally {
+      exportingRef.current = false;
+      setExporting(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -199,12 +245,20 @@ export default function HistoryTab({ today = localTodayIso() }: { today?: string
 
   return (
     <div className="history-screen">
-      <ScreenHeader />
+      <ScreenHeader exporting={exporting} onExport={() => void exportCsv()} />
       <div
         className="history-scroll"
         data-testid="history-scroll"
         style={{ paddingBottom: SCROLL_BOTTOM_PADDING }}
       >
+        {exportError !== null ? (
+          <div className="history-export-error" role="alert" data-testid="history-export-error">
+            <span>{exportError}</span>
+            <button type="button" className="history-export-dismiss" onClick={() => setExportError(null)}>
+              Dismiss
+            </button>
+          </div>
+        ) : null}
         {state.kind === "ready" ? <StatRow stats={state.data.stats} /> : null}
         <div className="history-chips" role="group" aria-label="Filter events">
           {FILTERS.map((item) => (

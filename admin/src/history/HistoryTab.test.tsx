@@ -93,8 +93,27 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+const CSV_BODY = "occurred_at,event_type\n2026-09-23T14:04:00Z,completed\n";
+
+function csvResponse(filter: string, start: string, end: string): Response {
+  return new Response(`${filter}\n${CSV_BODY}`, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="nestquest-history-${start}-to-${end}.csv"`,
+    },
+  });
+}
+
 function routeFetch(url: string): Response {
   const parsed = new URL(url, "http://x");
+  if (parsed.pathname.endsWith("/api/v1/admin/history.csv")) {
+    return csvResponse(
+      parsed.searchParams.get("filter") ?? "",
+      parsed.searchParams.get("start") ?? "",
+      parsed.searchParams.get("end") ?? "",
+    );
+  }
   if (!parsed.pathname.endsWith("/api/v1/admin/history")) {
     return jsonResponse({ detail: "unexpected" }, 500);
   }
@@ -229,15 +248,153 @@ describe("HistoryTab", () => {
     expect(screen.getAllByTestId("history-row")).toHaveLength(5);
   });
 
-  it("shows the append-only footer and an inert CSV button", async () => {
+  it("shows the append-only footer", async () => {
     await renderReady();
     expect(FOOTER_NOTE).toBe("Events are never edited or deleted. A reversal is its own row.");
     expect(screen.getByTestId("history-footer").textContent).toBe(FOOTER_NOTE);
+  });
 
-    const csv = screen.getByRole("button", { name: "CSV" });
-    const before = fetchMock.mock.calls.length;
-    fireEvent.click(csv);
-    expect(fetchMock.mock.calls.length).toBe(before);
+  describe("CSV export", () => {
+    let createObjectURL: ReturnType<typeof vi.fn>;
+    let revokeObjectURL: ReturnType<typeof vi.fn>;
+    let clicked: { href: string; download: string; attached: boolean }[];
+
+    beforeEach(() => {
+      createObjectURL = vi.fn(() => "blob:nestquest/csv-1");
+      revokeObjectURL = vi.fn();
+      // jsdom has no object URLs; install stubs and remove them afterwards.
+      Object.assign(URL, { createObjectURL, revokeObjectURL });
+      clicked = [];
+      vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+        clicked.push({
+          href: this.getAttribute("href") ?? "",
+          download: this.download,
+          attached: document.body.contains(this),
+        });
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      const stubbed = URL as unknown as Record<string, unknown>;
+      delete stubbed.createObjectURL;
+      delete stubbed.revokeObjectURL;
+    });
+
+    function csvCalls(): [URL, RequestInit][] {
+      return fetchMock.mock.calls
+        .map(([url, init]) => [new URL(String(url), "http://x"), init] as [URL, RequestInit])
+        .filter(([url]) => url.pathname === "/api/v1/admin/history.csv");
+    }
+
+    it("requests the CSV for the active filter and displayed range with the Bearer token", async () => {
+      await renderReady();
+      fireEvent.click(screen.getByRole("button", { name: "CSV" }));
+      await waitFor(() => expect(clicked).toHaveLength(1));
+
+      const calls = csvCalls();
+      expect(calls).toHaveLength(1);
+      const [url, init] = calls[0];
+      expect(url.searchParams.get("filter")).toBe("all");
+      expect(url.searchParams.get("start")).toBe("2026-09-10");
+      expect(url.searchParams.get("end")).toBe(TODAY);
+      expect((init.headers as Record<string, string>).Authorization).toBe("Bearer at-123");
+      // The token never travels in the URL.
+      expect(url.toString()).not.toContain("at-123");
+    });
+
+    it("offers the returned CSV for download, then revokes the URL and removes the anchor", async () => {
+      await renderReady();
+      fireEvent.click(screen.getByRole("button", { name: "CSV" }));
+      await waitFor(() => expect(clicked).toHaveLength(1));
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1);
+      const blob = createObjectURL.mock.calls[0][0] as Blob;
+      expect(await blob.text()).toBe(`all\n${CSV_BODY}`);
+      expect(clicked[0]).toEqual({
+        href: "blob:nestquest/csv-1",
+        download: "nestquest-history-2026-09-10-to-2026-09-23.csv",
+        attached: true,
+      });
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:nestquest/csv-1");
+      expect(document.querySelector("a[download]")).toBeNull();
+      expect(screen.queryByTestId("history-export-error")).toBeNull();
+    });
+
+    it("falls back to the range filename without a Content-Disposition header", async () => {
+      fetchMock.mockImplementation((url: string) =>
+        Promise.resolve(
+          new URL(url, "http://x").pathname.endsWith(".csv")
+            ? new Response(CSV_BODY, { status: 200, headers: { "Content-Type": "text/csv" } })
+            : routeFetch(url),
+        ),
+      );
+      await renderReady();
+      fireEvent.click(screen.getByRole("button", { name: "CSV" }));
+      await waitFor(() => expect(clicked).toHaveLength(1));
+      expect(clicked[0].download).toBe("nestquest-history-2026-09-10-to-2026-09-23.csv");
+    });
+
+    it("switching the filter chip then exporting uses the new filter", async () => {
+      await renderReady();
+      fireEvent.click(screen.getByRole("button", { name: "Reversals" }));
+      await waitFor(() => expect(screen.getAllByTestId("history-row")).toHaveLength(1));
+
+      fireEvent.click(screen.getByRole("button", { name: "CSV" }));
+      await waitFor(() => expect(clicked).toHaveLength(1));
+      const calls = csvCalls();
+      expect(calls).toHaveLength(1);
+      expect(calls[0][0].searchParams.get("filter")).toBe("reversals");
+      expect(calls[0][0].searchParams.get("start")).toBe("2026-09-10");
+      expect(calls[0][0].searchParams.get("end")).toBe(TODAY);
+    });
+
+    it("a failed export shows a non-blocking error and does not download", async () => {
+      fetchMock.mockImplementation((url: string) =>
+        Promise.resolve(
+          new URL(url, "http://x").pathname.endsWith(".csv")
+            ? jsonResponse({ detail: "boom" }, 500)
+            : routeFetch(url),
+        ),
+      );
+      await renderReady();
+      fireEvent.click(screen.getByRole("button", { name: "CSV" }));
+
+      const error = await screen.findByTestId("history-export-error");
+      expect(error.textContent).toContain("The CSV export failed");
+      expect(createObjectURL).not.toHaveBeenCalled();
+      expect(clicked).toHaveLength(0);
+      // The tab stays usable: rows remain, the button is re-enabled, chips still work.
+      expect(screen.getAllByTestId("history-row")).toHaveLength(5);
+      expect((screen.getByRole("button", { name: "CSV" }) as HTMLButtonElement).disabled).toBe(false);
+      fireEvent.click(screen.getByRole("button", { name: "Reversals" }));
+      await waitFor(() => expect(screen.getAllByTestId("history-row")).toHaveLength(1));
+
+      fireEvent.click(within(error).getByRole("button", { name: "Dismiss" }));
+      expect(screen.queryByTestId("history-export-error")).toBeNull();
+    });
+
+    it("the button is disabled while the request is in flight (no double-submit)", async () => {
+      let release: (response: Response) => void = () => {};
+      fetchMock.mockImplementation((url: string) =>
+        new URL(url, "http://x").pathname.endsWith(".csv")
+          ? new Promise<Response>((resolve) => {
+              release = resolve;
+            })
+          : Promise.resolve(routeFetch(url)),
+      );
+      await renderReady();
+      const csv = screen.getByRole("button", { name: "CSV" }) as HTMLButtonElement;
+      fireEvent.click(csv);
+      await waitFor(() => expect(csv.disabled).toBe(true));
+      fireEvent.click(csv);
+      expect(csvCalls()).toHaveLength(1);
+
+      release(csvResponse("all", "2026-09-10", TODAY));
+      await waitFor(() => expect(clicked).toHaveLength(1));
+      await waitFor(() => expect(csv.disabled).toBe(false));
+      expect(csvCalls()).toHaveLength(1);
+    });
   });
 
   it("rows are read-only: no row carries a control", async () => {
