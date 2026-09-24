@@ -64,9 +64,14 @@ the presence DAO (``dao_presence.py``) must stay free of business rules
 from __future__ import annotations
 
 import datetime
+from typing import NamedTuple
 
 from .const import DEFAULT_HORIZON_DAYS
-from .dao_instances import QuestInstancesDao, _resolve_today
+from .dao_instances import (
+    CompletionEventsDao,
+    QuestInstancesDao,
+    _resolve_today,
+)
 from .dao_rules import (
     _validate_date,
     load_materialization_input,
@@ -126,8 +131,15 @@ def _decode_rule(snapshot) -> ScheduleRule:
 def _build_engine(
     schedules_records,
     overrides_records,
+    *,
+    extra_overrides: tuple[PresenceOverride, ...] = (),
 ) -> PresenceEngine:
-    """Convert raw presence records into an immutable PresenceEngine."""
+    """Convert raw presence records into an immutable PresenceEngine.
+
+    ``extra_overrides`` layers already-validated, NOT-yet-stored
+    overrides on top of the stored ones — the consequence preview's
+    proposed override (:func:`count_removed_by_override`).
+    """
     schedules: dict[int, PresenceSchedule] = {}
     for child_id, record in schedules_records.items():
         schedules[child_id] = PresenceSchedule.decode(
@@ -145,7 +157,73 @@ def _build_engine(
             )
             for record in records
         ]
+    for override in extra_overrides:
+        overrides.setdefault(override.child_id, []).append(override)
     return PresenceEngine(schedules, overrides)
+
+
+class GeneratedTuple(NamedTuple):
+    """One instance the walk WOULD write: its upsert key plus due time."""
+
+    definition_id: int
+    child_id: int
+    due_date: str
+    window: str
+    due_time: str | None
+
+
+def _generation_preview(
+    snapshots,
+    engine: PresenceEngine,
+    start: datetime.date,
+    end: datetime.date,
+    *,
+    child_filter: set[int] | None = None,
+) -> list[GeneratedTuple]:
+    """Return the tuples the walk would write over ``[start, end]``.
+
+    The pure, read-only half of :func:`materialize`: for each date, each
+    definition whose decoded rule :func:`~.recurrence.occurs_on` it,
+    each assignee in ``child_filter`` (every assignee when None) who is
+    ``is_present`` on it — or every assignee when the definition's
+    ``skip_on_away`` is off — and each declared window, one tuple, in
+    the walk's write order.  :func:`materialize` writes exactly these
+    tuples and :func:`count_removed_by_override` compares two of these
+    previews, so the write and the consequence preview can never
+    diverge.  No database access.
+    """
+    definitions = [
+        (snapshot.definition.id, _decode_rule(snapshot),
+         snapshot.assignees, snapshot.windows,
+         snapshot.definition.skip_on_away)
+        for snapshot in snapshots
+    ]
+    generated: list[GeneratedTuple] = []
+    cursor = start
+    while cursor <= end:
+        iso = cursor.isoformat()
+        for (
+            definition_id, rule, assignees, windows, skip_on_away
+        ) in definitions:
+            if not occurs_on(rule, cursor):
+                continue
+            for child in assignees:
+                if child_filter is not None and child.id not in child_filter:
+                    continue
+                if skip_on_away and not engine.is_present(child.id, cursor):
+                    continue
+                for window in windows:
+                    generated.append(
+                        GeneratedTuple(
+                            definition_id,
+                            child.id,
+                            iso,
+                            window.window,
+                            window.due_time,
+                        )
+                    )
+        cursor += datetime.timedelta(days=1)
+    return generated
 
 
 async def materialize(
@@ -207,13 +285,6 @@ async def materialize(
     engine = _build_engine(schedules_records, overrides_records)
     child_filter = None if child_ids is None else set(child_ids)
 
-    definitions = [
-        (snapshot.definition.id, _decode_rule(snapshot),
-         snapshot.assignees, snapshot.windows,
-         snapshot.definition.skip_on_away)
-        for snapshot in snapshots
-    ]
-
     generated_at = _now_stamp()
     instances = QuestInstancesDao(database)
 
@@ -228,32 +299,20 @@ async def materialize(
     start = max(start, today_date)
 
     count = 0
-    cursor = start
-    while cursor <= end:
-        iso = cursor.isoformat()
-        for (
-            definition_id, rule, assignees, windows, skip_on_away
-        ) in definitions:
-            if not occurs_on(rule, cursor):
-                continue
-            for child in assignees:
-                if child_filter is not None and child.id not in child_filter:
-                    continue
-                if skip_on_away and not engine.is_present(child.id, cursor):
-                    continue
-                for window in windows:
-                    written = await instances.upsert_if_valid(
-                        definition_id,
-                        child.id,
-                        iso,
-                        generated_at,
-                        window=window.window,
-                        due_time=window.due_time,
-                        today=today,
-                    )
-                    if written is not None:
-                        count += 1
-        cursor += datetime.timedelta(days=1)
+    for generated in _generation_preview(
+        snapshots, engine, start, end, child_filter=child_filter
+    ):
+        written = await instances.upsert_if_valid(
+            generated.definition_id,
+            generated.child_id,
+            generated.due_date,
+            generated_at,
+            window=generated.window,
+            due_time=generated.due_time,
+            today=today,
+        )
+        if written is not None:
+            count += 1
     return count
 
 
@@ -378,4 +437,94 @@ async def regenerate_for_child(
     end_date = (start + datetime.timedelta(days=horizon)).isoformat()
     return await materialize(
         database, start.isoformat(), end_date, child_ids=[child_id], today=today
+    )
+
+
+async def count_removed_by_override(
+    database: NestQuestDatabase,
+    override: PresenceOverride,
+    *,
+    today: datetime.date | None = None,
+    horizon_days: int | None = None,
+) -> int:
+    """Count the upcoming instances saving ``override`` would remove.
+
+    Read-only: nothing is written.  The window is the part of the
+    override's range inside the rolling horizon ``[today, today +
+    horizon_days]`` that :func:`regenerate_for_child` rebuilds after the
+    override is saved (outside the range the two presence answers agree,
+    so nothing there can change).  The materialization input is read
+    ONCE (:func:`~.dao_rules.load_materialization_input`) and
+    :func:`_generation_preview` runs twice over it for the override's
+    child — with the stored presence, and with ``override`` layered on
+    top (:func:`_build_engine`'s ``extra_overrides``).  The count is the
+    tuples the first preview generates and the second does not, MINUS
+    every (definition, date, window) whose stored instance already has a
+    completion event (D-005: regeneration never deletes those).  A
+    definition with ``skip_on_away`` off generates regardless of
+    presence, so it contributes nothing; a present override only ever
+    ADDS tuples, so it counts 0.
+
+    An override overlapping a stored one (which the create path refuses)
+    resolves through the engine's latest-start-wins rule.  ``today`` and
+    ``horizon_days`` resolve exactly as :func:`regenerate_for_child`
+    resolves them; a malformed horizon raises ValueError.
+    """
+    horizon = _resolve_horizon_days(horizon_days)
+    today_date = _resolve_today(today)
+    start = max(today_date, override.start_date)
+    end = min(
+        today_date + datetime.timedelta(days=horizon), override.end_date
+    )
+    if end < start:
+        return 0
+    start_date, end_date = start.isoformat(), end.isoformat()
+    child_id = override.child_id
+
+    snapshots, schedules_records, overrides_records = await (
+        load_materialization_input(database, start_date, end_date)
+    )
+    current = _generation_preview(
+        snapshots,
+        _build_engine(schedules_records, overrides_records),
+        start,
+        end,
+        child_filter={child_id},
+    )
+    proposed = set(
+        _generation_preview(
+            snapshots,
+            _build_engine(
+                schedules_records,
+                overrides_records,
+                extra_overrides=(override,),
+            ),
+            start,
+            end,
+            child_filter={child_id},
+        )
+    )
+    removed = [generated for generated in current if generated not in proposed]
+    if not removed:
+        return 0
+
+    stored = await QuestInstancesDao(database).list_by_date_range(
+        child_id, start_date, end_date
+    )
+    touched = {
+        event.instance_id
+        for event in await CompletionEventsDao(
+            database
+        ).list_by_child_and_date_range(child_id, start_date, end_date)
+    }
+    completed = {
+        (instance.definition_id, instance.due_date, instance.window)
+        for instance in stored
+        if instance.id in touched
+    }
+    return sum(
+        1
+        for generated in removed
+        if (generated.definition_id, generated.due_date, generated.window)
+        not in completed
     )
