@@ -1,14 +1,14 @@
 """Admin-plane presence READ route tests (task 07fde892).
 
-``GET /api/v1/admin/children/{child_id}/presence-schedule`` and
+``GET /api/v1/admin/children/{child_id}/presence-patterns`` and
 ``GET /api/v1/admin/presence-overrides`` against the ASGI app with
 httpx, through the shared stubbed-JWKS harness
 (:mod:`tests.admin_jwt_harness`) — no network access.
 
-- The schedule read answers ``{"schedule": {...}}`` in the PUT
-  response's shape for a seeded schedule, ``{"schedule": null}`` for a
-  child with none (present every day — NOT a 404), and 404 for an
-  unknown child.
+- The patterns read answers ``{"patterns": [...]}`` in the POST
+  response's shape for seeded patterns, ordered by id (a child may have
+  several), ``{"patterns": []}`` for a child with none (present every
+  day — NOT a 404), and 404 for an unknown child.
 - The overrides read answers ``{"overrides": [...]}`` in the POST
   response's shape, ordered by start date, child id, id; ``child_id``
   and the ``start``/``end`` range each narrow the list; a malformed or
@@ -44,8 +44,8 @@ FORBIDDEN_DETAIL = (
 )
 
 
-def _schedule_url(child_id: int) -> str:
-    return f"/api/v1/admin/children/{child_id}/presence-schedule"
+def _patterns_url(child_id: int) -> str:
+    return f"/api/v1/admin/children/{child_id}/presence-patterns"
 
 
 def _admin_headers() -> dict[str, str]:
@@ -99,20 +99,23 @@ async def reads(temp_db_path: str) -> SimpleNamespace:
 
 @pytest.fixture
 async def seeded(reads: SimpleNamespace) -> SimpleNamespace:
-    """Two children with interleaved overrides (Ada has a schedule)."""
+    """Two children with interleaved overrides (Ada has a home pattern)."""
     client = reads.client
     ada = await _create_child(client, "Ada")
     ben = await _create_child(client, "Ben")
-    put = await client.put(
-        _schedule_url(ada),
+    created = await client.post(
+        _patterns_url(ada),
         json={
+            "name": "Custody",
+            "kind": "home",
             "cycle_length_weeks": 2,
             "anchor_date": "2026-01-05",
             "pattern": {"0": [4, 0, 2], "1": []},
         },
         headers=_admin_headers(),
     )
-    assert put.status_code == 200
+    assert created.status_code == 201, created.text
+    ada_custody = created.json()
     ada_march = await _create_override(
         client, ada, "2026-03-01", "2026-03-07", note="grandparents"
     )
@@ -129,50 +132,112 @@ async def seeded(reads: SimpleNamespace) -> SimpleNamespace:
         ben_january=ben_january,
         ben_march=ben_march,
         ada_may=ada_may,
+        ada_custody=ada_custody,
     )
 
 
-# --- presence schedule read ------------------------------------------------
+# --- presence patterns read ------------------------------------------------
 
 
-async def test_schedule_read_returns_the_stored_schedule(
+async def test_patterns_read_returns_the_stored_patterns(
     seeded: SimpleNamespace,
 ) -> None:
-    """A seeded schedule reads back in the PUT response's shape."""
+    """A seeded pattern reads back in the POST response's shape."""
     response = await seeded.client.get(
-        _schedule_url(seeded.ada), headers=_admin_headers()
+        _patterns_url(seeded.ada), headers=_admin_headers()
     )
     assert response.status_code == 200
     assert response.json() == {
-        "schedule": {
-            "child_id": seeded.ada,
-            "cycle_length_weeks": 2,
-            "anchor_date": "2026-01-05",
-            "pattern": {"0": [0, 2, 4], "1": []},
-        }
+        "patterns": [
+            {
+                "id": seeded.ada_custody["id"],
+                "child_id": seeded.ada,
+                "name": "Custody",
+                "kind": "home",
+                "cycle_length_weeks": 2,
+                "anchor_date": "2026-01-05",
+                "pattern": {"0": [0, 2, 4], "1": []},
+            }
+        ]
     }
+    assert response.json()["patterns"] == [seeded.ada_custody]
 
 
-async def test_schedule_read_without_schedule_is_null_not_404(
+async def test_patterns_read_lists_several_patterns_in_id_order(
     seeded: SimpleNamespace,
 ) -> None:
-    """A child with no schedule (present every day) is schedule: null."""
-    response = await seeded.client.get(
-        _schedule_url(seeded.ben), headers=_admin_headers()
+    """A child's patterns (zero or more) are listed ordered by id."""
+    client = seeded.client
+    away = await client.post(
+        _patterns_url(seeded.ada),
+        json={
+            "name": "Camp",
+            "kind": "away",
+            "cycle_length_weeks": 1,
+            "anchor_date": "2026-01-05",
+            "pattern": {"0": [6, 5]},
+        },
+        headers=_admin_headers(),
+    )
+    assert away.status_code == 201, away.text
+    third = await client.post(
+        _patterns_url(seeded.ada),
+        json={
+            "name": "Weekday lessons",
+            "kind": "home",
+            "cycle_length_weeks": 1,
+            "anchor_date": "2026-01-05",
+            "pattern": {"0": [1]},
+        },
+        headers=_admin_headers(),
+    )
+    assert third.status_code == 201, third.text
+
+    response = await client.get(
+        _patterns_url(seeded.ada), headers=_admin_headers()
     )
     assert response.status_code == 200
-    assert response.json() == {"schedule": None}
+    patterns = response.json()["patterns"]
+    assert patterns == [seeded.ada_custody, away.json(), third.json()]
+    ids = [pattern["id"] for pattern in patterns]
+    assert ids == sorted(ids)
+    assert patterns[1]["pattern"] == {"0": [5, 6]}
+    # Ben's list is untouched by Ada's patterns.
+    ben = await client.get(_patterns_url(seeded.ben), headers=_admin_headers())
+    assert ben.json() == {"patterns": []}
 
 
-async def test_schedule_read_unknown_child_is_404(
+async def test_patterns_read_without_patterns_is_empty_not_404(
+    seeded: SimpleNamespace,
+) -> None:
+    """A child with no pattern (present every day) is an empty list."""
+    response = await seeded.client.get(
+        _patterns_url(seeded.ben), headers=_admin_headers()
+    )
+    assert response.status_code == 200
+    assert response.json() == {"patterns": []}
+
+
+async def test_patterns_read_unknown_child_is_404(
     reads: SimpleNamespace,
 ) -> None:
     """An unknown child is 404 with the children routes' detail."""
     response = await reads.client.get(
-        _schedule_url(999), headers=_admin_headers()
+        _patterns_url(999), headers=_admin_headers()
     )
     assert response.status_code == 404
     assert response.json() == {"detail": "Child not found"}
+
+
+async def test_old_presence_schedule_read_route_is_gone(
+    seeded: SimpleNamespace,
+) -> None:
+    """The removed one-per-child schedule read no longer exists."""
+    response = await seeded.client.get(
+        f"/api/v1/admin/children/{seeded.ada}/presence-schedule",
+        headers=_admin_headers(),
+    )
+    assert response.status_code in (404, 405)
 
 
 # --- presence overrides read -----------------------------------------------
@@ -302,12 +367,12 @@ async def test_overrides_read_unknown_child_is_404(
 # --- authentication: the router's ONE require_admin --------------------------
 
 
-@pytest.fixture(params=["schedule", "overrides"])
+@pytest.fixture(params=["patterns", "overrides"])
 async def read_url(request: pytest.FixtureRequest, reads: SimpleNamespace) -> str:
-    """Each read route's URL (the schedule route for a real child)."""
+    """Each read route's URL (the patterns route for a real child)."""
     if request.param == "overrides":
         return OVERRIDES_URL
-    return _schedule_url(await _create_child(reads.client, "Ada"))
+    return _patterns_url(await _create_child(reads.client, "Ada"))
 
 
 async def test_read_without_credential_is_401(

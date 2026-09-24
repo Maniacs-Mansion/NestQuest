@@ -31,7 +31,11 @@ widened (definition_id, child_id, due_date, window) key, and migration
 column.  Migration 7 adds the generic ``nestquest_meta_state``
 key/value table for integration-owned bookkeeping (Feature 11's
 missed-sweep watermark).  Migration 8 adds the ``skip_on_away``
-column to ``quest_definitions`` (Feature 22), defaulting to 1.  Each
+column to ``quest_definitions`` (Feature 22), defaulting to 1.
+Migration 9 replaces the one-per-child ``presence_schedules`` table
+with ``presence_patterns`` (zero or more patterns per child), copying
+every schedule across as a ``home`` pattern and dropping the old table
+— see :data:`MIGRATION_9_PRESENCE_PATTERNS` for the rollback note.  Each
 callable migration runs inside its own transaction
 together with its version stamp, so a crash mid-step rolls the
 statements and the stamp back together.
@@ -85,6 +89,7 @@ from .schema import (
     SCHEMA_V1_QUEST_DEFINITION_ASSIGNEES_DDL,
     SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL,
     SCHEMA_V7_META_STATE_DDL,
+    SCHEMA_V9_PRESENCE_PATTERNS_DDL,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -116,9 +121,76 @@ VERSION_TABLE_DDL = f"""
     )
 """
 
+#: The retired ``presence_schedules`` DDL (one schedule per child),
+#: frozen here verbatim: migration 1 shipped creating this table and
+#: applied migrations are never edited, so a fresh file still walks
+#: through it and migration 9 retires it.  :mod:`.schema` no longer
+#: declares it.
+_MIGRATION_1_PRESENCE_SCHEDULES_DDL = """
+    CREATE TABLE IF NOT EXISTS presence_schedules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        child_id INTEGER NOT NULL UNIQUE REFERENCES children(id),
+        cycle_length_weeks INTEGER NOT NULL CHECK (typeof(cycle_length_weeks) = 'integer' AND cycle_length_weeks >= 1 AND cycle_length_weeks <= 4),
+        anchor_date TEXT NOT NULL,
+        pattern TEXT NOT NULL CHECK (
+            NOT pattern GLOB '*[^0-6,|]*'
+            AND NOT pattern GLOB '*[0-6][0-6]*'
+            AND NOT pattern GLOB '*,,*'
+            AND NOT pattern GLOB '*,|*'
+            AND NOT pattern GLOB '*|,*'
+            AND NOT pattern GLOB ',*'
+            AND NOT pattern GLOB '*,'
+            AND NOT pattern GLOB '*[0-6],[0-6],[0-6],[0-6],[0-6],[0-6],[0-6],[0-6]*'
+            AND (LENGTH(pattern) - LENGTH(REPLACE(pattern, '|', '')) + 1) = cycle_length_weeks
+        )
+    )
+    """
+
 #: One-based index into :data:`MIGRATIONS`: entry ``n`` upgrades
-#: version ``n-1`` to version ``n``.
-MIGRATION_1_V1_DDL: list[str] = list(SCHEMA_V1_STATEMENTS)
+#: version ``n-1`` to version ``n``.  Migration 1 is the v1 DDL as it
+#: shipped: the current tables, except that it still creates the
+#: retired ``presence_schedules`` table in place of
+#: ``presence_patterns`` (which migration 9 creates).
+MIGRATION_1_V1_DDL: list[str] = [
+    _MIGRATION_1_PRESENCE_SCHEDULES_DDL
+    if sql in SCHEMA_V9_PRESENCE_PATTERNS_DDL
+    else sql
+    for sql in SCHEMA_V1_STATEMENTS
+]
+
+#: The label every migrated ``presence_schedules`` row carries as a
+#: ``presence_patterns`` row.
+MIGRATED_PRESENCE_PATTERN_NAME = "Home schedule"
+
+#: Migration 9 (schema 9): multiple presence patterns per child.
+#: Creates ``presence_patterns``, copies EVERY ``presence_schedules``
+#: row into it as a ``home`` pattern named
+#: :data:`MIGRATED_PRESENCE_PATTERN_NAME` — ``cycle_length_weeks``,
+#: ``anchor_date`` and ``pattern`` verbatim, the row id kept — and
+#: drops ``presence_schedules``.  A ``home`` pattern with no other
+#: pattern beside it answers exactly as the old schedule did (the
+#: engine treats a date no home pattern covers as a day away), so every
+#: child's presence is unchanged.  A plain statement list: the runner
+#: applies it and the version stamp in ONE transaction, so a failure
+#: rolls the copy and the drop back together.  Dropping a table nothing
+#: references needs no ``foreign_keys = OFF`` bracket.
+#:
+#: Rollback: the drop is one-way.  A 0.7.1 build refuses a version-9
+#: file ("newer than this integration understands") and could not read
+#: ``presence_patterns`` anyway, so take a copy of the SQLite file (or
+#: note the Litestream generation) BEFORE the first start of the release
+#: carrying migration 9; rolling back to 0.7.1 means restoring that
+#: pre-migration copy, which still holds the single-schedule rows.
+#: Pattern edits made after the upgrade are not in that copy.
+MIGRATION_9_PRESENCE_PATTERNS: list[str] = [
+    *SCHEMA_V9_PRESENCE_PATTERNS_DDL,
+    "INSERT INTO presence_patterns (id, child_id, name, kind, "
+    "cycle_length_weeks, anchor_date, pattern) "
+    f"SELECT id, child_id, '{MIGRATED_PRESENCE_PATTERN_NAME}', 'home', "
+    "cycle_length_weeks, anchor_date, pattern "
+    "FROM presence_schedules ORDER BY id",
+    "DROP TABLE presence_schedules",
+]
 
 #: The assignees table DDL, shared with migration 1 via the schema
 #: module so a rebuilt and a freshly created table cannot drift.
@@ -450,6 +522,9 @@ MIGRATIONS: Sequence[MigrationStep] = [
     # quest_definitions — an additive column defaulting to 1, so every
     # pre-existing definition keeps today's skip-when-absent behaviour.
     _add_skip_on_away,
+    # Migration 9 (schema 9): presence_schedules -> presence_patterns,
+    # each schedule copied across as a 'home' pattern.
+    MIGRATION_9_PRESENCE_PATTERNS,
 ]
 
 

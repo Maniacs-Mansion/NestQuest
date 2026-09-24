@@ -5,21 +5,24 @@ timezone logic — it operates on plain calendar dates only (feature
 guardrail).  The later engine (cycle position, ``is_present``,
 overrides, previews) builds directly on this model.
 
-A :class:`PresenceSchedule` answers "on which weekdays of which cycle
-week is this child at this house?" for an N-week repeating custody
-pattern.  Two of the household's three children follow a two-week
-rotation; a child with NO schedule row is present every day (that
-default lives in the engine, not here).
+A :class:`PresencePattern` answers "on which weekdays of which cycle
+week does this rule apply to this child?" for an N-week repeating
+custody rule, and its ``kind`` says what the rule claims on those
+days: ``home`` (the child is at this house) or ``away``.  A child
+carries ZERO OR MORE patterns (schema 9), e.g. "away every Thursday
+and Friday" plus "away every other weekend"; a child with NO pattern
+is present every day (that default, and how patterns combine, lives in
+the engine, not here).
 
 Pattern encoding: the model's canonical serialization is the SAME
 pipe-separated CSV the database stores (see schema.py's
-``presence_schedules.pattern``): segment ``i`` (week index ``i``) is a
-comma-separated list of present weekdays, 0 = Monday .. 6 = Sunday,
-e.g. ``'0,2,4|1,3'`` = Mon/Wed/Fri in week 0, Tue/Thu in week 1.  An
-empty segment means absent every day of that week.  Encoding sorts
-each segment's weekdays and uses the exact segment order, so
-``decode(encode(schedule))`` round-trips losslessly and two schedules
-with equal patterns produce equal strings.
+``presence_patterns.pattern``): segment ``i`` (week index ``i``) is a
+comma-separated list of the weekdays the pattern covers, 0 = Monday ..
+6 = Sunday, e.g. ``'0,2,4|1,3'`` = Mon/Wed/Fri in week 0, Tue/Thu in
+week 1.  An empty segment means the pattern covers no day of that
+week.  Encoding sorts each segment's weekdays and uses the exact
+segment order, so ``decode(encode(pattern))`` round-trips losslessly
+and two patterns with equal weekday sets produce equal strings.
 
 Anchor-date policy: ``anchor_date`` pins the cycle.  Cycle position is
 computed from anchor-date arithmetic ONLY — never ISO week numbers or
@@ -28,7 +31,9 @@ week parity (D-004): 53-week years silently invert parity on January
 that the anchor is a strict calendar date.
 
 Validation policy: construction is total — every reject happens in
-``__init__`` so no invalid schedule can ever exist:
+``__init__`` so no invalid pattern can ever exist:
+- ``name`` must be a string that is not blank; it is stored trimmed.
+- ``kind`` must be ``'home'`` or ``'away'``.
 - ``cycle_length_weeks`` must be an integer 1..4.  The 4 cap matches
   the database CHECK (schema.py) and keeps anchor arithmetic and the
   encoded pattern human-readable; revisit both together if a longer
@@ -48,6 +53,10 @@ from types import MappingProxyType
 #: The schema's documented cap for cycle_length_weeks (schema.py keeps
 #: the pattern human-readable and the anchor arithmetic small).
 MAX_CYCLE_LENGTH_WEEKS = 4
+
+#: The pattern kinds the schema's CHECK allows: what a covering
+#: pattern claims about the child on that date.
+PATTERN_KINDS = ("home", "away")
 
 _DATE_FORMAT = "%Y-%m-%d"
 
@@ -126,6 +135,25 @@ def _validate_weekday_set(week: int, weekdays: object) -> frozenset[int]:
     return frozenset(members)
 
 
+def _validate_name(value: object) -> str:
+    """Reject non-string and blank pattern names; return it trimmed."""
+    if not isinstance(value, str):
+        raise ValueError(f"name must be a string, got {value!r}")
+    trimmed = value.strip()
+    if not trimmed:
+        raise ValueError("name must not be empty")
+    return trimmed
+
+
+def _validate_kind(value: object) -> str:
+    """Reject any kind other than the schema's ``home`` / ``away``."""
+    if not isinstance(value, str) or value not in PATTERN_KINDS:
+        raise ValueError(
+            f"kind must be one of {', '.join(PATTERN_KINDS)}, got {value!r}"
+        )
+    return value
+
+
 def _validate_cycle_length(value: object) -> int:
     """Reject non-int and out-of-range cycle lengths (bools included)."""
     if isinstance(value, bool) or not isinstance(value, int):
@@ -148,17 +176,19 @@ def _validate_child_id(value: object) -> int:
 
 
 @dataclass(frozen=True, init=False)
-class PresenceSchedule:
-    """One child's N-week repeating presence pattern.
+class PresencePattern:
+    """One of a child's N-week repeating presence rules.
 
     ``pattern`` maps each week index of the cycle (``0`` .. ``n-1``)
-    to the set of present weekdays (ints, Monday=0).  A week with an
-    empty set means the child is absent every day of that week — which
-    is distinct from having no schedule at all (the engine treats a
-    missing schedule as present every day).
+    to the set of weekdays the rule covers (ints, Monday=0); ``kind``
+    is what the rule claims on a covered date (``home`` or ``away``).
+    A week with an empty set covers no day of that week.  How several
+    patterns combine is the engine's job (:class:`PresenceEngine`).
     """
 
     child_id: int
+    name: str
+    kind: str
     cycle_length_weeks: int
     anchor_date: datetime.date
     pattern: MappingProxyType  # week index -> frozenset of weekdays
@@ -166,11 +196,15 @@ class PresenceSchedule:
     def __init__(
         self,
         child_id: int,
+        name: str,
+        kind: str,
         cycle_length_weeks: int,
         anchor_date: object,
         pattern: dict[int, object],
     ) -> None:
         object.__setattr__(self, "child_id", _validate_child_id(child_id))
+        object.__setattr__(self, "name", _validate_name(name))
+        object.__setattr__(self, "kind", _validate_kind(kind))
         cycle = _validate_cycle_length(cycle_length_weeks)
         object.__setattr__(self, "cycle_length_weeks", cycle)
         object.__setattr__(
@@ -178,7 +212,7 @@ class PresenceSchedule:
         )
         if not isinstance(pattern, dict):
             raise ValueError(
-                "pattern must map week index to a set of present "
+                "pattern must map week index to a set of covered "
                 f"weekdays, got {pattern!r}"
             )
         normalised: dict[int, frozenset[int]] = {}
@@ -204,9 +238,9 @@ class PresenceSchedule:
         """Serialize to the database's pipe-separated CSV shape.
 
         Segments appear in week order; each segment is the week's
-        present weekdays as a sorted comma-separated list (an empty set
-        encodes as an empty segment).  Two schedules with equal
-        patterns encode identically.
+        covered weekdays as a sorted comma-separated list (an empty set
+        encodes as an empty segment).  Two patterns with equal weekday
+        sets encode identically.
         """
         segments = [
             ",".join(str(day) for day in sorted(self.pattern[week]))
@@ -218,10 +252,12 @@ class PresenceSchedule:
     def decode(
         cls,
         child_id: int,
+        name: str,
+        kind: str,
         anchor_date: object,
         encoded: str,
-    ) -> "PresenceSchedule":
-        """Build a schedule from its encoded pattern.
+    ) -> "PresencePattern":
+        """Build a pattern from its encoded weekday sets.
 
         The cycle length is derived from the segment count, mirroring
         the database's segment-count CHECK.  Decoding is strict: wrong
@@ -248,7 +284,15 @@ class PresenceSchedule:
                         )
                     weekdays.add(int(part))
             pattern[week] = weekdays
-        return cls(child_id, len(segments), anchor_date, pattern)
+        return cls(child_id, name, kind, len(segments), anchor_date, pattern)
+
+    def covers(self, date: datetime.date) -> bool:
+        """Return True when ``date``'s weekday is in its cycle week's set.
+
+        The cycle week comes from :func:`cycle_week_index` — anchor-date
+        arithmetic only, never ISO week numbers or parity (D-004).
+        """
+        return date.weekday() in self.pattern[cycle_week_index(self, date)]
 
 
 @dataclass(frozen=True, init=False)
@@ -301,7 +345,7 @@ class PresenceOverride:
 
 
 def cycle_week_index(
-    schedule: PresenceSchedule, target_date: object
+    pattern: PresencePattern, target_date: object
 ) -> int:
     """Return the cycle week index ``target_date`` falls in.
 
@@ -315,14 +359,14 @@ def cycle_week_index(
     valid week index.
     """
     target = _parse_date(target_date, "target_date")
-    days = (target - schedule.anchor_date).days
-    return (days // 7) % schedule.cycle_length_weeks
+    days = (target - pattern.anchor_date).days
+    return (days // 7) % pattern.cycle_length_weeks
 
 
 #: Search cap for :meth:`PresenceEngine.next_present_dates`: two full
-#: years of daily checks.  A child absent every day (an all-absent
-#: pattern with a blocking override) would otherwise loop forever; the
-#: cap bounds the scan and surfaces the situation as an error instead.
+#: years of daily checks.  A child absent every day (an away pattern
+#: covering every weekday) would otherwise loop forever; the cap bounds
+#: the scan and surfaces the situation as an error instead.
 MAX_PREVIEW_SCAN_DAYS = 366 * 2
 
 
@@ -330,40 +374,45 @@ class PresenceEngine:
     """Answers "is this child at this house on this date?".
 
     Pure and side-effect-free: built from an immutable snapshot of the
-    children's schedules (``child_id -> PresenceSchedule``), it never
-    touches the database — callers build a snapshot from the DAO layer
-    and pass it in.  A child with NO schedule entry is present every
-    day (the third household child's case); a child WITH a schedule is
-    present exactly when the date's weekday is in that schedule's
-    pattern for the date's cycle week index (anchor-date arithmetic —
-    :func:`cycle_week_index`, never ISO week parity).
+    children's patterns (``child_id -> list of PresencePattern``), it
+    never touches the database — callers build a snapshot from the DAO
+    layer and pass it in.  A child with NO pattern is present every day
+    (the third household child's case).  Evaluation order, first match
+    wins — see :meth:`is_present`.  Pattern coverage is anchor-date
+    arithmetic (:func:`cycle_week_index`, never ISO week parity).
     """
 
     def __init__(
         self,
-        schedules: dict[int, PresenceSchedule],
+        patterns: dict[int, list[PresencePattern]],
         overrides: dict[int, list[PresenceOverride]] | None = None,
     ) -> None:
-        if not isinstance(schedules, dict):
+        if not isinstance(patterns, dict):
             raise ValueError(
-                f"schedules must map child_id to PresenceSchedule, got "
-                f"{schedules!r}"
+                "patterns must map child_id to a list of PresencePattern, "
+                f"got {patterns!r}"
             )
-        for child_id, schedule in schedules.items():
+        for child_id, entries in patterns.items():
             # Validate the KEY as a model child id too: True and 1.0
-            # compare equal to 1, so {True: schedule(1)} would be
+            # compare equal to 1, so {True: [pattern(1)]} would be
             # accepted and then behave differently on lookup.
             _validate_child_id(child_id)
-            if not isinstance(schedule, PresenceSchedule):
+            if not isinstance(entries, list):
                 raise ValueError(
-                    f"schedules[{child_id!r}] must be a PresenceSchedule, "
-                    f"got {schedule!r}"
+                    f"patterns[{child_id!r}] must be a list of "
+                    f"PresencePattern, got {entries!r}"
                 )
-            if schedule.child_id != child_id:
-                raise ValueError(
-                    f"schedules is keyed {child_id!r} but holds the "
-                    f"schedule of child {schedule.child_id}"
-                )
+            for entry in entries:
+                if not isinstance(entry, PresencePattern):
+                    raise ValueError(
+                        f"patterns[{child_id!r}] entries must be "
+                        f"PresencePattern, got {entry!r}"
+                    )
+                if entry.child_id != child_id:
+                    raise ValueError(
+                        f"patterns is keyed {child_id!r} but holds a "
+                        f"pattern of child {entry.child_id}"
+                    )
         if overrides is None:
             overrides = {}
         if not isinstance(overrides, dict):
@@ -391,11 +440,17 @@ class PresenceEngine:
                     )
         # Read-only snapshot: reassignment is refused and no mutator
         # exists, so a built engine answers consistently for its
-        # lifetime.  The overrides lists are copied to immutable
-        # tuples — a shallow mapping copy alone would leave caller-
-        # owned lists reachable through _overrides, and mutating one
-        # later would change is_present results.
-        object.__setattr__(self, "_schedules", MappingProxyType(dict(schedules)))
+        # lifetime.  The patterns and overrides lists are copied to
+        # immutable tuples — a shallow mapping copy alone would leave
+        # caller-owned lists reachable, and mutating one later would
+        # change is_present results.
+        object.__setattr__(
+            self,
+            "_patterns",
+            MappingProxyType(
+                {child_id: tuple(entries) for child_id, entries in patterns.items()}
+            ),
+        )
         object.__setattr__(
             self,
             "_overrides",
@@ -407,12 +462,22 @@ class PresenceEngine:
     def is_present(self, child_id: object, date: object) -> bool:
         """Return whether ``child_id`` is present on ``date``.
 
-        Overrides take precedence over the repeating pattern: when an
-        override covers the date, its flag IS the answer — including
-        for a child with no schedule at all.  The DAO layer guarantees
-        a child's overrides never overlap; if a snapshot still carries
-        two covering the same date, the one with the LATEST start date
-        wins (deterministic, and matches "the most specific swap wins").
+        Ordered, first match wins:
+
+        1. An override covering the date — its flag IS the answer,
+           including for a child with no pattern at all.  The DAO layer
+           guarantees a child's overrides never overlap; if a snapshot
+           still carries two covering the same date, the one with the
+           LATEST start date wins (deterministic, and matches "the most
+           specific swap wins").
+        2. Any ``away`` pattern covering the date — absent.
+        3. Any ``home`` pattern covering the date — present.
+        4. Otherwise: absent when the child has at least one ``home``
+           pattern (a home pattern lists the days the child IS here, so
+           an uncovered date is a day away — the retired single-schedule
+           semantics, which migration 9 carries across as ``home``
+           patterns unchanged), else present (no pattern, or ``away``
+           patterns only: the household default).
         """
         if isinstance(child_id, bool) or not isinstance(child_id, int):
             raise ValueError(f"child_id must be an integer, got {child_id!r}")
@@ -424,12 +489,16 @@ class PresenceEngine:
         if covering:
             winner = max(covering, key=lambda entry: entry.start_date)
             return winner.is_present
-        schedule = self._schedules.get(child_id)
-        if schedule is None:
-            # No schedule at all: present every day (household default).
+        patterns = self._patterns.get(child_id) or ()
+        if any(
+            pattern.kind == "away" and pattern.covers(target)
+            for pattern in patterns
+        ):
+            return False
+        homes = [pattern for pattern in patterns if pattern.kind == "home"]
+        if any(pattern.covers(target) for pattern in homes):
             return True
-        week = cycle_week_index(schedule, target)
-        return target.weekday() in schedule.pattern[week]
+        return not homes
 
     def next_present_dates(
         self,
@@ -442,7 +511,7 @@ class PresenceEngine:
         Walks forward from ``start_date`` (INCLUSIVE — a parent
         previewing "starting Monday" expects Monday itself when the
         child is present) checking :meth:`is_present` for every day,
-        so overrides and the pattern are honoured identically.  The
+        so overrides and the patterns are honoured identically.  The
         admin Schedule tab renders this preview so a parent can confirm
         a custody pattern is right before saving it.
 

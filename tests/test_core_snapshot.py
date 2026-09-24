@@ -36,7 +36,7 @@ from custom_components.nestquest.core.snapshot import (
 from custom_components.nestquest.core.dao_instances import QuestInstancesDao
 from custom_components.nestquest.core.dao_presence import (
     PresenceOverridesDao,
-    PresenceSchedulesDao,
+    PresencePatternsDao,
 )
 from custom_components.nestquest.core.db import NestQuestDatabase
 from custom_components.nestquest.core.materialize import materialize
@@ -116,14 +116,16 @@ async def test_instance_payload_shape_and_missed_omission() -> None:
 async def test_build_snapshot_explicit_values(hass, make_entry, tmp_path) -> None:
     """The builder produces the documented shape as literals, pinned in time.
 
-    Ada is AWAY today (a 2-week schedule whose absent week 0 covers today,
+    Ada is AWAY today (a 2-week home pattern whose empty week 0 covers today,
     plus a presence override marking her present on today+2) so
     ``present`` is False and ``next_present`` is the override date.  Her
     open quest due at 10:00 is OVERDUE under the pinned 12:00 ``now``.
     Bo's quest due at 17:00 is completed at 12:00 (on time) so its
     payload ``state`` is ``completed`` and ``on_time`` is True.  The first
-    scheduled active child is Ada, whose 2-week cycle anchored one day
-    before today puts ``cycle_day`` at 2.
+    patterned active child is Ada, whose FIRST (lowest id) pattern is a
+    2-week cycle anchored one day before today, putting ``cycle_day`` at
+    2; her second pattern (a 3-week one anchored today, covering no day)
+    must not drive the cycle day.
     """
     # A standalone core database (the integration owns none): the
     # builder and its seed run against it through the executor.
@@ -172,11 +174,24 @@ async def test_build_snapshot_explicit_values(hass, make_entry, tmp_path) -> Non
     # covers today, so she is absent today; an override marks her present
     # on today+2, so next_present resolves to that date and cycle_day is
     # ((today - (today-1)) % 14) + 1 == 2.
-    await PresenceSchedulesDao(database).upsert_by_child(
+    patterns = PresencePatternsDao(database)
+    await patterns.create(
         ada.id,
+        name="Home schedule",
+        kind="home",
         cycle_length_weeks=2,
         anchor_date=(today - datetime.timedelta(days=1)).isoformat(),
         pattern="|0,1,2,3,4,5,6",
+    )
+    # A later pattern covering no day: it changes no presence answer and,
+    # not being the first pattern, must not set cycle_day (it would be 1).
+    await patterns.create(
+        ada.id,
+        name="Placeholder away",
+        kind="away",
+        cycle_length_weeks=3,
+        anchor_date=today_iso,
+        pattern="||",
     )
     returns_date = today + datetime.timedelta(days=2)
     await PresenceOverridesDao(database).create(
