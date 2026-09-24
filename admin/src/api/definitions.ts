@@ -146,3 +146,29 @@ export async function updateDefinition(
 ): Promise<QuestDefinition> {
   return readJson<QuestDefinition>(await sendJson(`${DEFINITIONS_PATH}/${id}`, "PATCH", body));
 }
+
+export const OCCURRENCES_PREVIEW_PATH = `${DEFINITIONS_PATH}/occurrences-preview`;
+
+export interface OccurrencesPreviewOptions {
+  /** "YYYY-MM-DD"; the API defaults to its host's today. */
+  startDate?: string;
+  /** 1..50; the API defaults to 10. */
+  count?: number;
+}
+
+/**
+ * The next occurrence dates ("YYYY-MM-DD", ascending) for `rule`, computed by
+ * the same backend recurrence engine the materializer uses.
+ */
+export async function previewOccurrences(
+  rule: DefinitionRule,
+  options: OccurrencesPreviewOptions = {},
+): Promise<string[]> {
+  const body: { rule: DefinitionRule; start_date?: string; count?: number } = { rule };
+  if (options.startDate !== undefined) body.start_date = options.startDate;
+  if (options.count !== undefined) body.count = options.count;
+  const response = await readJson<{ dates: string[] }>(
+    await sendJson(OCCURRENCES_PREVIEW_PATH, "POST", body),
+  );
+  return response.dates;
+}

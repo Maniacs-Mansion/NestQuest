@@ -95,3 +95,17 @@ export function windowSummary(windows: Pick<DefinitionWindow, "window">[]): stri
     .map((w) => WINDOW_LABELS[w])
     .join(", ");
 }
+
+/**
+ * "2026-10-06" -> "Tue 6 Oct". The calendar date is read by its components
+ * and its weekday taken in UTC (as the Today tab does), so the printed day
+ * never shifts with the viewer's offset — `new Date("YYYY-MM-DD")` would.
+ */
+export function occurrenceLabel(iso: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!match) throw new Error(`Invalid calendar date: ${iso}`);
+  const [, year, month, day] = match.map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  // getUTCDay: 0 = Sunday; WEEKDAY_SHORT: 0 = Monday.
+  return `${WEEKDAY_SHORT[(date.getUTCDay() + 6) % 7]} ${day} ${MONTH_SHORT[month - 1]}`;
+}

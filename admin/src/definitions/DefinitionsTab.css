@@ -550,3 +550,12 @@
   opacity: 0.6;
   cursor: default;
 }
+
+.defs-preview {
+  margin-top: 8px;
+}
+
+.defs-preview--error {
+  color: var(--nq-a-ink-secondary);
+  font-style: italic;
+}

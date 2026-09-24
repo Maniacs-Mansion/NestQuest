@@ -1,8 +1,8 @@
 /**
  * Definitions ("Tasks") tab — list + edit sheet (design/ADMIN-SPEC.md §3.1–3.2).
  *
- * The icon picker (§3.3) and the occurrence preview are separate tasks: an
- * existing definition's icon is carried through unchanged by never sending it.
+ * The icon picker (§3.3) is a separate task: an existing definition's icon is
+ * carried through unchanged by never sending it.
  */
 import {
   useEffect,
@@ -17,6 +17,7 @@ import {
   createDefinition,
   fetchChildren,
   fetchDefinitions,
+  previewOccurrences,
   updateDefinition,
   type AdminChild,
   type DefinitionCreateBody,
@@ -32,6 +33,7 @@ import {
   WINDOW_LABELS,
   WINDOW_ORDER,
   assigneeSummary,
+  occurrenceLabel,
   recurrenceSummary,
   windowSummary,
 } from "./format";
@@ -65,6 +67,12 @@ const REPEATS_BY_RULE: Record<DefinitionRule["rule_type"], Repeats> = {
   yearly: "yearly",
   custom_days: "custom",
 };
+
+/** How many upcoming dates the edit sheet previews. */
+const PREVIEW_COUNT = 5;
+
+/** Quiet period after the last rule edit before the preview is requested. */
+const PREVIEW_DEBOUNCE_MS = 300;
 
 const WEEKDAY_LONG = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
@@ -327,6 +335,77 @@ function DefinitionRow({
 
 /* ── Edit sheet ─────────────────────────────────────────────────────── */
 
+type PreviewState =
+  | { kind: "idle" }
+  | { kind: "ready"; ruleKey: string; dates: string[] }
+  | { kind: "error"; ruleKey: string; message: string };
+
+/**
+ * The next few dates the backend would materialize for the draft's rule.
+ * `ruleKey` is the built rule serialized (null while the draft is invalid), so
+ * the request only goes out when the rule itself changes — debounced, and a
+ * superseded request's late response is dropped by its effect's cleanup.
+ * A result is tagged with the rule it answers and only shown while that rule
+ * is still the draft's, so a changed rule never shows the previous dates.
+ */
+function OccurrencePreview({ ruleKey }: { ruleKey: string | null }) {
+  const [preview, setPreview] = useState<PreviewState>({ kind: "idle" });
+
+  useEffect(() => {
+    if (ruleKey === null) {
+      setPreview({ kind: "idle" });
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      previewOccurrences(JSON.parse(ruleKey) as DefinitionRule, { count: PREVIEW_COUNT })
+        .then((dates) => {
+          if (!cancelled) setPreview({ kind: "ready", ruleKey, dates });
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          const detail =
+            error instanceof ApiForbiddenError ||
+            (error instanceof ApiRequestError && error.detail)
+              ? `: ${error.message}`
+              : ".";
+          setPreview({
+            kind: "error",
+            ruleKey,
+            message: `Upcoming dates unavailable${detail}`,
+          });
+        });
+    }, PREVIEW_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [ruleKey]);
+
+  if (preview.kind === "idle" || preview.ruleKey !== ruleKey) return null;
+  if (preview.kind === "error") {
+    return (
+      <p className="defs-hint defs-preview defs-preview--error" data-testid="occurrence-preview">
+        {preview.message}
+      </p>
+    );
+  }
+  let text: string;
+  if (preview.dates.length === 0) {
+    text = "No upcoming dates in the next year.";
+  } else {
+    const labels = preview.dates.map(occurrenceLabel);
+    // A full page means the rule keeps going past the last shown date.
+    if (preview.dates.length >= PREVIEW_COUNT) labels.push("…");
+    text = `Next: ${labels.join(" · ")}`;
+  }
+  return (
+    <p className="defs-hint defs-preview" data-testid="occurrence-preview" aria-live="polite">
+      {text}
+    </p>
+  );
+}
+
 function Field({ label, id, children }: { label: string; id: string; children: ReactNode }) {
   return (
     <div className="defs-field" role="group" aria-labelledby={id}>
@@ -411,6 +490,8 @@ function EditSheet({
     .filter((child) => draft.assigneeIds.includes(child.id))
     .map((child) => ({ id: child.id, display_name: child.display_name }));
   const orderedWindows = WINDOW_ORDER.filter((w) => draft.windows.includes(w));
+  const previewRule = buildRule(draft);
+  const previewKey = typeof previewRule === "string" ? null : JSON.stringify(previewRule);
 
   async function save(confirmed = false) {
     if (inFlight.current) return;
@@ -622,6 +703,7 @@ function EditSheet({
                 onChange={(e) => update({ dayOfMonth: e.target.value })}
               />
             ) : null}
+            <OccurrencePreview ruleKey={previewKey} />
           </Field>
 
           <Field label="Due time" id="defs-label-due">
