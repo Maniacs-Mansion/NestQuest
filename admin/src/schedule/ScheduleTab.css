@@ -1,0 +1,416 @@
+/* Schedule tab — compact density (design/ADMIN-SPEC.md §4). Mobile-first at
+   the 390x844 reference; on wider viewports the column is capped and centred. */
+
+.schedule-screen {
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.schedule-header {
+  background: var(--nq-a-surface);
+  border-bottom: 1px solid var(--nq-a-border);
+  padding: 14px 16px;
+}
+
+.schedule-title {
+  margin: 0;
+  font-size: var(--nq-a-size-screen);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.schedule-sub {
+  margin: 2px 0 0;
+  min-height: 1.4em;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--nq-a-ink-secondary);
+}
+
+/* Scroll column: 14px 16px, bottom 92px (set inline, ADMIN-SPEC §1). */
+.schedule-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nq-a-density-gap);
+  padding: 14px 16px;
+}
+
+.schedule-card {
+  background: var(--nq-a-surface);
+  border: 1px solid var(--nq-a-border);
+  border-radius: var(--nq-a-density-radius);
+}
+
+/* Child selector */
+.schedule-children {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.schedule-child-chip {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--nq-a-border);
+  border-radius: var(--nq-a-radius-pill);
+  background: var(--nq-a-surface);
+  color: var(--nq-a-ink-secondary);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.schedule-child-chip[aria-pressed="true"] {
+  border-color: var(--nq-brand-blue);
+  background: var(--nq-a-selected);
+  color: var(--nq-brand-blue);
+}
+
+/* Month grid card */
+.schedule-month {
+  padding: var(--nq-a-density-card-pad);
+}
+
+.schedule-month-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.schedule-month-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.schedule-chevrons {
+  display: flex;
+  gap: 4px;
+}
+
+.schedule-chevron {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--nq-a-border);
+  border-radius: 6px;
+  background: var(--nq-a-surface);
+  color: var(--nq-a-ink-secondary);
+  cursor: pointer;
+}
+
+.schedule-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+.schedule-weekday {
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--nq-a-ink-tertiary);
+}
+
+.schedule-day {
+  aspect-ratio: 1;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.schedule-day--home {
+  background: var(--nq-a-selected);
+  color: #201f7a;
+}
+
+.schedule-day--away {
+  background: var(--nq-a-page);
+  color: var(--nq-a-ink-secondary);
+}
+
+.schedule-day--override-away,
+.schedule-day--override-home {
+  background: var(--nq-a-warning-bg);
+  color: var(--nq-a-warning-ink);
+  border-color: var(--nq-a-warning-border);
+}
+
+/* An override that keeps the child home reads with a dashed border. */
+.schedule-day--override-home {
+  border-style: dashed;
+}
+
+.schedule-day--today {
+  background: var(--nq-brand-gradient);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 800;
+}
+
+.schedule-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.schedule-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--nq-a-ink-secondary);
+}
+
+.schedule-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+}
+
+/* Pattern editing controls */
+.schedule-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--nq-a-divider);
+}
+
+.schedule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: var(--nq-a-size-label);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--nq-a-ink-secondary);
+}
+
+.schedule-field input,
+.schedule-field select {
+  min-height: 36px;
+  padding: 0 8px;
+  border: 1px solid var(--nq-a-border);
+  border-radius: 6px;
+  background: var(--nq-a-surface);
+  color: var(--nq-a-ink);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.schedule-save {
+  min-height: 36px;
+  margin-left: auto;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--nq-a-density-radius);
+  background: var(--nq-brand-gradient);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.schedule-save:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.schedule-save-status {
+  margin: 8px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--nq-a-success);
+}
+
+.schedule-save-status--error {
+  color: var(--nq-a-danger-strong);
+}
+
+/* Presence pattern + overrides cards */
+.schedule-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.schedule-section-label {
+  margin: 6px 0 -2px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--nq-a-ink-secondary);
+}
+
+.schedule-text-action {
+  padding: 4px 0 0;
+  border: 0;
+  background: none;
+  color: var(--nq-brand-blue);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.schedule-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.schedule-list > li + li {
+  border-top: 1px solid var(--nq-a-divider);
+}
+
+.schedule-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--nq-a-tap-min);
+  padding: var(--nq-a-density-row-pad);
+}
+
+.schedule-row-glyph {
+  flex: none;
+  display: flex;
+  color: var(--nq-a-warning-ink);
+}
+
+.schedule-row-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.schedule-row-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.schedule-row-meta {
+  font-size: var(--nq-a-size-meta);
+  font-weight: 600;
+  color: var(--nq-a-ink-secondary);
+}
+
+.schedule-rule {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--nq-a-ink-secondary);
+}
+
+.schedule-icon-action {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: var(--nq-a-tap-min);
+  height: var(--nq-a-tap-min);
+  margin: -8px -10px -8px 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--nq-a-ink-tertiary);
+  cursor: pointer;
+}
+
+.schedule-empty {
+  padding: var(--nq-a-density-card-pad);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--nq-a-ink-secondary);
+}
+
+/* Loading / error */
+.schedule-status {
+  padding: 24px 13px;
+  background: var(--nq-a-surface);
+  border: 1px solid var(--nq-a-border);
+  border-radius: var(--nq-a-density-radius);
+  text-align: center;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--nq-a-ink-secondary);
+}
+
+.schedule-status--error {
+  color: var(--nq-a-danger-strong);
+}
+
+.schedule-status--error p {
+  margin: 0 0 10px;
+}
+
+.schedule-retry {
+  padding: 8px 16px;
+  border: 1px solid var(--nq-a-border);
+  border-radius: var(--nq-a-density-radius);
+  background: var(--nq-a-surface);
+  color: var(--nq-a-ink);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* Inline delete confirmation in an override row */
+.schedule-confirm {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.schedule-confirm-text {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--nq-a-ink-secondary);
+}
+
+.schedule-confirm-keep,
+.schedule-confirm-delete {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.schedule-confirm-keep {
+  border: 1px solid var(--nq-a-border);
+  background: var(--nq-a-surface);
+  color: var(--nq-a-ink);
+}
+
+.schedule-confirm-delete {
+  border: 0;
+  background: var(--nq-a-danger);
+  color: #fff;
+}
