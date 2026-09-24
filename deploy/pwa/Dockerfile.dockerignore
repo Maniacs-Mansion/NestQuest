@@ -1,0 +1,11 @@
+# Build-context filter for deploy/pwa/Dockerfile (BuildKit reads
+# <Dockerfile>.dockerignore in place of the root .dockerignore, which
+# excludes deploy/).  Only admin/ sources and nginx.conf enter the
+# build; local dependencies, build output and .env files never do.
+*
+!admin/
+!deploy/pwa/nginx.conf
+admin/node_modules
+admin/dist
+**/.env
+**/.env.*

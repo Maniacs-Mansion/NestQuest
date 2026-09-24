@@ -8,7 +8,7 @@ given, never their content.
 
 | Piece | Where | Real value |
 | --- | --- | --- |
-| API box (Docker host) | this repository's `deploy/` | `10.60.1.14`, port `8080` |
+| API box (Docker host) | this repository's `deploy/` | `10.60.1.14`, port `8080` (API), `8081` (admin PWA, section 10) |
 | Reverse proxy / TLS | shared Traefik on `nukapi-03` | `10.60.1.33` |
 | Public hostname | Cloudflare DNS | `nestquest.cubecraftlabs.com` |
 | Identity | Authentik | `https://auth.cubecraftlabs.com` |
@@ -57,12 +57,13 @@ section 5 depend on uid 999):
 
 ## 2. Compose
 
-`deploy/compose.yaml` defines two services and one named volume:
+`deploy/compose.yaml` defines three services and one named volume:
 
 | Service | Image | Role |
 | --- | --- | --- |
 | `api` | `nestquest-api:latest` (built, section 1) | FastAPI service on `8080`, healthcheck on `/health` |
 | `litestream` | `litestream/litestream:0.5.17` | Continuous SFTP backup of the database (section 7); starts only once `api` is healthy |
+| `pwa` | `nestquest-pwa:latest` (built from `deploy/pwa`, section 10) | Admin PWA served by nginx on `8081`; independent of the other two |
 
 - **Volume `nestquest-db`** is mounted at `/var/lib/nestquest` in both
   services. The database is `NESTQUEST_DB_PATH=/var/lib/nestquest/nestquest.db`
@@ -96,14 +97,18 @@ repository. What it must contain:
 
 | Router | Rule | Middleware | Service |
 | --- | --- | --- | --- |
-| panel | ``Host(`nestquest.cubecraftlabs.com`) && PathPrefix(`/api/v1/panel`)`` | `ipAllowList`, `sourceRange: ["10.60.1.80/32"]` (HA box only) | `http://10.60.1.14:8080` |
-| admin (everything else: `/health`, `/docs`, `/openapi.json`, `/api/v1/admin/*`) | ``Host(`nestquest.cubecraftlabs.com`)`` | none — public; the API itself enforces Authentik JWTs (section 4) | `http://10.60.1.14:8080` |
+| `nestquest-panel` (priority 200) | ``Host(`nestquest.cubecraftlabs.com`) && PathPrefix(`/api/v1/panel`)`` | `nestquest-panel-lan`: `ipAllowList`, `sourceRange: ["10.60.1.80/32"]` (HA box only) | `nestquest-api` → `http://10.60.1.14:8080` |
+| `nestquest-admin` (priority 100: `/api/v1/admin`, `/health`, `/openapi.json`, `/docs`) | ``Host(`nestquest.cubecraftlabs.com`) && (PathPrefix(`/api/v1/admin`) \|\| Path(`/health`) \|\| Path(`/openapi.json`) \|\| PathPrefix(`/docs`))`` | `nestquest-headers` — no source restriction; the API itself enforces Authentik JWTs (section 4) | `nestquest-api` → `http://10.60.1.14:8080` |
+| `nestquest-app` (priority 50: everything else — the admin PWA) | see section 10 | none at Traefik; nginx allow-lists the proxy | `nestquest-pwa` → `http://10.60.1.14:8081` |
 
-Both routers use the HTTPS entrypoint `websecure` with `tls.certResolver: myresolver`
-(HTTP is redirected to HTTPS by the shared Traefik). The panel router's
-rule is longer, so Traefik's default rule-length priority evaluates it
-before the catch-all admin router; if you set explicit priorities, keep
-panel higher.
+All routers use the HTTPS entrypoint `websecure` with `tls.certResolver: myresolver`
+(HTTP is redirected to HTTPS by the shared Traefik). Priorities are set
+explicitly so the order never depends on rule length: panel (200) above
+admin (100), and the PWA's `nestquest-app` router (50) below both. The
+admin router is scoped to `/api/v1/admin`, `/health`, `/openapi.json`
+and `/docs` — a bare ``Host(...)`` rule at a higher priority would
+swallow `/` and every PWA route. Any other `/api/*` path matches no
+router (the app router excludes `/api`), so Traefik answers `404`.
 
 Reference shape, to rebuild the file if it is ever lost (entrypoint names
 must match the shared Traefik's static config on nukapi-03):
@@ -113,26 +118,42 @@ http:
   routers:
     nestquest-panel:
       rule: "Host(`nestquest.cubecraftlabs.com`) && PathPrefix(`/api/v1/panel`)"
+      priority: 200
       entryPoints: [websecure]
-      middlewares: [nestquest-panel-allowlist]
+      middlewares: [nestquest-panel-lan]
       service: nestquest-api
       tls:
         certResolver: myresolver
     nestquest-admin:
-      rule: "Host(`nestquest.cubecraftlabs.com`)"
+      rule: "Host(`nestquest.cubecraftlabs.com`) && (PathPrefix(`/api/v1/admin`) || Path(`/health`) || Path(`/openapi.json`) || PathPrefix(`/docs`))"
+      priority: 100
       entryPoints: [websecure]
+      middlewares: [nestquest-headers]
       service: nestquest-api
       tls:
         certResolver: myresolver
+    nestquest-app:
+      rule: "Host(`nestquest.cubecraftlabs.com`) && !PathPrefix(`/api`) && !Path(`/health`) && !Path(`/openapi.json`) && !PathPrefix(`/docs`)"
+      priority: 50
+      entryPoints: [websecure]
+      service: nestquest-pwa
+      tls:
+        certResolver: myresolver
   middlewares:
-    nestquest-panel-allowlist:
+    nestquest-panel-lan:
       ipAllowList:
         sourceRange: ["10.60.1.80/32"]
+    nestquest-headers:
+      # headers middleware; copy its definition from the live file
   services:
     nestquest-api:
       loadBalancer:
         servers:
           - url: "http://10.60.1.14:8080"
+    nestquest-pwa:
+      loadBalancer:
+        servers:
+          - url: "http://10.60.1.14:8081"
 ```
 
 **Certificates.** `myresolver` is the shared Traefik's ACME (Let's
@@ -453,3 +474,80 @@ To obtain `$ADMIN_JWT`: sign in to the admin PWA as the user, open the
 browser developer tools, and copy the session-storage value
 `nestquest.access_token`. Tokens are short-lived and are credentials —
 do not store them.
+
+## 10. Admin PWA hosting
+
+The admin PWA (`admin/`, a Vite + React single-page app) is served from
+the API box by the compose service **`pwa`**: nginx on container port
+`80`, published on `${NESTQUEST_BIND_ADDRESS:-127.0.0.1}:8081` (on the API
+box `10.60.1.14:8081`). Traefik sends every path of
+`nestquest.cubecraftlabs.com` that is not the API to it.
+
+**Image** — `deploy/pwa/Dockerfile`, built from the **repository root**
+(it needs `admin/`); `deploy/pwa/Dockerfile.dockerignore` limits the
+context to `admin/` (without `node_modules`, `dist` or `.env` files) and
+`deploy/pwa/nginx.conf`.
+
+- Stage 1, `node:22-alpine` (pinned by digest): `npm ci`, then
+  `npm run build` with the three `VITE_*` build args below. Vite bakes
+  them into the bundle, so **changing any of them needs a rebuild**. The
+  build fails if any is empty.
+- Stage 2, `nginx:alpine` pinned to
+  `sha256:1ed1b0e1d7652937d6cbdaf4018c7b6fc009a7dd6c3047351e2eddda745de43f`
+  (nginx 1.31.6): the built `dist/` in `/usr/share/nginx/html` and
+  `deploy/pwa/nginx.conf` as `conf.d/default.conf`.
+
+**Build args** — compose reads them from `deploy/.env` (documented in
+`deploy/.env.example`). They are **public values, not secrets**: the
+Authentik application is a PKCE client with no client secret.
+
+| `deploy/.env` variable | Build arg | Production value |
+| --- | --- | --- |
+| `NESTQUEST_AUTHENTIK_CLIENT_ID` | `VITE_AUTHENTIK_CLIENT_ID` | client id of the Authentik NestQuest application (Authentik admin → Applications → Providers) |
+| `NESTQUEST_AUTHENTIK_ISSUER` | `VITE_AUTHENTIK_ISSUER` | `https://auth.cubecraftlabs.com/application/o/nestquest/` |
+| `NESTQUEST_API_BASE_URL` | `VITE_API_BASE_URL` | `https://nestquest.cubecraftlabs.com` |
+
+The Authentik application's redirect URI must include
+`https://nestquest.cubecraftlabs.com/auth/callback`.
+
+**nginx** (`deploy/pwa/nginx.conf`):
+
+- `allow 10.60.1.33; allow 10.60.1.14; deny all;` — only Traefik on
+  nukapi-03 and the API box itself get content; any other source gets
+  `403`, even with the port reachable on the LAN. Checks run on the API
+  box must use its LAN address (`10.60.1.14:8081`), not `127.0.0.1`.
+- SPA fallback: unknown paths (e.g. `/auth/callback`) serve `index.html`;
+  `/assets/*` (content-hashed, cached for a year) returns a real `404`
+  when missing.
+- `/sw.js` and `/manifest.webmanifest` (`application/manifest+json`) are
+  served from the site root with `Cache-Control: no-cache`, as is
+  `index.html`, so a new release's service worker is picked up.
+
+Build and start (the `api` and `litestream` services are unaffected):
+
+    dc build pwa
+    dc up -d pwa
+    dc ps pwa      # "Up"
+
+**Traefik router** — in `config/dynamic/nestquest-ccl.yml` on nukapi-03
+(reference shape in section 3):
+
+| Router | Rule | Priority | Service |
+| --- | --- | --- | --- |
+| `nestquest-app` | ``Host(`nestquest.cubecraftlabs.com`) && !PathPrefix(`/api`) && !Path(`/health`) && !Path(`/openapi.json`) && !PathPrefix(`/docs`)`` | `50` — below `nestquest-admin` (100) and `nestquest-panel` (200) | `nestquest-pwa` → `http://10.60.1.14:8081` |
+
+Same `websecure` entrypoint and `myresolver` certificate as the API
+routers; no Traefik middleware (nginx enforces the source allow-list).
+The file provider reloads the dynamic file on save.
+
+**Verification** (in addition to section 9):
+
+| # | Check | Command | Expect |
+| --- | --- | --- | --- |
+| 1 | PWA root over TLS | `curl -s -w '\n%{http_code}\n' https://nestquest.cubecraftlabs.com/ \| tail -3` | `200`, the `NestQuest Admin` shell |
+| 2 | Client route fallback | `curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://nestquest.cubecraftlabs.com/auth/callback` | `200 text/html` |
+| 3 | Manifest and worker | `curl -s -o /dev/null -w '%{http_code} %{content_type}\n' https://nestquest.cubecraftlabs.com/manifest.webmanifest` and the same for `/sw.js` | `200 application/manifest+json`, `200 application/javascript` |
+| 4 | API still routed to the API | `curl -s -o /dev/null -w '%{http_code}\n' https://nestquest.cubecraftlabs.com/health` | `200` (`{"status":"ok"}`, not HTML) |
+| 5 | Panel refused externally | section 9 check 4 | `403` |
+| 6 | Non-Traefik source refused | from a LAN machine other than `10.60.1.33`/`10.60.1.14`: `curl -s -o /dev/null -w '%{http_code}\n' http://10.60.1.14:8081/` | `403` (nginx `deny all`) |
+| 7 | Proxy source allowed | on `10.60.1.14`: `curl -s -o /dev/null -w '%{http_code}\n' http://10.60.1.14:8081/` | `200` |
