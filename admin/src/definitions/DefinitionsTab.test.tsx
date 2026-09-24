@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import DefinitionsTab from "./DefinitionsTab";
 import type { AdminChild, DefinitionRule, QuestDefinition } from "../api/definitions";
 import { storeTokens } from "../auth/oidc";
@@ -97,19 +97,27 @@ interface Call {
   body: unknown;
 }
 
+const PREVIEW_PATH = "/api/v1/admin/quest-definitions/occurrences-preview";
+
+/** Answers an occurrence-preview request; the default serves no dates. */
+type PreviewHandler = (body: { rule: DefinitionRule; count?: number }) => Promise<Response>;
+
 /**
  * A stub of the admin API: serves the list and children, records writes, and
- * lets a test queue a response for the next write.
+ * lets a test queue a response for the next write. Occurrence previews are
+ * reads (recorded, never counted as writes) answered by `setPreview`.
  */
 function fakeApi(initial: QuestDefinition[]) {
   let definitions = [...initial];
   const calls: Call[] = [];
   let nextWrite: Response | null = null;
+  let preview: PreviewHandler = async () => jsonResponse({ dates: [] });
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const path = new URL(String(input), "http://localhost").pathname;
     const method = init.method ?? "GET";
     const body = typeof init.body === "string" ? JSON.parse(init.body) : null;
     calls.push({ method, path, body });
+    if (method === "POST" && path === PREVIEW_PATH) return preview(body);
     if (method === "GET" && path === "/api/v1/admin/quest-definitions") {
       return jsonResponse({ definitions });
     }
@@ -170,7 +178,11 @@ function fakeApi(initial: QuestDefinition[]) {
   return {
     fetchMock,
     calls,
-    writes: () => calls.filter((c) => c.method !== "GET"),
+    writes: () => calls.filter((c) => c.method !== "GET" && c.path !== PREVIEW_PATH),
+    previews: () => calls.filter((c) => c.path === PREVIEW_PATH),
+    setPreview: (handler: PreviewHandler) => {
+      preview = handler;
+    },
     listFetches: () =>
       calls.filter((c) => c.method === "GET" && c.path === "/api/v1/admin/quest-definitions")
         .length,
@@ -640,5 +652,178 @@ describe("DefinitionsTab", () => {
   it("scroll column carries the 92px bottom padding", async () => {
     await renderReady();
     expect(screen.getByTestId("definitions-scroll").style.paddingBottom).toBe("92px");
+  });
+});
+
+/* ── Occurrence preview ─────────────────────────────────────────────── */
+
+/** Past the sheet's 300 ms preview debounce. */
+function settleDebounce(): Promise<void> {
+  return act(() => new Promise<void>((resolve) => setTimeout(resolve, 400)));
+}
+
+function previewText(): string | null {
+  return screen.queryByTestId("occurrence-preview")?.textContent ?? null;
+}
+
+/** BINS' rule (every 2 weeks on Mon, Thu) from 2026-10-05. */
+const BINS_DATES = ["2026-10-05", "2026-10-08", "2026-10-19", "2026-10-22", "2026-11-02"];
+/** The same rule on Tuesdays only. */
+const TUESDAY_DATES = ["2026-10-06", "2026-10-20", "2026-11-03", "2026-11-17", "2026-12-01"];
+
+function deferred() {
+  let resolve!: (response: Response) => void;
+  const promise = new Promise<Response>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+describe("DefinitionsTab occurrence preview", () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("previews a weekly rule's next dates in plain language from the API", async () => {
+    await renderReady();
+    api.setPreview(async () => jsonResponse({ dates: BINS_DATES }));
+    fireEvent.click(screen.getByTestId("definition-11"));
+
+    await waitFor(() =>
+      expect(previewText()).toBe(
+        "Next: Mon 5 Oct · Thu 8 Oct · Mon 19 Oct · Thu 22 Oct · Mon 2 Nov · …",
+      ),
+    );
+    expect(api.previews()).toEqual([
+      {
+        method: "POST",
+        path: "/api/v1/admin/quest-definitions/occurrences-preview",
+        body: { rule: BINS.rule, count: 5 },
+      },
+    ]);
+  });
+
+  it("re-requests once per rule change, debounced, and not for non-rule edits", async () => {
+    await renderReady();
+    api.setPreview(async ({ rule }) =>
+      jsonResponse({ dates: rule.weekday_set?.includes(0) ? BINS_DATES : TUESDAY_DATES }),
+    );
+    fireEvent.click(screen.getByTestId("definition-11"));
+    const s = sheet();
+    await waitFor(() => expect(previewText()).toContain("Mon 5 Oct"));
+
+    // A title edit leaves the rule alone: no new request.
+    fireEvent.change(within(s).getByRole("textbox", { name: "Title" }), {
+      target: { value: "Bins" },
+    });
+    // Three rule edits in quick succession collapse into one request.
+    const days = within(s).getByRole("group", { name: "Days" });
+    fireEvent.click(within(days).getByRole("button", { name: "Monday" }));
+    fireEvent.click(within(days).getByRole("button", { name: "Thursday" }));
+    fireEvent.click(within(days).getByRole("button", { name: "Tuesday" }));
+
+    await waitFor(() =>
+      expect(previewText()).toBe(
+        "Next: Tue 6 Oct · Tue 20 Oct · Tue 3 Nov · Tue 17 Nov · Tue 1 Dec · …",
+      ),
+    );
+    await settleDebounce();
+    expect(api.previews()).toHaveLength(2);
+    expect(api.previews()[1].body).toEqual({
+      rule: { ...BINS.rule, weekday_set: [1] },
+      count: 5,
+    });
+
+    // An interval change is a rule change too.
+    fireEvent.change(within(s).getByRole("spinbutton", { name: "Interval" }), {
+      target: { value: "1" },
+    });
+    await waitFor(() => expect(api.previews()).toHaveLength(3));
+    expect((api.previews()[2].body as { rule: DefinitionRule }).rule.interval).toBe(1);
+  });
+
+  it("a stale response resolving after a newer one does not overwrite it", async () => {
+    await renderReady();
+    const pending: ReturnType<typeof deferred>[] = [];
+    api.setPreview(() => {
+      const next = deferred();
+      pending.push(next);
+      return next.promise;
+    });
+    fireEvent.click(screen.getByTestId("definition-11"));
+    await waitFor(() => expect(pending).toHaveLength(1));
+
+    const days = within(sheet()).getByRole("group", { name: "Days" });
+    fireEvent.click(within(days).getByRole("button", { name: "Monday" }));
+    fireEvent.click(within(days).getByRole("button", { name: "Thursday" }));
+    fireEvent.click(within(days).getByRole("button", { name: "Tuesday" }));
+    await waitFor(() => expect(pending).toHaveLength(2));
+
+    await act(async () => {
+      pending[1].resolve(jsonResponse({ dates: TUESDAY_DATES }));
+    });
+    await waitFor(() => expect(previewText()).toContain("Tue 6 Oct"));
+    await act(async () => {
+      pending[0].resolve(jsonResponse({ dates: BINS_DATES }));
+    });
+    await settleDebounce();
+    expect(previewText()).toBe(
+      "Next: Tue 6 Oct · Tue 20 Oct · Tue 3 Nov · Tue 17 Nov · Tue 1 Dec · …",
+    );
+  });
+
+  it("a failed preview shows a non-blocking message and the sheet still saves", async () => {
+    await renderReady();
+    api.setPreview(async () => jsonResponse({ detail: "rule rejected" }, 422));
+    fireEvent.click(screen.getByTestId("definition-10"));
+
+    await waitFor(() => expect(previewText()).toBe("Upcoming dates unavailable: rule rejected"));
+    expect(screen.queryByTestId("sheet-error")).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(within(sheet()).getByRole("button", { name: "Save changes" }));
+    });
+    expect(api.writes()).toHaveLength(1);
+    expect(api.writes()[0].method).toBe("PATCH");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("an incomplete draft does not call the preview endpoint", async () => {
+    await renderReady();
+    api.setPreview(async () => jsonResponse({ dates: TUESDAY_DATES }));
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    const s = sheet();
+    fireEvent.change(within(s).getByRole("combobox", { name: "Repeats" }), {
+      target: { value: "weekly" },
+    });
+    // Clear the default weekday: a weekly rule with no days is incomplete.
+    const days = within(s).getByRole("group", { name: "Days" });
+    for (const day of within(days).getAllByRole("button")) {
+      if (day.getAttribute("aria-pressed") === "true") fireEvent.click(day);
+    }
+    await settleDebounce();
+    expect(api.previews()).toHaveLength(0);
+    expect(previewText()).toBeNull();
+
+    // An unparseable interval is incomplete too.
+    fireEvent.click(within(days).getByRole("button", { name: "Tuesday" }));
+    fireEvent.change(within(s).getByRole("spinbutton", { name: "Interval" }), {
+      target: { value: "" },
+    });
+    await settleDebounce();
+    expect(api.previews()).toHaveLength(0);
+
+    fireEvent.change(within(s).getByRole("spinbutton", { name: "Interval" }), {
+      target: { value: "2" },
+    });
+    await waitFor(() => expect(previewText()).toContain("Tue 6 Oct"));
+    expect(api.previews()).toHaveLength(1);
   });
 });
