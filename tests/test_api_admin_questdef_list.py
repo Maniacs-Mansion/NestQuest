@@ -137,6 +137,7 @@ async def test_admin_lists_active_and_inactive_definitions_with_full_shape(
                 "description": "Put everything back where it belongs.",
                 "icon": "toy-box",
                 "is_active": True,
+                "skip_on_away": True,
                 "rule": {
                     "rule_type": "weekly",
                     "interval": 1,
@@ -160,6 +161,7 @@ async def test_admin_lists_active_and_inactive_definitions_with_full_shape(
                 "description": None,
                 "icon": None,
                 "is_active": False,
+                "skip_on_away": True,
                 "rule": {
                     "rule_type": "daily",
                     "interval": 1,
@@ -207,6 +209,53 @@ async def test_list_items_match_the_create_response_shape(
 
     assert response.status_code == 200
     assert response.json() == {"definitions": [created.json()]}
+
+
+async def test_skip_on_away_round_trips_true_and_false_through_list(
+    admin_client: object,
+) -> None:
+    """skip_on_away posted true, false, or omitted lists back as stored."""
+    child = await admin_client.post(
+        "/api/v1/admin/children",
+        json={"display_name": "Cleo"},
+        headers=_admin_headers(),
+    )
+    child_id = child.json()["id"]
+
+    async def create(title: str, extra: dict[str, object]) -> dict:
+        response = await admin_client.post(
+            LIST_PATH,
+            json={
+                "title": title,
+                "rule": {
+                    "rule_type": "daily",
+                    "interval": 1,
+                    "start_date": "2026-03-01",
+                },
+                "assignee_child_ids": [child_id],
+                "windows": ["morning"],
+                **extra,
+            },
+            headers=_admin_headers(),
+        )
+        assert response.status_code == 201
+        return response.json()
+
+    skipping = await create("Skip when away", {"skip_on_away": True})
+    keeping = await create("Keep when away", {"skip_on_away": False})
+    defaulted = await create("Default", {})
+    assert skipping["skip_on_away"] is True
+    assert keeping["skip_on_away"] is False
+    assert defaulted["skip_on_away"] is True
+
+    response = await admin_client.get(LIST_PATH, headers=_admin_headers())
+
+    assert response.status_code == 200
+    listed = {item["id"]: item for item in response.json()["definitions"]}
+    assert listed[skipping["id"]]["skip_on_away"] is True
+    assert listed[keeping["id"]]["skip_on_away"] is False
+    assert listed[defaulted["id"]]["skip_on_away"] is True
+    assert response.json() == {"definitions": [skipping, keeping, defaulted]}
 
 
 async def test_empty_household_lists_no_definitions(

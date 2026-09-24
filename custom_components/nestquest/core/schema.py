@@ -257,7 +257,8 @@ QUEST_DEFINITIONS_TABLE_SQL = """(
     schedule_rule_id INTEGER NOT NULL REFERENCES schedule_rules(id),
     due_time TEXT,
     is_active INTEGER NOT NULL DEFAULT 1 CHECK (typeof(is_active) = 'integer' AND is_active IN (0, 1)),
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    skip_on_away INTEGER NOT NULL DEFAULT 1
 )"""
 
 SCHEMA_V1_QUEST_DEFINITIONS_DDL: list[str] = [

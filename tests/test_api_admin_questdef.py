@@ -215,6 +215,7 @@ async def test_create_persists_definition_with_assignees_and_windows(
         "description",
         "icon",
         "is_active",
+        "skip_on_away",
         "rule",
         "assignees",
         "windows",
@@ -223,6 +224,7 @@ async def test_create_persists_definition_with_assignees_and_windows(
     assert payload["description"] == "Put everything back where it belongs."
     assert payload["icon"] == "toy-box"
     assert payload["is_active"] is True
+    assert payload["skip_on_away"] is True
     assert payload["rule"] == _weekly_rule_dict()
     assert {a["id"]: a["display_name"] for a in payload["assignees"]} == {
         ada: "Ada",
@@ -522,6 +524,58 @@ async def test_edit_rejections_are_422_and_change_nothing(
 
 
 # --- set_active -------------------------------------------------------------
+
+
+async def test_edit_toggles_skip_on_away_and_omission_keeps_it(
+    admin_questdefs: SimpleNamespace,
+) -> None:
+    """A supplied skip_on_away persists; an edit omitting it keeps it."""
+    client = admin_questdefs.client
+    dao = _dao_rules.QuestDefinitionsDao(admin_questdefs.database)
+    ada = (await _create_children(client, ("Ada",)))[0]
+    created = await _create_definition(client, [ada])
+    assert created.status_code == 201
+    definition_id = created.json()["id"]
+    assert created.json()["skip_on_away"] is True
+
+    toggled_off = await client.patch(
+        f"/api/v1/admin/quest-definitions/{definition_id}",
+        json={"skip_on_away": False},
+        headers=_admin_headers(),
+    )
+    assert toggled_off.status_code == 200
+    assert toggled_off.json()["skip_on_away"] is False
+    assert (await dao.get(definition_id)).skip_on_away is False
+
+    # An edit that omits the flag leaves the stored False untouched.
+    renamed = await client.patch(
+        f"/api/v1/admin/quest-definitions/{definition_id}",
+        json={"title": "Tidy the den properly"},
+        headers=_admin_headers(),
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["skip_on_away"] is False
+    stored = await dao.get(definition_id)
+    assert stored.title == "Tidy the den properly"
+    assert stored.skip_on_away is False
+
+    toggled_on = await client.patch(
+        f"/api/v1/admin/quest-definitions/{definition_id}",
+        json={"skip_on_away": True},
+        headers=_admin_headers(),
+    )
+    assert toggled_on.status_code == 200
+    assert toggled_on.json()["skip_on_away"] is True
+    assert (await dao.get(definition_id)).skip_on_away is True
+
+    # A non-boolean value is a malformed body: 422, nothing changes.
+    rejected = await client.patch(
+        f"/api/v1/admin/quest-definitions/{definition_id}",
+        json={"skip_on_away": "sometimes"},
+        headers=_admin_headers(),
+    )
+    assert rejected.status_code == 422
+    assert (await dao.get(definition_id)).skip_on_away is True
 
 
 async def test_set_active_toggles_the_flag_and_the_definition_survives(

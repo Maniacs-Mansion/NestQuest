@@ -322,6 +322,7 @@ def test_quest_definitions_columns_types_and_constraints(tmp_path) -> None:
             ("due_time", "TEXT", 0, None, 0),
             ("is_active", "INTEGER", 1, "1", 0),
             ("created_at", "TEXT", 1, None, 0),
+            ("skip_on_away", "INTEGER", 1, "1", 0),
         ]
     finally:
         _run(database.close())

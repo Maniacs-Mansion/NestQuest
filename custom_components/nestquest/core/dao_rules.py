@@ -152,6 +152,7 @@ class QuestDefinitionRecord:
     due_time: str | None
     is_active: bool
     created_at: str
+    skip_on_away: bool
 
 
 @dataclass(frozen=True)
@@ -187,7 +188,7 @@ _RULE_COLUMNS = (
 )
 _DEFINITION_COLUMNS = (
     "id, title, description, icon, schedule_rule_id, due_time, "
-    "is_active, created_at"
+    "is_active, created_at, skip_on_away"
 )
 _WINDOW_COLUMNS = "definition_id, window, due_time"
 
@@ -216,6 +217,7 @@ def _definition_from_row(row: tuple) -> QuestDefinitionRecord:
         due_time=row[5],
         is_active=bool(row[6]),
         created_at=row[7],
+        skip_on_away=bool(row[8]),
     )
 
 
@@ -632,6 +634,7 @@ class QuestDefinitionsDao:
         due_time: str | None = None,
         is_active: bool = True,
         assignee_child_ids: list[int] | None = None,
+        skip_on_away: bool = True,
     ) -> QuestDefinitionRecord:
         """Insert one definition and return the record as stored.
 
@@ -652,7 +655,8 @@ class QuestDefinitionsDao:
                 result = await self._database.execute(
                     "INSERT INTO quest_definitions (title, description, "
                     "icon, schedule_rule_id, due_time, is_active, "
-                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "created_at, skip_on_away) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         title,
                         description,
@@ -661,6 +665,7 @@ class QuestDefinitionsDao:
                         due_time,
                         int(is_active),
                         created_at,
+                        int(skip_on_away),
                     ),
                 )
                 definition_id = result.lastrowid
@@ -684,6 +689,7 @@ class QuestDefinitionsDao:
         *,
         description: str | None = None,
         icon: str | None = None,
+        skip_on_away: bool = True,
     ) -> QuestDefinitionSnapshot:
         """Insert a rule, definition, assignees and windows atomically.
 
@@ -721,8 +727,18 @@ class QuestDefinitionsDao:
                 result = await self._database.execute(
                     "INSERT INTO quest_definitions (title, description, "
                     "icon, schedule_rule_id, due_time, is_active, "
-                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (title, description, icon, rule_id, None, 1, created_at),
+                    "created_at, skip_on_away) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        title,
+                        description,
+                        icon,
+                        rule_id,
+                        None,
+                        1,
+                        created_at,
+                        int(skip_on_away),
+                    ),
                 )
                 definition_id = result.lastrowid
                 for child_id in assignee_child_ids:
@@ -764,6 +780,7 @@ class QuestDefinitionsDao:
         icon: str | None | object = _UNSET,
         rule: ScheduleRuleStorage | object = _UNSET,
         windows: list[tuple[str, str | None]] | object = _UNSET,
+        skip_on_away: bool | object = _UNSET,
     ) -> QuestDefinitionSnapshot:
         """Edit a definition's metadata, rule and windows atomically.
 
@@ -774,9 +791,10 @@ class QuestDefinitionsDao:
         ``_UNSET`` meaning "leave this field alone"; ``None`` writes SQL
         NULL so optional metadata (description, icon) can be cleared.
 
-        - ``title``/``description``/``icon`` update the definition row
-          in place; the definition-level ``due_time`` column is never
-          written (per-window due times supersede it, D-008).
+        - ``title``/``description``/``icon``/``skip_on_away`` update the
+          definition row in place; the definition-level ``due_time``
+          column is never written (per-window due times supersede it,
+          D-008).
         - ``rule`` (a pre-validated :class:`ScheduleRuleStorage`)
           overwrites the referenced ``schedule_rules`` row in place: the
           definition keeps its ``schedule_rule_id``, so no new or
@@ -809,6 +827,9 @@ class QuestDefinitionsDao:
                     if value is not _UNSET:
                         assignments.append(f"{column} = ?")
                         parameters.append(value)
+                if skip_on_away is not _UNSET:
+                    assignments.append("skip_on_away = ?")
+                    parameters.append(int(skip_on_away))
                 if assignments:
                     parameters.append(definition_id)
                     await self._database.execute(
