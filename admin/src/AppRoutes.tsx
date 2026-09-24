@@ -12,7 +12,7 @@ import {
   handleCallback,
   isAuthenticated,
 } from "./auth/oidc";
-import { ApiForbiddenError, apiFetch } from "./api/client";
+import { ApiForbiddenError, ApiUnauthorizedError, apiFetch } from "./api/client";
 import AdminShell from "./App";
 
 type Screen =
@@ -21,18 +21,28 @@ type Screen =
   | { kind: "config-error"; message: string }
   | { kind: "auth-error"; message: string }
   | { kind: "refusal"; message: string }
+  | { kind: "probe-error"; message: string }
   | { kind: "app" };
 
 function currentPath(): string {
   return window.location.pathname.replace(/\/+$/, "") || "/";
 }
 
+const ADMIN_PROBE_PATH = "/api/v1/admin/ping";
+
 async function probeApi(setScreen: (screen: Screen) => void) {
-  // A cheap authenticated probe so a 403 surfaces as an explicit refusal
-  // right after login instead of a silent empty shell.
+  // The admin plane's authorization probe: only a 2xx enters the shell, so a
+  // non-admin (403) sees the explicit refusal and any other failure an error.
   try {
-    await apiFetch("/api/v1/children", {}, config);
-    setScreen({ kind: "app" });
+    const response = await apiFetch(ADMIN_PROBE_PATH, {}, config);
+    if (response.ok) {
+      setScreen({ kind: "app" });
+      return;
+    }
+    setScreen({
+      kind: "probe-error",
+      message: `The admin API answered ${response.status}. The admin console cannot load.`,
+    });
   } catch (error) {
     if (error instanceof ConfigError) {
       setScreen({ kind: "config-error", message: error.message });
@@ -42,9 +52,15 @@ async function probeApi(setScreen: (screen: Screen) => void) {
       setScreen({ kind: "refusal", message: error.message });
       return;
     }
-    // Network or other failures still allow the shell to render; API screens
-    // handle their own errors in later tasks.
-    setScreen({ kind: "app" });
+    if (error instanceof ApiUnauthorizedError) {
+      // apiFetch has already started the login redirect.
+      setScreen({ kind: "login" });
+      return;
+    }
+    setScreen({
+      kind: "probe-error",
+      message: "The admin API could not be reached. Check your connection and try again.",
+    });
   }
 }
 
@@ -165,6 +181,25 @@ export default function AppRoutes() {
         <div className="admin-refusal" role="alert" data-testid="refusal-screen">
           <h1>Access refused</h1>
           <p>{screen.message}</p>
+          <button type="button" onClick={() => { clearAuth(); window.history.replaceState({}, "", "/"); setScreen({ kind: "login" }); }}>
+            Sign out
+          </button>
+        </div>
+      );
+    case "probe-error":
+      return (
+        <div className="admin-error" role="alert" data-testid="probe-error-screen">
+          <h1>Admin console unavailable</h1>
+          <p>{screen.message}</p>
+          <button
+            type="button"
+            onClick={() => {
+              setScreen({ kind: "loading" });
+              void probeApi(setScreen);
+            }}
+          >
+            Retry
+          </button>
           <button type="button" onClick={() => { clearAuth(); window.history.replaceState({}, "", "/"); setScreen({ kind: "login" }); }}>
             Sign out
           </button>
