@@ -749,6 +749,97 @@ describe("DefinitionsTab occurrence preview", () => {
     expect((api.previews()[2].body as { rule: DefinitionRule }).rule.interval).toBe(1);
   });
 
+  it("window and assignee edits never request, and a rule edit waits out the debounce", async () => {
+    await renderReady();
+    api.setPreview(async () => jsonResponse({ dates: BINS_DATES }));
+    fireEvent.click(screen.getByTestId("definition-11"));
+    const s = sheet();
+    await waitFor(() => expect(previewText()).toContain("Mon 5 Oct"));
+    expect(api.previews()).toHaveLength(1);
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    // Windows and assignees are not part of the rule.
+    fireEvent.click(within(s).getByRole("button", { name: "Morning" }));
+    fireEvent.click(within(s).getByRole("button", { name: /Assigned children/ }));
+    fireEvent.click(within(s).getByRole("checkbox", { name: "Maeve" }));
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(api.previews()).toHaveLength(1);
+    expect(previewText()).toContain("Mon 5 Oct");
+
+    // A rule edit is not requested until the 300 ms debounce elapses.
+    const days = within(s).getByRole("group", { name: "Days" });
+    fireEvent.click(within(days).getByRole("button", { name: "Tuesday" }));
+    await act(async () => {
+      vi.advanceTimersByTime(299);
+    });
+    expect(api.previews()).toHaveLength(1);
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(api.previews()).toHaveLength(2);
+    expect((api.previews()[1].body as { rule: DefinitionRule }).rule.weekday_set).toEqual([
+      0, 1, 3,
+    ]);
+  });
+
+  it("a rule edit hides the previous rule's dates until its own response arrives", async () => {
+    await renderReady();
+    const pending: ReturnType<typeof deferred>[] = [];
+    api.setPreview(() => {
+      const next = deferred();
+      pending.push(next);
+      return next.promise;
+    });
+    fireEvent.click(screen.getByTestId("definition-11"));
+    await waitFor(() => expect(pending).toHaveLength(1));
+    await act(async () => {
+      pending[0].resolve(jsonResponse({ dates: BINS_DATES }));
+    });
+    await waitFor(() => expect(previewText()).toContain("Mon 5 Oct"));
+
+    const days = within(sheet()).getByRole("group", { name: "Days" });
+    fireEvent.click(within(days).getByRole("button", { name: "Monday" }));
+    // Within the debounce: the old dates are already gone.
+    expect(previewText()).toBeNull();
+    // Request in flight: still nothing shown for the new rule.
+    await waitFor(() => expect(pending).toHaveLength(2));
+    expect(previewText()).toBeNull();
+
+    await act(async () => {
+      pending[1].resolve(jsonResponse({ dates: ["2026-10-08", "2026-10-22"] }));
+    });
+    await waitFor(() => expect(previewText()).toBe("Next: Thu 8 Oct · Thu 22 Oct"));
+  });
+
+  it("a rule edit hides the previous rule's error until its own response arrives", async () => {
+    await renderReady();
+    const pending: ReturnType<typeof deferred>[] = [];
+    api.setPreview(() => {
+      const next = deferred();
+      pending.push(next);
+      return next.promise;
+    });
+    fireEvent.click(screen.getByTestId("definition-11"));
+    await waitFor(() => expect(pending).toHaveLength(1));
+    await act(async () => {
+      pending[0].resolve(jsonResponse({ detail: "rule rejected" }, 422));
+    });
+    await waitFor(() => expect(previewText()).toBe("Upcoming dates unavailable: rule rejected"));
+
+    const days = within(sheet()).getByRole("group", { name: "Days" });
+    fireEvent.click(within(days).getByRole("button", { name: "Monday" }));
+    expect(previewText()).toBeNull();
+    await waitFor(() => expect(pending).toHaveLength(2));
+    expect(previewText()).toBeNull();
+
+    await act(async () => {
+      pending[1].resolve(jsonResponse({ dates: ["2026-10-08"] }));
+    });
+    await waitFor(() => expect(previewText()).toBe("Next: Thu 8 Oct"));
+  });
+
   it("a stale response resolving after a newer one does not overwrite it", async () => {
     await renderReady();
     const pending: ReturnType<typeof deferred>[] = [];

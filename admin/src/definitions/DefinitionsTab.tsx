@@ -337,14 +337,16 @@ function DefinitionRow({
 
 type PreviewState =
   | { kind: "idle" }
-  | { kind: "ready"; dates: string[] }
-  | { kind: "error"; message: string };
+  | { kind: "ready"; ruleKey: string; dates: string[] }
+  | { kind: "error"; ruleKey: string; message: string };
 
 /**
  * The next few dates the backend would materialize for the draft's rule.
  * `ruleKey` is the built rule serialized (null while the draft is invalid), so
  * the request only goes out when the rule itself changes — debounced, and a
  * superseded request's late response is dropped by its effect's cleanup.
+ * A result is tagged with the rule it answers and only shown while that rule
+ * is still the draft's, so a changed rule never shows the previous dates.
  */
 function OccurrencePreview({ ruleKey }: { ruleKey: string | null }) {
   const [preview, setPreview] = useState<PreviewState>({ kind: "idle" });
@@ -358,7 +360,7 @@ function OccurrencePreview({ ruleKey }: { ruleKey: string | null }) {
     const timer = setTimeout(() => {
       previewOccurrences(JSON.parse(ruleKey) as DefinitionRule, { count: PREVIEW_COUNT })
         .then((dates) => {
-          if (!cancelled) setPreview({ kind: "ready", dates });
+          if (!cancelled) setPreview({ kind: "ready", ruleKey, dates });
         })
         .catch((error: unknown) => {
           if (cancelled) return;
@@ -367,7 +369,11 @@ function OccurrencePreview({ ruleKey }: { ruleKey: string | null }) {
             (error instanceof ApiRequestError && error.detail)
               ? `: ${error.message}`
               : ".";
-          setPreview({ kind: "error", message: `Upcoming dates unavailable${detail}` });
+          setPreview({
+            kind: "error",
+            ruleKey,
+            message: `Upcoming dates unavailable${detail}`,
+          });
         });
     }, PREVIEW_DEBOUNCE_MS);
     return () => {
@@ -376,7 +382,7 @@ function OccurrencePreview({ ruleKey }: { ruleKey: string | null }) {
     };
   }, [ruleKey]);
 
-  if (ruleKey === null || preview.kind === "idle") return null;
+  if (preview.kind === "idle" || preview.ruleKey !== ruleKey) return null;
   if (preview.kind === "error") {
     return (
       <p className="defs-hint defs-preview defs-preview--error" data-testid="occurrence-preview">
