@@ -1,0 +1,12 @@
+[Unit]
+Description=Restrict NestQuest API port 8080 to Traefik (DOCKER-USER)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c "iptables -C DOCKER-USER -s 10.60.1.33/32 -p tcp --dport 8080 -j RETURN 2>/dev/null || iptables -I DOCKER-USER 1 -s 10.60.1.33 -p tcp --dport 8080 -j RETURN; iptables -C DOCKER-USER -s 10.60.1.14/32 -p tcp --dport 8080 -j RETURN 2>/dev/null || iptables -I DOCKER-USER 2 -s 10.60.1.14 -p tcp --dport 8080 -j RETURN; iptables -C DOCKER-USER -p tcp --dport 8080 -j DROP 2>/dev/null || iptables -A DOCKER-USER -p tcp --dport 8080 -j DROP"
+
+[Install]
+WantedBy=multi-user.target

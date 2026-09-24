@@ -158,7 +158,8 @@ class _EventStream:
     parsed frame with a timeout.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, token: str = PANEL_TOKEN) -> None:
+        self.token = token
         self.queue: asyncio.Queue = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self._client: httpx.AsyncClient | None = None
@@ -170,7 +171,7 @@ class _EventStream:
         self._stream_cm = self._client.stream(
             "GET",
             self.url,
-            headers={"Authorization": f"Bearer {PANEL_TOKEN}"},
+            headers={"Authorization": f"Bearer {self.token}"},
         )
         self._response = await self._stream_cm.__aenter__()
         assert self._response.status_code == 200
@@ -263,9 +264,13 @@ async def seeded_panel(temp_db_path: str) -> SimpleNamespace:
         routes_panel._local_now = original
 
 
-def _stream(url: str) -> _EventStream:
-    """A subscribed SSE reader for ``url``."""
-    return _EventStream()._set_url(url)
+def _stream(url: str, token: str = PANEL_TOKEN) -> _EventStream:
+    """A subscribed SSE reader for ``url``, sending ``token`` as Bearer.
+
+    Defaults to the panel service token; the admin-plane stream tests
+    pass an admin JWT instead.
+    """
+    return _EventStream(token)._set_url(url)
 
 
 # --- auth and content type ----------------------------------------------

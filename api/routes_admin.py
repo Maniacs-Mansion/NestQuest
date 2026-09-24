@@ -30,10 +30,10 @@ hand-rolled here), and the call goes to
 ``set_quest_definition_active``.  The title policy, the window-name
 and due-time policy, the assignee checks, the whole-set window
 replacement and the never-hard-delete policy (deactivation is the only
-removal path) all live in the core.  Assignment is NOT settable
-through the API: the core's edit path takes no assignees.  The edit
-route forwards only SUPPLIED fields (``exclude_unset``), like the
-children edit.
+removal path) all live in the core.  The edit route forwards only
+SUPPLIED fields (``exclude_unset``), like the children edit; a supplied
+``assignee_child_ids`` list REPLACES the whole assignee set inside the
+core edit's one transaction (and its one regeneration).
 
 The presence routes follow the same pattern over
 :mod:`nestquest_core.presence_management` — the ONE presence write
@@ -58,6 +58,24 @@ layer the HA services share, so the two planes cannot drift:
   (children are never hard-deleted; overrides are deletable by
   design) and regenerates that override's child.  It answers
   ``{"status": "ok"}``.
+- ``POST /presence-overrides/consequence`` previews an override
+  BEFORE it is saved: ONE ``preview_presence_override_consequence``
+  call answers ``{removed: N}``, the number of the child's open
+  upcoming instances the materialization walk would stop generating
+  (instances with a completion event are never counted, D-005).
+  Nothing is written; an unknown child is 404, a malformed or inverted
+  range 422.
+- ``GET /children/{child_id}/presence-schedule`` reads the child's
+  schedule through ONE ``get_presence_schedule`` call, wrapped as
+  ``{"schedule": ...}`` in the PUT response's shape — ``null`` when the
+  child has none (present every day), never a 404; an unknown child is
+  404.
+- ``GET /presence-overrides`` lists the household's overrides through
+  ONE ``list_presence_overrides`` call, wrapped as
+  ``{"overrides": [...]}`` in the POST response's shape, ordered by
+  start date, child id, id; the optional ``child_id``, ``start`` and
+  ``end`` query filters (strict dates, ``end >= start``) are the
+  core's to validate.
 
 The uncomplete and regenerate routes (task da0226b3) follow the same
 pattern over :mod:`nestquest_core.completion` and
@@ -116,6 +134,22 @@ owns every rule so the two routes cannot drift:
   a ``Content-Disposition`` attachment filename and the documented,
   stable header row (Admin spec §5 event-row fields).
 
+The snapshot route (task ef3f4877) is the admin-plane twin of the
+panel's ``GET /api/v1/panel/snapshot`` for the admin PWA's Today tab —
+the PWA is internet-facing and never holds the panel service token
+(D-012), so it reads the same snapshot here:
+
+- ``GET /snapshot`` threads ONE clock read (:func:`_local_now`) into
+  :func:`nestquest_core.snapshot.build_snapshot` and shapes each
+  child's instances through
+  :func:`nestquest_core.snapshot.instance_payload` with
+  ``include_missed=True`` — admin payloads KEEP missed instances with
+  their ``missed`` state (D-009), where the panel omits them.  The
+  body is the panel's documented shape (``today_iso``, ``cycle_day``,
+  ``children`` with the per-child presence, rollup counts and
+  ``instances``); the builder, the state derivation and the shaping
+  all live in the core.
+
 The settings routes (task 2b3de7e5) follow the same pattern over
 :mod:`nestquest_core.settings_store` — the API's OWN durable settings
 store.  The API now OWNS settings in the database (a validated JSON
@@ -156,6 +190,33 @@ integration's rollover listener shares:
   read-only-over-the-domain-tables guarantee all live in the core; the
   response reports how many transitions were published.
 
+The occurrence-preview route (task 5f843564) lets the admin PWA's
+Definitions edit sheet show the next dates a rule fires on WITHOUT
+reimplementing the recurrence rules client-side:
+
+- ``POST /quest-definitions/occurrences-preview`` takes the SAME
+  ``rule`` object create/edit take (:class:`AdminRuleRequest`, built
+  through the SAME :func:`_rule_from_request` / core ``from_dict``
+  validation, so a rejected rule is 422 exactly as on create), an
+  optional ``start_date`` (default: the API host's local ``today``,
+  ONE :func:`_local_now` clock read) and an optional ``count`` (1..50,
+  default 10).  The dates come from ONE
+  :func:`nestquest_core.recurrence.occurrences_between` call — the
+  same engine the materializer walks — so the preview can only agree
+  with what would be generated.  The scan is BOUNDED server-side: the
+  window is ``[start_date, start_date + 366 days]`` inclusive,
+  whatever the caller sends, so every rule shape (a yearly rule
+  included) shows at least its next occurrence, and a caller can never
+  ask for an unbounded walk.  Any strict ``start_date`` is accepted
+  rather than clamped or range-limited — the fixed window already
+  bounds the work — EXCEPT one whose window would reach 9999-12-31,
+  which is 422 (the core's day walk cannot step past the calendar's
+  last date).  ``start_date`` strictness
+  (``YYYY-MM-DD``) is the core's own date validator; a non-strict or
+  unparseable value is 422.  A ``count`` outside 1..50 is the body
+  model's 422 before any handler code runs.  Nothing is read or
+  written: the route touches no database.
+
 Error mapping (every children, quest-definition and presence route,
 deliberately narrow):
 
@@ -166,8 +227,9 @@ deliberately narrow):
   set_active on an unknown id) is mapped to 404.
 - A core ``ValueError`` reporting a NON-EXISTENT DEFINITION (edit or
   set_active on an unknown id — the core prefixes that error with
-  ``definition_id:``) is mapped to 404.  Create's rejected-assignee
-  error names a child from the BODY, not a path id, so it maps to 422.
+  ``definition_id:``) is mapped to 404.  Create's and edit's
+  rejected-assignee error names a child from the BODY, not a path id,
+  so it maps to 422.
 - Every OTHER core ``ValueError`` — an empty display name, an explicit
   ``null`` colour/avatar_ref (clearing is not supported), a reorder
   list that is not a complete permutation of the children (missing,
@@ -228,6 +290,16 @@ an omitted field is never passed to
 :func:`nestquest_core.children.edit_child` and stays unchanged — while
 an explicit ``null`` IS passed and is rejected by the core rather than
 silently ignored.
+
+The EVENTS route (``GET /events``) is the admin plane's live
+transition stream for the Admin PWA: the SAME four transitions
+(quest-completed, quest-uncompleted, quest-missed, child-day-complete)
+off the SAME in-process publisher as the panel plane, framed by the
+shared :func:`api.sse.transition_event_stream` helper.  It inherits the
+router's ONE :func:`~api.auth.require_admin` check (the Authorization
+header — the PWA reads it with a fetch-based reader because
+``EventSource`` cannot set headers), so the panel service token is
+refused here exactly as on every other admin route.
 """
 from __future__ import annotations
 
@@ -235,7 +307,14 @@ import datetime
 from typing import Annotated, Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, field_validator, model_validator
+from fastapi.responses import StreamingResponse
+from pydantic import (
+    BaseModel,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from api import transitions as api_transitions
 from api.auth import require_admin
@@ -254,8 +333,10 @@ from api.nestquest_core import (
     core_recurrence,
     core_settings,
     core_settings_store,
+    core_snapshot,
     core_sweep,
 )
+from api.sse import transition_event_stream
 
 #: All admin-plane routes share this router; the ONE admin dependency
 #: (service-token refusal + JWT verification + nestquest-admins group
@@ -346,9 +427,16 @@ class AdminQuestDefinitionResponse(BaseModel):
     description: str | None
     icon: str | None
     is_active: bool
+    skip_on_away: bool
     rule: AdminRuleResponse
     assignees: list[AdminAssigneeResponse]
     windows: list[AdminDefinitionWindowResponse]
+
+
+class AdminQuestDefinitionListResponse(BaseModel):
+    """The definitions list: every definition, active AND inactive, by id."""
+
+    definitions: list[AdminQuestDefinitionResponse]
 
 
 class AdminChildCreateRequest(BaseModel):
@@ -421,24 +509,67 @@ class AdminRuleRequest(BaseModel):
     end_date: str | None = None
 
 
+#: Upper bound on ``count`` for the occurrence-preview route.
+_PREVIEW_MAX_COUNT = 50
+
+#: Days after ``start_date`` the occurrence-preview window spans
+#: (inclusive), so a yearly rule always shows its next occurrence.
+_PREVIEW_WINDOW_DAYS = 366
+
+
+class AdminOccurrencesPreviewRequest(BaseModel):
+    """The body of ``POST /api/v1/admin/quest-definitions/occurrences-preview``.
+
+    ``rule`` is the SAME object create/edit take.  ``start_date`` is an
+    optional strict ``YYYY-MM-DD`` (validated by the core; default the
+    API host's today).  ``count`` is a strict JSON integer in
+    1..``_PREVIEW_MAX_COUNT`` — anything else is 422 before any handler
+    code runs.
+    """
+
+    rule: AdminRuleRequest
+    start_date: str | None = None
+    count: StrictInt = 10
+
+    @field_validator("count")
+    @classmethod
+    def _count_in_range(cls, value: int) -> int:
+        """Reject a count outside 1.._PREVIEW_MAX_COUNT."""
+        if not 1 <= value <= _PREVIEW_MAX_COUNT:
+            raise ValueError(
+                f"count must be between 1 and {_PREVIEW_MAX_COUNT}"
+            )
+        return value
+
+
+class AdminOccurrencesPreviewResponse(BaseModel):
+    """The next occurrence dates (``YYYY-MM-DD``, ascending)."""
+
+    dates: list[str]
+
+
 class AdminQuestDefinitionCreateRequest(BaseModel):
     """The body of ``POST /api/v1/admin/quest-definitions``.
 
     ``title``, ``rule``, ``assignee_child_ids`` and ``windows`` are
     required (the core rejects an empty title, a non-list or empty
     assignee/window list, and unknown window names); ``description``
-    and ``icon`` are optional and default to NULL through the core.
-    ``windows`` entries are a window name (``morning``) or a two-item
+    and ``icon`` are optional and default to NULL through the core, and
+    ``skip_on_away`` is optional and defaults to true (no instance on a
+    date the child is absent).  ``windows`` entries are a window name (``morning``) or a two-item
     ``[window, due_time]`` pair whose due time is a strict 24-hour
     HH:MM (or ``null`` for none) — both forms the core normalizes.
+    Assignee ids are strict JSON integers: a boolean, float or numeric
+    string is 422, never coerced to a child id.
     """
 
     title: str
     rule: AdminRuleRequest
-    assignee_child_ids: list[int]
+    assignee_child_ids: list[StrictInt]
     windows: list[str | tuple[str, str | None]]
     description: str | None = None
     icon: str | None = None
+    skip_on_away: StrictBool = True
 
 
 class AdminQuestDefinitionEditRequest(BaseModel):
@@ -450,10 +581,13 @@ class AdminQuestDefinitionEditRequest(BaseModel):
     field stays unchanged.  An explicit ``null`` ``description``/
     ``icon`` IS passed and CLEARS the stored value (the core supports
     clearing here, unlike the children edit); an explicit ``null``
-    ``rule`` or ``windows`` is passed and rejected by the core.  A
-    supplied ``windows`` list REPLACES the whole window set, and
-    ``assignees`` are deliberately absent — assignment is not settable
-    through this route.
+    ``rule``, ``windows`` or ``assignee_child_ids`` is passed and
+    rejected by the core.  A supplied ``windows`` list REPLACES the
+    whole window set, and a supplied ``assignee_child_ids`` list
+    REPLACES the whole assignee set (non-empty, every id an existing
+    active child — create's contract; a rejection changes nothing).  An
+    omitted (or ``null``) ``skip_on_away`` keeps the stored value.
+    Assignee ids are strict JSON integers, as on create.
     """
 
     title: str | None = None
@@ -461,6 +595,8 @@ class AdminQuestDefinitionEditRequest(BaseModel):
     icon: str | None = None
     rule: AdminRuleRequest | None = None
     windows: list[str | tuple[str, str | None]] | None = None
+    skip_on_away: StrictBool | None = None
+    assignee_child_ids: list[StrictInt] | None = None
 
 
 class AdminQuestDefinitionActiveRequest(BaseModel):
@@ -531,6 +667,50 @@ class AdminPresenceOverrideResponse(BaseModel):
     end_date: str
     is_present: bool
     note: str | None
+
+
+class AdminPresenceScheduleReadResponse(BaseModel):
+    """The ``GET /children/{child_id}/presence-schedule`` payload.
+
+    ``schedule`` is ``None`` when the child has no schedule — the child
+    is present every day (Feature 05); absence is state, not an error.
+    """
+
+    schedule: AdminPresenceScheduleResponse | None
+
+
+class AdminPresenceOverrideListResponse(BaseModel):
+    """The ``GET /presence-overrides`` payload: the matching overrides."""
+
+    overrides: list[AdminPresenceOverrideResponse]
+
+
+class AdminPresenceOverrideConsequenceRequest(BaseModel):
+    """The body of ``POST /api/v1/admin/presence-overrides/consequence``.
+
+    The create body's shape minus the note (which cannot change what is
+    generated): the strict dates, their order and the real
+    ``is_present`` bool are enforced by the SAME
+    :class:`~nestquest_core.presence.PresenceOverride` constructor the
+    create route's core path builds; this model only guards the SHAPE.
+    Strict fields: a JSON ``true`` is not child id 1, nor ``1`` a bool.
+    """
+
+    child_id: StrictInt
+    start_date: str
+    end_date: str
+    is_present: StrictBool
+
+
+class AdminPresenceOverrideConsequenceResponse(BaseModel):
+    """The consequence preview: ``removed`` upcoming instances.
+
+    The number of open (no completion event) upcoming quest instances
+    of the child that saving the override would remove — the "This
+    removes N upcoming tasks" warning.  Always 0 for a present override.
+    """
+
+    removed: int
 
 
 class AdminUncompleteResponse(BaseModel):
@@ -681,6 +861,59 @@ class AdminMissedSweepResponse(BaseModel):
     """
 
     fired: int
+
+
+class AdminInstancePayload(BaseModel):
+    """One instance in the admin snapshot payload.
+
+    Mirrors :func:`nestquest_core.snapshot.instance_payload` with
+    ``include_missed=True``: ``state`` is ``open`` | ``completed`` |
+    ``missed`` (admin payloads keep missed instances, D-009),
+    ``on_time`` passes the completion event's flag through verbatim
+    (``None`` unless completed), and ``completed_at`` is the event's
+    UTC timestamp when completed.
+    """
+
+    id: int
+    definition_id: int
+    child_id: int
+    title: str
+    icon: str | None
+    window: str
+    due_time: str | None
+    state: str
+    overdue: bool
+    completed_at: str | None
+    on_time: bool | None
+
+
+class AdminChildSnapshotPayload(BaseModel):
+    """One child's day: presence, rollup counts, and today's instances."""
+
+    child_id: int
+    child_name: str
+    present: bool
+    #: ISO date of the child's next present day while they are away;
+    #: ``None`` when the child is present today.
+    next_present: str | None
+    due_today: int
+    completed_today: int
+    remaining_today: int
+    completion_pct: int
+    instances: list[AdminInstancePayload]
+
+
+class AdminSnapshotResponse(BaseModel):
+    """Today's whole household snapshot for the admin Today tab.
+
+    The panel snapshot's shape (``today_iso``, ``cycle_day``,
+    ``children`` in the household's sort order), with missed instances
+    kept in each child's ``instances``.
+    """
+
+    today_iso: str
+    cycle_day: int
+    children: list[AdminChildSnapshotPayload]
 
 
 #: 404 detail for a child id the core layer reports as non-existent.
@@ -845,6 +1078,40 @@ def _raise_sweep_error(error: ValueError) -> NoReturn:
     raise HTTPException(status_code=422, detail=str(error)) from error
 
 
+def _raise_preview_error(error: ValueError) -> NoReturn:
+    """Map a core recurrence ``ValueError`` from the preview route to 422.
+
+    The preview route has no path ids, so it has no 404 case: a
+    rejected rule (:class:`~nestquest_core.recurrence.RuleValidationError`)
+    or a non-strict ``start_date`` is 422 with the core's message as
+    the detail.  Only ``ValueError`` is caught, so an unexpected
+    failure re-raises rather than becoming a 4xx.
+    """
+    raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+def _preview_window_end(start_date: str) -> str:
+    """Return the preview window's inclusive end for ``start_date``.
+
+    ``start_date`` + :data:`_PREVIEW_WINDOW_DAYS`.  Parsing here only
+    locates the window; the STRICT ``YYYY-MM-DD`` check stays the
+    core's — :func:`~nestquest_core.recurrence.occurrences_between`
+    re-validates the same string and rejects any lenient form this
+    parse accepted.  Raises ``ValueError`` for an unparseable value and
+    for a start whose window would reach the calendar's last date (the
+    core's day walk steps one day PAST its end, which overflows there).
+    """
+    start = datetime.date.fromisoformat(start_date)
+    if datetime.date.max - start <= datetime.timedelta(
+        days=_PREVIEW_WINDOW_DAYS
+    ):
+        raise ValueError(
+            f"start_date {start_date!r} is too close to the end of the "
+            "calendar for a preview window"
+        )
+    return (start + datetime.timedelta(days=_PREVIEW_WINDOW_DAYS)).isoformat()
+
+
 def _local_now() -> datetime.datetime:
     """Return the API host's local time as ONE timezone-aware clock read.
 
@@ -887,6 +1154,7 @@ def _quest_definition_response(
         description=bundle.definition.description,
         icon=bundle.definition.icon,
         is_active=bundle.definition.is_active,
+        skip_on_away=bundle.definition.skip_on_away,
         rule=_rule_response(bundle.rule),
         assignees=[
             AdminAssigneeResponse(id=child.id, display_name=child.display_name)
@@ -1098,6 +1366,32 @@ async def admin_reorder_children(
     return {"status": "ok"}
 
 
+@router.get(
+    "/quest-definitions",
+    summary="List quest definitions",
+    response_model=AdminQuestDefinitionListResponse,
+)
+async def admin_list_quest_definitions(
+    request: Request,
+) -> AdminQuestDefinitionListResponse:
+    """Return every quest definition in rising id order.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: one
+    :func:`nestquest_core.quest_definitions.list_all_definitions` call,
+    active AND inactive definitions included (the admin screen manages
+    both), each serialized exactly as the create/edit responses are.
+    """
+    state: DatabaseState = request.app.state.db
+    bundles = await core_quest_definitions.list_all_definitions(
+        state.database
+    )
+    return AdminQuestDefinitionListResponse(
+        definitions=[_quest_definition_response(bundle) for bundle in bundles]
+    )
+
+
 @router.post(
     "/quest-definitions",
     summary="Create a quest definition",
@@ -1132,10 +1426,47 @@ async def admin_create_quest_definition(
             body.windows,
             description=body.description,
             icon=body.icon,
+            skip_on_away=body.skip_on_away,
         )
     except ValueError as error:
         _raise_quest_definition_error(error)
     return _quest_definition_response(bundle)
+
+
+@router.post(
+    "/quest-definitions/occurrences-preview",
+    summary="Preview the next occurrence dates of a schedule rule",
+    response_model=AdminOccurrencesPreviewResponse,
+)
+async def admin_preview_occurrences(
+    body: AdminOccurrencesPreviewRequest,
+) -> AdminOccurrencesPreviewResponse:
+    """Return the first ``count`` dates the supplied rule fires on.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: the ``rule``
+    becomes ONE :class:`~nestquest_core.recurrence.ScheduleRule`
+    (:func:`_rule_from_request`, the create/edit path), and the dates
+    come from ONE :func:`nestquest_core.recurrence.occurrences_between`
+    call over the bounded window ``[start_date, start_date + 366
+    days]`` — ``start_date`` defaulting to ONE :func:`_local_now` clock
+    read — truncated to ``count``.  Every core ``ValueError`` is 422
+    (:func:`_raise_preview_error`).  No database access.
+    """
+    start_date = (
+        body.start_date
+        if body.start_date is not None
+        else _local_now().date().isoformat()
+    )
+    try:
+        rule = _rule_from_request(body.rule)
+        dates = core_recurrence.occurrences_between(
+            rule, start_date, _preview_window_end(start_date)
+        )
+    except ValueError as error:
+        _raise_preview_error(error)
+    return AdminOccurrencesPreviewResponse(dates=dates[: body.count])
 
 
 @router.patch(
@@ -1157,10 +1488,12 @@ async def admin_edit_quest_definition(
     field is never passed to
     :func:`nestquest_core.quest_definitions.edit_quest_definition` and
     stays unchanged; a supplied ``windows`` list replaces the WHOLE
-    window set in the core, and a supplied ``rule`` is rebuilt into a
-    ScheduleRule (:func:`_rule_from_request`, validated by the model).
-    An explicit ``null`` ``rule``/``windows`` reaches the core as None
-    and is rejected there (422), while an explicit ``null``
+    window set in the core, a supplied ``assignee_child_ids`` list
+    replaces the WHOLE assignee set in the same core transaction, and a
+    supplied ``rule`` is rebuilt into a ScheduleRule
+    (:func:`_rule_from_request`, validated by the model).  An explicit
+    ``null`` ``rule``/``windows``/``assignee_child_ids`` reaches the
+    core as None and is rejected there (422), while an explicit ``null``
     ``description``/``icon`` clears the stored value — the core edit
     path supports clearing, unlike the children edit.  An unknown
     definition id is mapped to 404 and any other core ``ValueError``
@@ -1320,6 +1653,114 @@ async def admin_delete_presence_override(
     except ValueError as error:
         _raise_presence_override_error(error)
     return {"status": "ok"}
+
+
+@router.post(
+    "/presence-overrides/consequence",
+    summary="Count the upcoming instances a presence override would remove",
+    response_model=AdminPresenceOverrideConsequenceResponse,
+)
+async def admin_presence_override_consequence(
+    body: AdminPresenceOverrideConsequenceRequest, request: Request
+) -> AdminPresenceOverrideConsequenceResponse:
+    """Return how many upcoming instances saving the override removes.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: ONE
+    :func:`nestquest_core.presence_management.preview_presence_override_consequence`
+    call, anchored on ONE :func:`_local_now` clock read, which compares
+    the materialization walk's output for the child with and without
+    the proposed override and excludes instances that already have a
+    completion event (D-005).  Nothing is written.
+
+    Errors are mapped by :func:`_raise_child_error`: an unknown child
+    is 404; a malformed or inverted range is 422.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        removed = await (
+            core_presence_management.preview_presence_override_consequence(
+                state.database,
+                body.child_id,
+                body.start_date,
+                body.end_date,
+                body.is_present,
+                today=_local_now().date(),
+            )
+        )
+    except ValueError as error:
+        _raise_child_error(error)
+    return AdminPresenceOverrideConsequenceResponse(removed=removed)
+
+
+@router.get(
+    "/children/{child_id}/presence-schedule",
+    summary="Read a child's repeating presence schedule",
+    response_model=AdminPresenceScheduleReadResponse,
+)
+async def admin_get_presence_schedule(
+    child_id: int, request: Request
+) -> AdminPresenceScheduleReadResponse:
+    """Return the child's presence schedule, or ``schedule: null``.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: one
+    :func:`nestquest_core.presence_management.get_presence_schedule`
+    call; a stored schedule is serialized exactly as the PUT response
+    is, and a child without one answers ``{"schedule": null}`` (present
+    every day).  Errors are mapped by :func:`_raise_child_error`: an
+    unknown child is 404.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        schedule = await core_presence_management.get_presence_schedule(
+            state.database, child_id
+        )
+    except ValueError as error:
+        _raise_child_error(error)
+    return AdminPresenceScheduleReadResponse(
+        schedule=(
+            None if schedule is None else _presence_schedule_response(schedule)
+        )
+    )
+
+
+@router.get(
+    "/presence-overrides",
+    summary="List presence overrides",
+    response_model=AdminPresenceOverrideListResponse,
+)
+async def admin_list_presence_overrides(
+    request: Request,
+    child_id: int | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> AdminPresenceOverrideListResponse:
+    """Return the household's presence overrides, optionally filtered.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: the optional
+    ``child_id``, ``start`` and ``end`` query parameters go straight to
+    :func:`nestquest_core.presence_management.list_presence_overrides`
+    — the date policy (strict ``YYYY-MM-DD``, ``end >= start``) and the
+    overlap rule live in the core — and each record is serialized
+    exactly as the POST response is, ordered by start date, child id,
+    id.  Errors are mapped by :func:`_raise_child_error`: an unknown
+    ``child_id`` is 404, a rejected date or range is 422.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        records = await core_presence_management.list_presence_overrides(
+            state.database, child_id=child_id, start=start, end=end
+        )
+    except ValueError as error:
+        _raise_child_error(error)
+    return AdminPresenceOverrideListResponse(
+        overrides=[_presence_override_response(record) for record in records]
+    )
 
 
 @router.post(
@@ -1727,6 +2168,74 @@ async def admin_run_missed_sweep(
     for event_type, payload in events:
         request.app.state.publisher.publish(event_type, payload)
     return AdminMissedSweepResponse(fired=len(events))
+
+
+@router.get(
+    "/snapshot",
+    summary="Today's household snapshot",
+    response_model=AdminSnapshotResponse,
+)
+async def admin_snapshot(request: Request) -> AdminSnapshotResponse:
+    """Return today's full household snapshot for the admin Today tab.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: ONE clock read
+    (:func:`_local_now`) goes into
+    :func:`nestquest_core.snapshot.build_snapshot` against the live
+    database, and each child's instances are shaped with
+    ``instance_payload(include_missed=True)`` — missed instances are
+    KEPT in the admin payload (D-009) — into
+    :class:`AdminSnapshotResponse`.
+    """
+    state: DatabaseState = request.app.state.db
+    snapshot = await core_snapshot.build_snapshot(
+        state.database, core_settings.NestQuestSettings(), _local_now()
+    )
+    return AdminSnapshotResponse(
+        today_iso=snapshot.today_iso,
+        cycle_day=snapshot.cycle_day,
+        children=[
+            AdminChildSnapshotPayload(
+                child_id=child.child_id,
+                child_name=child.child_name,
+                present=child.present,
+                next_present=child.next_present,
+                due_today=child.due_today,
+                completed_today=child.completed_today,
+                remaining_today=child.remaining_today,
+                completion_pct=child.completion_pct,
+                instances=[
+                    AdminInstancePayload.model_validate(instance)
+                    for instance in core_snapshot.instance_payload(
+                        child.instances, include_missed=True
+                    )
+                ],
+            )
+            for child in snapshot.children
+        ],
+    )
+
+
+
+@router.get(
+    "/events",
+    summary="Stream admin transition events (SSE)",
+)
+async def admin_events(request: Request) -> StreamingResponse:
+    """Stream the app's transition events to an admin client
+    (Server-Sent Events).
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own), so an unauthenticated or
+    panel-token request is refused before any stream is established.
+
+    Returns the shared :func:`api.sse.transition_event_stream` response
+    off the app's single in-process publisher (``app.state.publisher``)
+    — the same publisher, framing and teardown as the panel stream.
+    """
+    return transition_event_stream(request)
 
 
 __all__ = ["router"]
