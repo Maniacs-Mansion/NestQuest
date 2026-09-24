@@ -796,8 +796,9 @@ class QuestDefinitionsDao:
         rule: ScheduleRuleStorage | object = _UNSET,
         windows: list[tuple[str, str | None]] | object = _UNSET,
         skip_on_away: bool | object = _UNSET,
+        assignee_child_ids: list[int] | object = _UNSET,
     ) -> QuestDefinitionSnapshot:
-        """Edit a definition's metadata, rule and windows atomically.
+        """Edit a definition's metadata, rule, windows and assignees atomically.
 
         Mirrors :meth:`create_with_rule_and_windows`: everything runs
         inside ONE transaction under the connection lock, and the
@@ -818,11 +819,15 @@ class QuestDefinitionsDao:
           are deleted and the given set re-inserted, so missing windows
           are added, changed due times updated and removed windows
           dropped.
+        - ``assignee_child_ids`` REPLACES the whole assignee set: every
+          id is validated as existing-and-active BEFORE any write (the
+          same check :meth:`add_assignee` applies), then links for
+          children no longer listed are removed and links for newly
+          listed children inserted; unchanged links are left alone.
 
-        Assignment is deliberately not settable here (multi-assignee is
-        managed by :meth:`add_assignee`/:meth:`remove_assignee`), and
-        activation is untouched.  Raises ValueError when the definition
-        does not exist.  Edits change future instances only: no
+        Activation is untouched.  Raises ValueError when the definition
+        does not exist or an assignee is rejected; either way the
+        transaction rolls back and nothing is written.  Edits change future instances only: no
         ``quest_instances`` or ``completion_events`` row is touched.
         """
         if skip_on_away is not _UNSET:
@@ -834,6 +839,9 @@ class QuestDefinitionsDao:
                     raise ValueError(
                         f"quest definition {definition_id} does not exist"
                     )
+                if assignee_child_ids is not _UNSET:
+                    for child_id in assignee_child_ids:
+                        await self._validate_assignable_child(child_id)
                 assignments: list[str] = []
                 parameters: list[object] = []
                 for column, value in (
@@ -882,6 +890,10 @@ class QuestDefinitionsDao:
                             "VALUES (?, ?, ?)",
                             (definition_id, window, due_time),
                         )
+                if assignee_child_ids is not _UNSET:
+                    await self._replace_assignees(
+                        definition_id, assignee_child_ids
+                    )
                 updated = await self.get(definition_id)
                 assignees = await self.list_assignees(definition_id)
                 window_records = await self.list_windows(definition_id)
@@ -896,6 +908,36 @@ class QuestDefinitionsDao:
             assignees=assignees,
             windows=window_records,
         )
+
+    async def _replace_assignees(
+        self, definition_id: int, child_ids: list[int]
+    ) -> None:
+        """Make the definition's assignee links exactly ``child_ids``.
+
+        Removes the links for children not in ``child_ids`` and inserts
+        the missing ones.  MUST be called inside the connection lock and
+        an open transaction, after the ids were validated as assignable.
+        """
+        rows = await self._database.fetch_all(
+            "SELECT child_id FROM quest_definition_assignees "
+            "WHERE definition_id = ?",
+            (definition_id,),
+        )
+        current = {row[0] for row in rows}
+        wanted = set(child_ids)
+        for child_id in sorted(current - wanted):
+            await self._database.execute(
+                "DELETE FROM quest_definition_assignees "
+                "WHERE definition_id = ? AND child_id = ?",
+                (definition_id, child_id),
+            )
+        for child_id in child_ids:
+            if child_id not in current:
+                await self._database.execute(
+                    "INSERT INTO quest_definition_assignees "
+                    "(definition_id, child_id) VALUES (?, ?)",
+                    (definition_id, child_id),
+                )
 
     async def _validate_rule_exists(self, schedule_rule_id: int) -> None:
         """Raise ValueError unless the rule exists.

@@ -30,10 +30,10 @@ hand-rolled here), and the call goes to
 ``set_quest_definition_active``.  The title policy, the window-name
 and due-time policy, the assignee checks, the whole-set window
 replacement and the never-hard-delete policy (deactivation is the only
-removal path) all live in the core.  Assignment is NOT settable
-through the API: the core's edit path takes no assignees.  The edit
-route forwards only SUPPLIED fields (``exclude_unset``), like the
-children edit.
+removal path) all live in the core.  The edit route forwards only
+SUPPLIED fields (``exclude_unset``), like the children edit; a supplied
+``assignee_child_ids`` list REPLACES the whole assignee set inside the
+core edit's one transaction (and its one regeneration).
 
 The presence routes follow the same pattern over
 :mod:`nestquest_core.presence_management` — the ONE presence write
@@ -182,8 +182,9 @@ deliberately narrow):
   set_active on an unknown id) is mapped to 404.
 - A core ``ValueError`` reporting a NON-EXISTENT DEFINITION (edit or
   set_active on an unknown id — the core prefixes that error with
-  ``definition_id:``) is mapped to 404.  Create's rejected-assignee
-  error names a child from the BODY, not a path id, so it maps to 422.
+  ``definition_id:``) is mapped to 404.  Create's and edit's
+  rejected-assignee error names a child from the BODY, not a path id,
+  so it maps to 422.
 - Every OTHER core ``ValueError`` — an empty display name, an explicit
   ``null`` colour/avatar_ref (clearing is not supported), a reorder
   list that is not a complete permutation of the children (missing,
@@ -251,7 +252,13 @@ import datetime
 from typing import Annotated, Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, StrictBool, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from api import transitions as api_transitions
 from api.auth import require_admin
@@ -456,11 +463,13 @@ class AdminQuestDefinitionCreateRequest(BaseModel):
     date the child is absent).  ``windows`` entries are a window name (``morning``) or a two-item
     ``[window, due_time]`` pair whose due time is a strict 24-hour
     HH:MM (or ``null`` for none) — both forms the core normalizes.
+    Assignee ids are strict JSON integers: a boolean, float or numeric
+    string is 422, never coerced to a child id.
     """
 
     title: str
     rule: AdminRuleRequest
-    assignee_child_ids: list[int]
+    assignee_child_ids: list[StrictInt]
     windows: list[str | tuple[str, str | None]]
     description: str | None = None
     icon: str | None = None
@@ -476,11 +485,13 @@ class AdminQuestDefinitionEditRequest(BaseModel):
     field stays unchanged.  An explicit ``null`` ``description``/
     ``icon`` IS passed and CLEARS the stored value (the core supports
     clearing here, unlike the children edit); an explicit ``null``
-    ``rule`` or ``windows`` is passed and rejected by the core.  A
-    supplied ``windows`` list REPLACES the whole window set, and
-    ``assignees`` are deliberately absent — assignment is not settable
-    through this route.  An omitted (or ``null``) ``skip_on_away``
-    keeps the stored value.
+    ``rule``, ``windows`` or ``assignee_child_ids`` is passed and
+    rejected by the core.  A supplied ``windows`` list REPLACES the
+    whole window set, and a supplied ``assignee_child_ids`` list
+    REPLACES the whole assignee set (non-empty, every id an existing
+    active child — create's contract; a rejection changes nothing).  An
+    omitted (or ``null``) ``skip_on_away`` keeps the stored value.
+    Assignee ids are strict JSON integers, as on create.
     """
 
     title: str | None = None
@@ -489,6 +500,7 @@ class AdminQuestDefinitionEditRequest(BaseModel):
     rule: AdminRuleRequest | None = None
     windows: list[str | tuple[str, str | None]] | None = None
     skip_on_away: StrictBool | None = None
+    assignee_child_ids: list[StrictInt] | None = None
 
 
 class AdminQuestDefinitionActiveRequest(BaseModel):
@@ -1266,10 +1278,12 @@ async def admin_edit_quest_definition(
     field is never passed to
     :func:`nestquest_core.quest_definitions.edit_quest_definition` and
     stays unchanged; a supplied ``windows`` list replaces the WHOLE
-    window set in the core, and a supplied ``rule`` is rebuilt into a
-    ScheduleRule (:func:`_rule_from_request`, validated by the model).
-    An explicit ``null`` ``rule``/``windows`` reaches the core as None
-    and is rejected there (422), while an explicit ``null``
+    window set in the core, a supplied ``assignee_child_ids`` list
+    replaces the WHOLE assignee set in the same core transaction, and a
+    supplied ``rule`` is rebuilt into a ScheduleRule
+    (:func:`_rule_from_request`, validated by the model).  An explicit
+    ``null`` ``rule``/``windows``/``assignee_child_ids`` reaches the
+    core as None and is rejected there (422), while an explicit ``null``
     ``description``/``icon`` clears the stored value — the core edit
     path supports clearing, unlike the children edit.  An unknown
     definition id is mapped to 404 and any other core ``ValueError``
