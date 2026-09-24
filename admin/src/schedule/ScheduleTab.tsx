@@ -46,7 +46,8 @@ export const SCROLL_BOTTOM_PADDING = "92px";
 
 export const DEFAULT_CYCLE_LENGTH_WEEKS = 2;
 const CYCLE_LENGTH_CHOICES = [1, 2, 3, 4];
-const WEEKDAY_INITIALS = ["M", "T", "W", "T", "F", "S", "S"];
+/** Sunday-first header; `weekdayOf` stays Monday=0. */
+const WEEKDAY_INITIALS = ["S", "M", "T", "W", "T", "F", "S"];
 
 export const STATE_LABELS: Record<DayState, string> = {
   home: "Home",
@@ -130,7 +131,7 @@ interface MonthGridProps {
 
 function MonthGrid({ month, today, schedule, effective, overrides, onMonth, onToggle }: MonthGridProps) {
   const dates = monthDates(month);
-  const leading = weekdayOf(month);
+  const leading = (weekdayOf(month) + 1) % 7;
   return (
     <>
       <div className="schedule-month-head">
