@@ -907,6 +907,13 @@ class QuestDefinitionsDao:
         )
         return [_definition_from_row(row) for row in rows]
 
+    async def list_all(self) -> list[QuestDefinitionRecord]:
+        """Return every definition, active AND inactive, oldest first."""
+        rows = await self._database.fetch_all(
+            f"SELECT {_DEFINITION_COLUMNS} FROM quest_definitions ORDER BY id"
+        )
+        return [_definition_from_row(row) for row in rows]
+
     async def _snapshots_for(
         self, definitions: list[QuestDefinitionRecord]
     ) -> list[QuestDefinitionSnapshot]:
@@ -949,6 +956,18 @@ class QuestDefinitionsDao:
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 definitions = await self.list_active()
+                return await self._snapshots_for(definitions)
+
+    async def list_snapshots_all(self) -> list[QuestDefinitionSnapshot]:
+        """Return every definition (active AND inactive) with its rule,
+        assignees and windows, all read inside one locked transaction.
+
+        Mirrors :meth:`list_snapshots_active` over :meth:`list_all`
+        (oldest first), with the same coherence guarantee.
+        """
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                definitions = await self.list_all()
                 return await self._snapshots_for(definitions)
 
     async def read_snapshots_active(self) -> list[QuestDefinitionSnapshot]:

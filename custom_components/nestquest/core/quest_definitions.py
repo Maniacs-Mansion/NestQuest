@@ -558,6 +558,21 @@ async def list_active_definitions(
     return [_bundle_snapshot(snapshot) for snapshot in snapshots]
 
 
+async def list_all_definitions(
+    database: NestQuestDatabase,
+) -> list[CreatedQuestDefinition]:
+    """Return EVERY definition, active AND inactive (rich view).
+
+    Mirrors :func:`list_active_definitions` without the activity
+    filter: ordered by rising definition id, each entry the same
+    :class:`CreatedQuestDefinition` snapshot, read by the DAO inside one
+    locked transaction.
+    """
+    dao = QuestDefinitionsDao(database)
+    snapshots = await dao.list_snapshots_all()
+    return [_bundle_snapshot(snapshot) for snapshot in snapshots]
+
+
 async def list_definitions_for_child(
     database: NestQuestDatabase,
     child_id: int,
