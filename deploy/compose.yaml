@@ -1,0 +1,79 @@
+# Compose deployment scaffold for the NestQuest API service (Feature
+# 17).  The SQLite database lives on the NAMED VOLUME ``nestquest-db``
+# mounted at /var/lib/nestquest — recreating the container keeps the
+# household data (``docker compose down`` leaves named volumes alone).
+#
+# Configuration is supplied by the environment: the fixed database
+# path here, and the secret values (panel service token, Authentik
+# OIDC settings) from ``deploy/.env`` — a git-ignored file you create
+# from ``deploy/.env.example`` (placeholder names only; never commit
+# real values).
+#
+# TLS is terminated by the shared Traefik reverse proxy on another
+# host, which forwards to this service on port 8080.  The published
+# port binds NESTQUEST_BIND_ADDRESS (read from deploy/.env, the
+# project directory's env file): it defaults to 127.0.0.1 so an
+# unconfigured deployment is never exposed; set it to the host's LAN
+# address on the API box so the proxy can reach it.
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: nestquest-api:latest
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${NESTQUEST_BIND_ADDRESS:-127.0.0.1}:8080:8080"
+    environment:
+      # The SQLite file inside the named volume; fixed, not a secret.
+      NESTQUEST_DB_PATH: /var/lib/nestquest/nestquest.db
+    env_file:
+      # Secret values (NESTQUEST_PANEL_TOKEN, NESTQUEST_OIDC_*); absent
+      # until you create deploy/.env from the example.
+      - path: .env
+        required: false
+    volumes:
+      - nestquest-db:/var/lib/nestquest
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Continuous backup: streams the SQLite database on the shared named
+  # volume to the Synology NAS over SFTP (config: deploy/litestream.yml).
+  # The SFTP private key deploy/litestream_key is git-ignored and must be
+  # created on the API box before starting (see api/README.md).
+  #
+  # The database volume is mounted READ-WRITE on purpose: Litestream
+  # cannot run against a read-only mount ("unable to open database file
+  # (14)", even with its metadata moved elsewhere) because it writes its
+  # _litestream_seq/_litestream_lock tables into the database, opens the
+  # -wal/-shm files for writing, and checkpoints the WAL.  The write
+  # access is contained instead: it runs as the API's own non-root user
+  # (uid/gid 999, owner of the volume) with a read-only root filesystem,
+  # no privilege escalation and no Linux capabilities.
+  litestream:
+    image: litestream/litestream:0.5.17@sha256:4b02b9859a6b6b4087d8b8944e15f7e984bd7957cba322bbeee38b0e27b9656a
+    restart: unless-stopped
+    command: ["replicate", "-config", "/etc/litestream.yml"]
+    user: "999:999"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - nestquest-db:/var/lib/nestquest
+      - ./litestream.yml:/etc/litestream.yml:ro
+      - ./litestream_key:/etc/litestream/sftp_key:ro
+
+volumes:
+  nestquest-db:
