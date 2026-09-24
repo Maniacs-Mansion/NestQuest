@@ -36,4 +36,13 @@ describe("NestQuest Admin shell", () => {
       "true",
     );
   });
+
+  it("the Tasks tab renders the definitions screen", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+
+    expect(screen.getByRole("heading", { name: "Tasks" })).toBeTruthy();
+    expect(screen.getByRole("tabpanel").textContent).not.toContain("placeholder");
+  });
 });
