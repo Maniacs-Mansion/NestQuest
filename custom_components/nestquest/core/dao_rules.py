@@ -105,6 +105,19 @@ def _validate_window(window: str) -> None:
         )
 
 
+def _validate_skip_on_away(value: object) -> int:
+    """Return ``value`` as 0/1, raising ValueError for anything else.
+
+    The fresh-schema CHECK constraint enforces this in SQLite, but a
+    migrated database gained the column through ``ADD COLUMN`` without
+    it, so every DAO write path validates here instead.  Accepts a bool
+    or the ints 0/1; floats, strings and other ints are rejected.
+    """
+    if not isinstance(value, int) or value not in (0, 1):
+        raise ValueError(f"skip_on_away must be 0 or 1, got {value!r}")
+    return int(value)
+
+
 @dataclass(frozen=True)
 class ScheduleRuleRecord:
     """One row of ``schedule_rules``."""
@@ -647,6 +660,7 @@ class QuestDefinitionsDao:
         empty list or None creates an unassigned definition, which
         callers may fill via :meth:`add_assignee`.
         """
+        skip_on_away_value = _validate_skip_on_away(skip_on_away)
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 await self._validate_rule_exists(schedule_rule_id)
@@ -665,7 +679,7 @@ class QuestDefinitionsDao:
                         due_time,
                         int(is_active),
                         created_at,
-                        int(skip_on_away),
+                        skip_on_away_value,
                     ),
                 )
                 definition_id = result.lastrowid
@@ -719,6 +733,7 @@ class QuestDefinitionsDao:
         _validate_date(schedule_rule.start_date, "start_date")
         if schedule_rule.end_date is not None:
             _validate_date(schedule_rule.end_date, "end_date")
+        skip_on_away_value = _validate_skip_on_away(skip_on_away)
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 for child_id in assignee_child_ids:
@@ -737,7 +752,7 @@ class QuestDefinitionsDao:
                         None,
                         1,
                         created_at,
-                        int(skip_on_away),
+                        skip_on_away_value,
                     ),
                 )
                 definition_id = result.lastrowid
@@ -810,6 +825,8 @@ class QuestDefinitionsDao:
         does not exist.  Edits change future instances only: no
         ``quest_instances`` or ``completion_events`` row is touched.
         """
+        if skip_on_away is not _UNSET:
+            skip_on_away = _validate_skip_on_away(skip_on_away)
         async with _connection_lock(self._database):
             async with self._database.transaction():
                 definition = await self.get(definition_id)
@@ -829,7 +846,7 @@ class QuestDefinitionsDao:
                         parameters.append(value)
                 if skip_on_away is not _UNSET:
                     assignments.append("skip_on_away = ?")
-                    parameters.append(int(skip_on_away))
+                    parameters.append(skip_on_away)
                 if assignments:
                     parameters.append(definition_id)
                     await self._database.execute(
@@ -1030,13 +1047,16 @@ class QuestDefinitionsDao:
         description: str | None | object = _UNSET,
         icon: str | None | object = _UNSET,
         due_time: str | None | object = _UNSET,
+        skip_on_away: bool | None = None,
     ) -> int:
         """Update the given fields; returns rows updated (0 if absent).
 
         Arguments default to the module sentinel ``_UNSET`` meaning
         "leave this column alone"; passing ``None`` explicitly writes
         SQL NULL, so callers can remove optional metadata
-        (description, icon, due_time).  Assignment and activation are
+        (description, icon, due_time).  ``skip_on_away`` is NOT NULL,
+        so its ``None`` default leaves it unchanged; a supplied value
+        must be 0/1 (a bool).  Assignment and activation are
         deliberately NOT settable here: they have their own explicit
         operations (:meth:`add_assignee`, :meth:`remove_assignee`,
         :meth:`set_active`) so they stay separately loggable and
@@ -1053,6 +1073,9 @@ class QuestDefinitionsDao:
             if value is not _UNSET:
                 assignments.append(f"{column} = ?")
                 parameters.append(value)
+        if skip_on_away is not None:
+            assignments.append("skip_on_away = ?")
+            parameters.append(_validate_skip_on_away(skip_on_away))
         if not assignments:
             return 0
         parameters.append(definition_id)

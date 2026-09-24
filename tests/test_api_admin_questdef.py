@@ -523,6 +523,75 @@ async def test_edit_rejections_are_422_and_change_nothing(
     }
 
 
+@pytest.mark.parametrize("coercible", [0, 1, "true", "false"])
+async def test_create_rejects_coercible_skip_on_away_and_persists_nothing(
+    admin_questdefs: SimpleNamespace, coercible: object
+) -> None:
+    """A numeric or string skip_on_away is 422, not coerced to a bool."""
+    client = admin_questdefs.client
+    dao = _dao_rules.QuestDefinitionsDao(admin_questdefs.database)
+    ada = (await _create_children(client, ("Ada",)))[0]
+    existing = await client.post(
+        "/api/v1/admin/quest-definitions",
+        json={
+            "title": "Feed the cat",
+            "rule": _weekly_rule_body(),
+            "assignee_child_ids": [ada],
+            "windows": ["morning"],
+            "skip_on_away": False,
+        },
+        headers=_admin_headers(),
+    )
+    assert existing.status_code == 201
+    existing_id = existing.json()["id"]
+
+    response = await client.post(
+        "/api/v1/admin/quest-definitions",
+        json={
+            "title": "Tidy the den",
+            "rule": _weekly_rule_body(),
+            "assignee_child_ids": [ada],
+            "windows": ["morning"],
+            "skip_on_away": coercible,
+        },
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 422
+    assert set(await _definitions_by_id(admin_questdefs.database)) == {
+        existing_id
+    }
+    assert (await dao.get(existing_id)).skip_on_away is False
+
+
+@pytest.mark.parametrize("coercible", [0, 1, "true", "false"])
+async def test_edit_rejects_coercible_skip_on_away_and_changes_nothing(
+    admin_questdefs: SimpleNamespace, coercible: object
+) -> None:
+    """A numeric or string skip_on_away edit is 422; the flag is kept."""
+    client = admin_questdefs.client
+    dao = _dao_rules.QuestDefinitionsDao(admin_questdefs.database)
+    ada = (await _create_children(client, ("Ada",)))[0]
+    definition_id = (await _create_definition(client, [ada])).json()["id"]
+    # Start from each stored value so a coerced write would be visible.
+    for stored in (True, False):
+        set_flag = await client.patch(
+            f"/api/v1/admin/quest-definitions/{definition_id}",
+            json={"skip_on_away": stored},
+            headers=_admin_headers(),
+        )
+        assert set_flag.status_code == 200
+
+        response = await client.patch(
+            f"/api/v1/admin/quest-definitions/{definition_id}",
+            json={"skip_on_away": coercible, "title": "Renamed"},
+            headers=_admin_headers(),
+        )
+        assert response.status_code == 422
+        stored_definition = await dao.get(definition_id)
+        assert stored_definition.skip_on_away is stored
+        assert stored_definition.title == "Tidy the den"
+
+
 # --- set_active -------------------------------------------------------------
 
 

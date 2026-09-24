@@ -258,7 +258,7 @@ QUEST_DEFINITIONS_TABLE_SQL = """(
     due_time TEXT,
     is_active INTEGER NOT NULL DEFAULT 1 CHECK (typeof(is_active) = 'integer' AND is_active IN (0, 1)),
     created_at TEXT NOT NULL,
-    skip_on_away INTEGER NOT NULL DEFAULT 1
+    skip_on_away INTEGER NOT NULL DEFAULT 1 CHECK (skip_on_away IN (0, 1))
 )"""
 
 SCHEMA_V1_QUEST_DEFINITIONS_DDL: list[str] = [

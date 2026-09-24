@@ -251,7 +251,7 @@ import datetime
 from typing import Annotated, Literal, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, StrictBool, field_validator, model_validator
 
 from api import transitions as api_transitions
 from api.auth import require_admin
@@ -464,7 +464,7 @@ class AdminQuestDefinitionCreateRequest(BaseModel):
     windows: list[str | tuple[str, str | None]]
     description: str | None = None
     icon: str | None = None
-    skip_on_away: bool = True
+    skip_on_away: StrictBool = True
 
 
 class AdminQuestDefinitionEditRequest(BaseModel):
@@ -488,7 +488,7 @@ class AdminQuestDefinitionEditRequest(BaseModel):
     icon: str | None = None
     rule: AdminRuleRequest | None = None
     windows: list[str | tuple[str, str | None]] | None = None
-    skip_on_away: bool | None = None
+    skip_on_away: StrictBool | None = None
 
 
 class AdminQuestDefinitionActiveRequest(BaseModel):
