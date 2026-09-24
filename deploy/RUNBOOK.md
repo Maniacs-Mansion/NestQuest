@@ -97,16 +97,18 @@ repository. What it must contain:
 
 | Router | Rule | Middleware | Service |
 | --- | --- | --- | --- |
-| panel (priority 300) | ``Host(`nestquest.cubecraftlabs.com`) && PathPrefix(`/api/v1/panel`)`` | `ipAllowList`, `sourceRange: ["10.60.1.80/32"]` (HA box only) | `http://10.60.1.14:8080` |
-| admin (priority 200: `/api/*` other than the panel, `/health`, `/openapi.json`, `/docs`) | ``Host(`nestquest.cubecraftlabs.com`) && (PathPrefix(`/api`) \|\| Path(`/health`) \|\| Path(`/openapi.json`) \|\| PathPrefix(`/docs`))`` | none — public; the API itself enforces Authentik JWTs (section 4) | `http://10.60.1.14:8080` |
-| app (priority 100: everything else — the admin PWA) | see section 10 | none at Traefik; nginx allow-lists the proxy | `http://10.60.1.14:8081` |
+| `nestquest-panel` (priority 200) | ``Host(`nestquest.cubecraftlabs.com`) && PathPrefix(`/api/v1/panel`)`` | `nestquest-panel-lan`: `ipAllowList`, `sourceRange: ["10.60.1.80/32"]` (HA box only) | `nestquest-api` → `http://10.60.1.14:8080` |
+| `nestquest-admin` (priority 100: `/api/v1/admin`, `/health`, `/openapi.json`, `/docs`) | ``Host(`nestquest.cubecraftlabs.com`) && (PathPrefix(`/api/v1/admin`) \|\| Path(`/health`) \|\| Path(`/openapi.json`) \|\| PathPrefix(`/docs`))`` | `nestquest-headers` — no source restriction; the API itself enforces Authentik JWTs (section 4) | `nestquest-api` → `http://10.60.1.14:8080` |
+| `nestquest-app` (priority 50: everything else — the admin PWA) | see section 10 | none at Traefik; nginx allow-lists the proxy | `nestquest-pwa` → `http://10.60.1.14:8081` |
 
 All routers use the HTTPS entrypoint `websecure` with `tls.certResolver: myresolver`
 (HTTP is redirected to HTTPS by the shared Traefik). Priorities are set
-explicitly so the order never depends on rule length: panel above admin,
-and the PWA's `nestquest-app` router below both. The admin router is
-scoped to the API's paths — a bare ``Host(...)`` rule at a higher
-priority would swallow `/` and every PWA route.
+explicitly so the order never depends on rule length: panel (200) above
+admin (100), and the PWA's `nestquest-app` router (50) below both. The
+admin router is scoped to `/api/v1/admin`, `/health`, `/openapi.json`
+and `/docs` — a bare ``Host(...)`` rule at a higher priority would
+swallow `/` and every PWA route. Any other `/api/*` path matches no
+router (the app router excludes `/api`), so Traefik answers `404`.
 
 Reference shape, to rebuild the file if it is ever lost (entrypoint names
 must match the shared Traefik's static config on nukapi-03):
@@ -116,30 +118,33 @@ http:
   routers:
     nestquest-panel:
       rule: "Host(`nestquest.cubecraftlabs.com`) && PathPrefix(`/api/v1/panel`)"
-      priority: 300
+      priority: 200
       entryPoints: [websecure]
-      middlewares: [nestquest-panel-allowlist]
+      middlewares: [nestquest-panel-lan]
       service: nestquest-api
       tls:
         certResolver: myresolver
     nestquest-admin:
-      rule: "Host(`nestquest.cubecraftlabs.com`) && (PathPrefix(`/api`) || Path(`/health`) || Path(`/openapi.json`) || PathPrefix(`/docs`))"
-      priority: 200
+      rule: "Host(`nestquest.cubecraftlabs.com`) && (PathPrefix(`/api/v1/admin`) || Path(`/health`) || Path(`/openapi.json`) || PathPrefix(`/docs`))"
+      priority: 100
       entryPoints: [websecure]
+      middlewares: [nestquest-headers]
       service: nestquest-api
       tls:
         certResolver: myresolver
     nestquest-app:
       rule: "Host(`nestquest.cubecraftlabs.com`) && !PathPrefix(`/api`) && !Path(`/health`) && !Path(`/openapi.json`) && !PathPrefix(`/docs`)"
-      priority: 100
+      priority: 50
       entryPoints: [websecure]
       service: nestquest-pwa
       tls:
         certResolver: myresolver
   middlewares:
-    nestquest-panel-allowlist:
+    nestquest-panel-lan:
       ipAllowList:
         sourceRange: ["10.60.1.80/32"]
+    nestquest-headers:
+      # headers middleware; copy its definition from the live file
   services:
     nestquest-api:
       loadBalancer:
@@ -529,7 +534,7 @@ Build and start (the `api` and `litestream` services are unaffected):
 
 | Router | Rule | Priority | Service |
 | --- | --- | --- | --- |
-| `nestquest-app` | ``Host(`nestquest.cubecraftlabs.com`) && !PathPrefix(`/api`) && !Path(`/health`) && !Path(`/openapi.json`) && !PathPrefix(`/docs`)`` | `100` — below `nestquest-admin` (200) and `nestquest-panel` (300) | `nestquest-pwa` → `http://10.60.1.14:8081` |
+| `nestquest-app` | ``Host(`nestquest.cubecraftlabs.com`) && !PathPrefix(`/api`) && !Path(`/health`) && !Path(`/openapi.json`) && !PathPrefix(`/docs`)`` | `50` — below `nestquest-admin` (100) and `nestquest-panel` (200) | `nestquest-pwa` → `http://10.60.1.14:8081` |
 
 Same `websecure` entrypoint and `myresolver` certificate as the API
 routers; no Traefik middleware (nginx enforces the source allow-list).
