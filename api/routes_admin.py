@@ -172,6 +172,33 @@ integration's rollover listener shares:
   read-only-over-the-domain-tables guarantee all live in the core; the
   response reports how many transitions were published.
 
+The occurrence-preview route (task 5f843564) lets the admin PWA's
+Definitions edit sheet show the next dates a rule fires on WITHOUT
+reimplementing the recurrence rules client-side:
+
+- ``POST /quest-definitions/occurrences-preview`` takes the SAME
+  ``rule`` object create/edit take (:class:`AdminRuleRequest`, built
+  through the SAME :func:`_rule_from_request` / core ``from_dict``
+  validation, so a rejected rule is 422 exactly as on create), an
+  optional ``start_date`` (default: the API host's local ``today``,
+  ONE :func:`_local_now` clock read) and an optional ``count`` (1..50,
+  default 10).  The dates come from ONE
+  :func:`nestquest_core.recurrence.occurrences_between` call — the
+  same engine the materializer walks — so the preview can only agree
+  with what would be generated.  The scan is BOUNDED server-side: the
+  window is ``[start_date, start_date + 366 days]`` inclusive,
+  whatever the caller sends, so every rule shape (a yearly rule
+  included) shows at least its next occurrence, and a caller can never
+  ask for an unbounded walk.  Any strict ``start_date`` is accepted
+  rather than clamped or range-limited — the fixed window already
+  bounds the work — EXCEPT one whose window would reach 9999-12-31,
+  which is 422 (the core's day walk cannot step past the calendar's
+  last date).  ``start_date`` strictness
+  (``YYYY-MM-DD``) is the core's own date validator; a non-strict or
+  unparseable value is 422.  A ``count`` outside 1..50 is the body
+  model's 422 before any handler code runs.  Nothing is read or
+  written: the route touches no database.
+
 Error mapping (every children, quest-definition and presence route,
 deliberately narrow):
 
@@ -450,6 +477,45 @@ class AdminRuleRequest(BaseModel):
     month: int | None = None
     start_date: str = "1970-01-01"
     end_date: str | None = None
+
+
+#: Upper bound on ``count`` for the occurrence-preview route.
+_PREVIEW_MAX_COUNT = 50
+
+#: Days after ``start_date`` the occurrence-preview window spans
+#: (inclusive), so a yearly rule always shows its next occurrence.
+_PREVIEW_WINDOW_DAYS = 366
+
+
+class AdminOccurrencesPreviewRequest(BaseModel):
+    """The body of ``POST /api/v1/admin/quest-definitions/occurrences-preview``.
+
+    ``rule`` is the SAME object create/edit take.  ``start_date`` is an
+    optional strict ``YYYY-MM-DD`` (validated by the core; default the
+    API host's today).  ``count`` is a strict JSON integer in
+    1..``_PREVIEW_MAX_COUNT`` — anything else is 422 before any handler
+    code runs.
+    """
+
+    rule: AdminRuleRequest
+    start_date: str | None = None
+    count: StrictInt = 10
+
+    @field_validator("count")
+    @classmethod
+    def _count_in_range(cls, value: int) -> int:
+        """Reject a count outside 1.._PREVIEW_MAX_COUNT."""
+        if not 1 <= value <= _PREVIEW_MAX_COUNT:
+            raise ValueError(
+                f"count must be between 1 and {_PREVIEW_MAX_COUNT}"
+            )
+        return value
+
+
+class AdminOccurrencesPreviewResponse(BaseModel):
+    """The next occurrence dates (``YYYY-MM-DD``, ascending)."""
+
+    dates: list[str]
 
 
 class AdminQuestDefinitionCreateRequest(BaseModel):
@@ -938,6 +1004,40 @@ def _raise_sweep_error(error: ValueError) -> NoReturn:
     raise HTTPException(status_code=422, detail=str(error)) from error
 
 
+def _raise_preview_error(error: ValueError) -> NoReturn:
+    """Map a core recurrence ``ValueError`` from the preview route to 422.
+
+    The preview route has no path ids, so it has no 404 case: a
+    rejected rule (:class:`~nestquest_core.recurrence.RuleValidationError`)
+    or a non-strict ``start_date`` is 422 with the core's message as
+    the detail.  Only ``ValueError`` is caught, so an unexpected
+    failure re-raises rather than becoming a 4xx.
+    """
+    raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+def _preview_window_end(start_date: str) -> str:
+    """Return the preview window's inclusive end for ``start_date``.
+
+    ``start_date`` + :data:`_PREVIEW_WINDOW_DAYS`.  Parsing here only
+    locates the window; the STRICT ``YYYY-MM-DD`` check stays the
+    core's — :func:`~nestquest_core.recurrence.occurrences_between`
+    re-validates the same string and rejects any lenient form this
+    parse accepted.  Raises ``ValueError`` for an unparseable value and
+    for a start whose window would reach the calendar's last date (the
+    core's day walk steps one day PAST its end, which overflows there).
+    """
+    start = datetime.date.fromisoformat(start_date)
+    if datetime.date.max - start <= datetime.timedelta(
+        days=_PREVIEW_WINDOW_DAYS
+    ):
+        raise ValueError(
+            f"start_date {start_date!r} is too close to the end of the "
+            "calendar for a preview window"
+        )
+    return (start + datetime.timedelta(days=_PREVIEW_WINDOW_DAYS)).isoformat()
+
+
 def _local_now() -> datetime.datetime:
     """Return the API host's local time as ONE timezone-aware clock read.
 
@@ -1257,6 +1357,42 @@ async def admin_create_quest_definition(
     except ValueError as error:
         _raise_quest_definition_error(error)
     return _quest_definition_response(bundle)
+
+
+@router.post(
+    "/quest-definitions/occurrences-preview",
+    summary="Preview the next occurrence dates of a schedule rule",
+    response_model=AdminOccurrencesPreviewResponse,
+)
+async def admin_preview_occurrences(
+    body: AdminOccurrencesPreviewRequest,
+) -> AdminOccurrencesPreviewResponse:
+    """Return the first ``count`` dates the supplied rule fires on.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: the ``rule``
+    becomes ONE :class:`~nestquest_core.recurrence.ScheduleRule`
+    (:func:`_rule_from_request`, the create/edit path), and the dates
+    come from ONE :func:`nestquest_core.recurrence.occurrences_between`
+    call over the bounded window ``[start_date, start_date + 366
+    days]`` — ``start_date`` defaulting to ONE :func:`_local_now` clock
+    read — truncated to ``count``.  Every core ``ValueError`` is 422
+    (:func:`_raise_preview_error`).  No database access.
+    """
+    start_date = (
+        body.start_date
+        if body.start_date is not None
+        else _local_now().date().isoformat()
+    )
+    try:
+        rule = _rule_from_request(body.rule)
+        dates = core_recurrence.occurrences_between(
+            rule, start_date, _preview_window_end(start_date)
+        )
+    except ValueError as error:
+        _raise_preview_error(error)
+    return AdminOccurrencesPreviewResponse(dates=dates[: body.count])
 
 
 @router.patch(
