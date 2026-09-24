@@ -1,7 +1,7 @@
 /**
  * Today tab — compact density (design/ADMIN-SPEC.md §2.1–2.3, §2.5–2.6).
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   fetchSnapshot,
   type AdminSnapshot,
@@ -9,6 +9,9 @@ import {
   type SnapshotInstance,
 } from "../api/snapshot";
 import { ApiForbiddenError } from "../api/client";
+import { ApiRequestError } from "../api/definitions";
+import { uncompleteInstance } from "../api/instances";
+import { useTransitions } from "../api/useTransitions";
 import {
   formatClockTime,
   formatDueTime,
@@ -144,11 +147,18 @@ function attentionItems(snapshot: AdminSnapshot): AttentionItem[] {
   return [...overdue, ...completed];
 }
 
-function AttentionRow({ item }: { item: AttentionItem }) {
+interface UndoControl {
+  /** The instance whose Undo is in flight, or null. */
+  pendingId: number | null;
+  onUndo: (instanceId: number) => void;
+}
+
+function AttentionRow({ item, undo }: { item: AttentionItem; undo: UndoControl }) {
   const { instance, childName } = item;
   const overdue = isOverdueOpen(instance);
-  // TODO(e57facc2): wire "Mark done" / "Undo" mutations and live updates.
-  // The admin plane has no complete route yet, so both actions are inert here.
+  const undoing = undo.pendingId === instance.id;
+  // TODO(e57facc2): wire "Mark done". The admin plane has no complete route
+  // yet, so that action is inert here.
   return (
     <li className="today-event" data-testid={`attention-${instance.id}`}>
       <span
@@ -173,12 +183,21 @@ function AttentionRow({ item }: { item: AttentionItem }) {
           </div>
         )}
       </div>
-      <button
-        type="button"
-        className={overdue ? "today-action today-action--done" : "today-action today-action--undo"}
-      >
-        {overdue ? "Mark done" : "Undo"}
-      </button>
+      {overdue ? (
+        <button type="button" className="today-action today-action--done">
+          Mark done
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="today-action today-action--undo"
+          disabled={undo.pendingId !== null}
+          aria-busy={undoing}
+          onClick={() => undo.onUndo(instance.id)}
+        >
+          {undoing ? "Undoing…" : "Undo"}
+        </button>
+      )}
     </li>
   );
 }
@@ -197,10 +216,25 @@ function PermissionNote() {
 export default function TodayTab() {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [attempt, setAttempt] = useState(0);
+  /** The next load is a refresh in place: keep the current view, no loading state. */
+  const silentNext = useRef(false);
+  const [undoingId, setUndoingId] = useState<number | null>(null);
+  const undoingRef = useRef(false);
+  const [undoError, setUndoError] = useState<string | null>(null);
+
+  function refresh() {
+    silentNext.current = true;
+    setAttempt((n) => n + 1);
+  }
+
+  // Any transition (completed, uncompleted, missed, day complete) changes the snapshot.
+  useTransitions(refresh);
 
   useEffect(() => {
     let cancelled = false;
-    setState({ kind: "loading" });
+    const silent = silentNext.current;
+    silentNext.current = false;
+    if (!silent) setState({ kind: "loading" });
     fetchSnapshot()
       .then((snapshot) => {
         if (!cancelled) setState({ kind: "ready", snapshot });
@@ -211,12 +245,36 @@ export default function TodayTab() {
           error instanceof ApiForbiddenError
             ? error.message
             : "Today's snapshot could not be loaded. Check your connection and try again.";
-        setState({ kind: "error", message });
+        // A failed refresh keeps the snapshot already on screen.
+        setState((prev) => (silent && prev.kind === "ready" ? prev : { kind: "error", message }));
       });
     return () => {
       cancelled = true;
     };
   }, [attempt]);
+
+  /** Reverse one completion, then refetch the snapshot. One request at a time. */
+  async function undo(instanceId: number) {
+    if (undoingRef.current) return;
+    undoingRef.current = true;
+    setUndoingId(instanceId);
+    setUndoError(null);
+    try {
+      await uncompleteInstance(instanceId);
+      refresh();
+    } catch (error: unknown) {
+      setUndoError(
+        error instanceof ApiForbiddenError
+          ? error.message
+          : error instanceof ApiRequestError && error.detail
+            ? `The completion could not be undone: ${error.detail}`
+            : "The completion could not be undone. Check your connection and try again.",
+      );
+    } finally {
+      undoingRef.current = false;
+      setUndoingId(null);
+    }
+  }
 
   let sub = "";
   let body;
@@ -251,7 +309,11 @@ export default function TodayTab() {
         {attention.length > 0 ? (
           <ul className="today-card today-list" aria-label="Needs attention">
             {attention.map((item) => (
-              <AttentionRow key={item.instance.id} item={item} />
+              <AttentionRow
+                key={item.instance.id}
+                item={item}
+                undo={{ pendingId: undoingId, onUndo: (id) => void undo(id) }}
+              />
             ))}
           </ul>
         ) : (
@@ -270,6 +332,14 @@ export default function TodayTab() {
         data-testid="today-scroll"
         style={{ paddingBottom: SCROLL_BOTTOM_PADDING }}
       >
+        {undoError !== null ? (
+          <div className="today-action-error" role="alert" data-testid="today-undo-error">
+            <span>{undoError}</span>
+            <button type="button" className="today-action-dismiss" onClick={() => setUndoError(null)}>
+              Dismiss
+            </button>
+          </div>
+        ) : null}
         {body}
       </div>
     </div>

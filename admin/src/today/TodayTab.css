@@ -241,6 +241,37 @@
   color: var(--nq-brand-purple);
 }
 
+.today-action:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* Non-blocking Undo failure message. */
+.today-action-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: var(--nq-a-density-row-pad);
+  border-radius: var(--nq-a-density-radius);
+  background: var(--nq-a-danger-bg);
+  color: var(--nq-a-danger-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.today-action-dismiss {
+  flex: none;
+  padding: 4px 8px;
+  border: none;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .today-empty {
   padding: var(--nq-a-density-card-pad);
   font-size: 13px;

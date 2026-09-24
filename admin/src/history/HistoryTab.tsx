@@ -6,6 +6,8 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { ApiForbiddenError } from "../api/client";
+import type { TransitionEvent } from "../api/events";
+import { useTransitions } from "../api/useTransitions";
 import { exportHistoryCsv, fetchHistory, type HistoryFilter, type HistoryRow } from "../api/history";
 import { localTodayIso } from "../schedule/cycle";
 import { dayLabel, groupByDay, rowMeta, rowTime, shiftIso } from "./format";
@@ -165,7 +167,17 @@ export default function HistoryTab({ today = localTodayIso() }: { today?: string
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const exportingRef = useRef(false);
+  /** The next load is a refresh in place: keep the current rows, no loading state. */
+  const silentNext = useRef(false);
   const start = shiftIso(today, -(RANGE_DAYS - 1));
+
+  // A quest transition is a new history row (or changes a derived missed row);
+  // a day-complete adds none. The refetch keeps the active filter and range.
+  useTransitions((event: TransitionEvent) => {
+    if (event.type === "nestquest_child_day_complete") return;
+    silentNext.current = true;
+    setAttempt((n) => n + 1);
+  });
 
   /** Download the CSV for the active filter over the displayed range. */
   async function exportCsv() {
@@ -190,7 +202,9 @@ export default function HistoryTab({ today = localTodayIso() }: { today?: string
 
   useEffect(() => {
     let cancelled = false;
-    setState({ kind: "loading" });
+    const silent = silentNext.current;
+    silentNext.current = false;
+    if (!silent) setState({ kind: "loading" });
     loadHistory(filter, start, today)
       .then((data) => {
         if (!cancelled) setState({ kind: "ready", data });
@@ -201,7 +215,8 @@ export default function HistoryTab({ today = localTodayIso() }: { today?: string
           error instanceof ApiForbiddenError
             ? error.message
             : "The history could not be loaded. Check your connection and try again.";
-        setState({ kind: "error", message });
+        // A failed refresh keeps the rows already on screen.
+        setState((prev) => (silent && prev.kind === "ready" ? prev : { kind: "error", message }));
       });
     return () => {
       cancelled = true;
