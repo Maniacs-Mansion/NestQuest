@@ -39,7 +39,7 @@ type Consequence =
   | { kind: "ready"; removed: number }
   | { kind: "error"; message: string };
 
-function errorMessage(error: unknown, fallback: string): string {
+export function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof ApiForbiddenError) return error.message;
   if (error instanceof ApiRequestError && error.detail) return error.detail;
   return fallback;
@@ -69,6 +69,24 @@ export function inertOutside(root: HTMLElement): () => void {
       el.removeAttribute("aria-hidden");
     }
   };
+}
+
+/** Keep Tab / Shift+Tab cycling inside `root` (a pushed modal screen). */
+export function trapTab(event: ReactKeyboardEvent<HTMLElement>, root: HTMLElement | null): void {
+  if (event.key !== "Tab" || !root) return;
+  const focusable = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE));
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const current = document.activeElement;
+  const outside = !focusable.includes(current as HTMLElement);
+  if (event.shiftKey && (current === first || outside)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (current === last || outside)) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function tasksPhrase(count: number): string {
@@ -118,20 +136,7 @@ export default function OverrideEditor({
       if (!saving) onCancel();
       return;
     }
-    if (event.key !== "Tab" || !screenRef.current) return;
-    const focusable = Array.from(screenRef.current.querySelectorAll<HTMLElement>(FOCUSABLE));
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const current = document.activeElement;
-    const outside = !focusable.includes(current as HTMLElement);
-    if (event.shiftKey && (current === first || outside)) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && (current === last || outside)) {
-      event.preventDefault();
-      first.focus();
-    }
+    trapTab(event, screenRef.current);
   }
 
   const child = childOptions.find((c) => c.id === childId) ?? childOptions[0];

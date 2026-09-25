@@ -124,18 +124,20 @@ async def _create_daily_definition(
     return created.json()["id"]
 
 
-async def _set_custody_schedule(client: object, child_id: int) -> None:
-    """Anchor the two-week custody cycle on today (week 0 starts today)."""
-    response = await client.put(
-        f"/api/v1/admin/children/{child_id}/presence-schedule",
+async def _set_custody_pattern(client: object, child_id: int) -> None:
+    """Add the two-week custody home pattern anchored on today (week 0)."""
+    response = await client.post(
+        f"/api/v1/admin/children/{child_id}/presence-patterns",
         json={
+            "name": "Custody",
+            "kind": "home",
             "cycle_length_weeks": 2,
             "anchor_date": _day(0),
             "pattern": CUSTODY_PATTERN,
         },
         headers=_admin_headers(),
     )
-    assert response.status_code == 200
+    assert response.status_code == 201
 
 
 async def _materialize_horizon(database: object) -> None:
@@ -210,7 +212,7 @@ async def custody(temp_db_path: str) -> SimpleNamespace:
             client, child_id, "Feed the fish", ["afternoon"],
             skip_on_away=False,
         )
-        await _set_custody_schedule(client, child_id)
+        await _set_custody_pattern(client, child_id)
         await _materialize_horizon(database)
         yield SimpleNamespace(
             client=client,
@@ -290,7 +292,7 @@ async def test_skip_on_away_false_definition_contributes_nothing(
             client, child_id, "Feed the fish", ["morning"],
             skip_on_away=False,
         )
-        await _set_custody_schedule(client, child_id)
+        await _set_custody_pattern(client, child_id)
         await _materialize_horizon(database)
         assert await _consequence(client, _body(child_id, 0, 14)) == 0
 

@@ -27,6 +27,7 @@ import {
 } from "../api/definitions";
 import {
   MONTH_SHORT,
+  WEEKDAY_DISPLAY_ORDER,
   WEEKDAY_SHORT,
   WINDOW_LABELS,
   WINDOW_ORDER,
@@ -680,9 +681,9 @@ function EditSheet({
             </div>
             {draft.repeats === "weekly" || draft.repeats === "custom" ? (
               <div className="defs-weekdays" role="group" aria-label="Days">
-                {WEEKDAY_SHORT.map((label, day) => (
+                {WEEKDAY_DISPLAY_ORDER.map((day) => (
                   <button
-                    key={label}
+                    key={day}
                     type="button"
                     aria-pressed={draft.weekdays.includes(day)}
                     aria-label={WEEKDAY_LONG[day]}
@@ -691,7 +692,7 @@ function EditSheet({
                     }
                     onClick={() => update({ weekdays: toggle(draft.weekdays, day) })}
                   >
-                    {label.charAt(0)}
+                    {WEEKDAY_SHORT[day].charAt(0)}
                   </button>
                 ))}
               </div>

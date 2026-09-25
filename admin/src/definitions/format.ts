@@ -21,6 +21,9 @@ export const WINDOW_LABELS: Record<WindowName, string> = {
 /** Index 0 = Monday .. 6 = Sunday, the core's weekday numbering. */
 export const WEEKDAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
+/** Display order for a week: Sunday first. The stored indices stay Monday=0. */
+export const WEEKDAY_DISPLAY_ORDER = [6, 0, 1, 2, 3, 4, 5];
+
 export const MONTH_SHORT = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -51,7 +54,7 @@ export function assigneeSummary(
 
 function weekdayList(days: number[] | null): string {
   return [...(days ?? [])]
-    .sort((a, b) => a - b)
+    .sort((a, b) => WEEKDAY_DISPLAY_ORDER.indexOf(a) - WEEKDAY_DISPLAY_ORDER.indexOf(b))
     .map((day) => WEEKDAY_SHORT[day])
     .join(", ");
 }

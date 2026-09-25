@@ -10,11 +10,22 @@
  * Calendar dates are "YYYY-MM-DD" strings handled as whole UTC days, so no
  * viewer offset or DST change can shift a day.
  */
-import type { PresenceOverride, PresencePattern, PresenceScheduleBody } from "../api/presence";
+import type {
+  PatternCycle,
+  PatternKind,
+  PatternWeeks,
+  PresenceOverride,
+} from "../api/presence";
 
 const MS_PER_DAY = 86_400_000;
 
 export const ALL_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
+
+/** Monday=0 weekday numbers in Sunday-first display order. */
+export const DISPLAY_WEEKDAYS = [6, 0, 1, 2, 3, 4, 5];
+
+/** Short names indexed by Monday=0 weekday number. */
+export const WEEKDAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 /** Days since 1970-01-01 for a "YYYY-MM-DD" calendar date. */
 export function dayNumber(iso: string): number {
@@ -67,44 +78,50 @@ export function monthDates(firstIso: string): string[] {
   return dates;
 }
 
-/** Present every day for every week of the cycle (the no-schedule case). */
-export function fullPattern(cycleLengthWeeks: number): PresencePattern {
-  const pattern: PresencePattern = {};
-  for (let week = 0; week < cycleLengthWeeks; week += 1) pattern[week] = [...ALL_WEEKDAYS];
+/** Every week of the cycle covers no day yet (a new pattern). */
+export function emptyPattern(cycleLengthWeeks: number): PatternWeeks {
+  const pattern: PatternWeeks = {};
+  for (let week = 0; week < cycleLengthWeeks; week += 1) pattern[week] = [];
   return pattern;
 }
 
 export type DayState = "home" | "away" | "override-home" | "override-away";
 
-export function patternIncludes(
-  schedule: PresenceScheduleBody,
-  date: string,
-): boolean {
-  const week = cycleWeekIndex(schedule.anchor_date, date, schedule.cycle_length_weeks);
-  return (schedule.pattern[week] ?? []).includes(weekdayOf(date));
+/** Does the pattern cover `date` (its cycle week lists the date's weekday)? */
+export function patternIncludes(cycle: PatternCycle, date: string): boolean {
+  const week = cycleWeekIndex(cycle.anchor_date, date, cycle.cycle_length_weeks);
+  return (cycle.pattern[week] ?? []).includes(weekdayOf(date));
 }
 
 /**
- * A date's state for one child: an override covering the date wins;
- * otherwise the schedule's pattern decides (no schedule = home every day).
+ * A date's combined state for one child, mirroring core/presence.py
+ * `is_present` — first match wins:
+ * 1. an override covering the date;
+ * 2. away when any `away` pattern covers it;
+ * 3. home when any `home` pattern covers it;
+ * 4. away when the child has at least one `home` pattern (a home pattern
+ *    lists the days the child IS here), else home (no patterns, or only
+ *    `away` ones).
  */
 export function dayState(
-  schedule: PresenceScheduleBody | null,
+  patterns: (PatternCycle & { kind: PatternKind })[],
   overrides: PresenceOverride[],
   date: string,
 ): DayState {
   const override = overrides.find((o) => o.start_date <= date && date <= o.end_date);
   if (override) return override.is_present ? "override-home" : "override-away";
-  if (!schedule) return "home";
-  return patternIncludes(schedule, date) ? "home" : "away";
+  if (patterns.some((p) => p.kind === "away" && patternIncludes(p, date))) return "away";
+  const homes = patterns.filter((p) => p.kind === "home");
+  if (homes.some((p) => patternIncludes(p, date))) return "home";
+  return homes.length > 0 ? "away" : "home";
 }
 
 /** Flip `weekday` in `week` of the pattern; returns a new pattern. */
 export function togglePatternDay(
-  pattern: PresencePattern,
+  pattern: PatternWeeks,
   week: number,
   weekday: number,
-): PresencePattern {
+): PatternWeeks {
   const days = pattern[week] ?? [];
   const next = days.includes(weekday)
     ? days.filter((d) => d !== weekday)
@@ -112,31 +129,35 @@ export function togglePatternDay(
   return { ...pattern, [week]: next };
 }
 
-/** Fit the pattern to a new cycle length; added weeks start present every day. */
-export function resizePattern(pattern: PresencePattern, cycleLengthWeeks: number): PresencePattern {
-  const next: PresencePattern = {};
+/** Fit the pattern to a new cycle length; added weeks start covering no day. */
+export function resizePattern(pattern: PatternWeeks, cycleLengthWeeks: number): PatternWeeks {
+  const next: PatternWeeks = {};
   for (let week = 0; week < cycleLengthWeeks; week += 1) {
-    next[week] = pattern[week] ? [...pattern[week]] : [...ALL_WEEKDAYS];
+    next[week] = pattern[week] ? [...pattern[week]] : [];
   }
   return next;
 }
 
-function joinWeeks(weeks: number[]): string {
-  if (weeks.length === 1) return String(weeks[0]);
-  return `${weeks.slice(0, -1).join(", ")} & ${weeks[weeks.length - 1]}`;
+function daysLabel(days: number[]): string {
+  if (days.length === 7) return "Every day";
+  if (days.length === 0) return "No days";
+  return [...days].sort((a, b) => a - b).map((d) => WEEKDAY_SHORT[d]).join(", ");
 }
 
-/** Plain-language rule: `Every day`, `Weeks 1 & 3 of cycle`, `Never home`. */
-export function presenceRule(schedule: PresenceScheduleBody | null): string {
-  if (!schedule) return "Every day";
-  const weeks: number[] = [];
-  let full = true;
-  for (let week = 0; week < schedule.cycle_length_weeks; week += 1) {
-    const days = schedule.pattern[week] ?? [];
-    if (days.length > 0) weeks.push(week + 1);
-    if (days.length < 7) full = false;
+/**
+ * Plain-language weekday set: `Thu, Fri` for a 1-week cycle, otherwise one
+ * entry per cycle week, e.g. `Week 1: Sat, Sun · Week 2: No days`.
+ */
+export function patternDaysLabel(cycle: PatternCycle): string {
+  if (cycle.cycle_length_weeks === 1) return daysLabel(cycle.pattern[0] ?? []);
+  const weeks: string[] = [];
+  for (let week = 0; week < cycle.cycle_length_weeks; week += 1) {
+    weeks.push(`Week ${week + 1}: ${daysLabel(cycle.pattern[week] ?? [])}`);
   }
-  if (full) return "Every day";
-  if (weeks.length === 0) return "Never home";
-  return `${weeks.length === 1 ? "Week" : "Weeks"} ${joinWeeks(weeks)} of cycle`;
+  return weeks.join(" · ");
+}
+
+/** `Every week`, `Every 2 weeks`. */
+export function cycleLabel(cycleLengthWeeks: number): string {
+  return cycleLengthWeeks === 1 ? "Every week" : `Every ${cycleLengthWeeks} weeks`;
 }
