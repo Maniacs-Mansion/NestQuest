@@ -1,4 +1,4 @@
-"""Typed DAO layer for the presence_schedules and presence_overrides tables.
+"""Typed DAO layer for the presence_patterns and presence_overrides tables.
 
 All SQL for these tables lives in this module per the feature
 guardrails: callers get typed dataclasses back and never see raw rows
@@ -8,11 +8,12 @@ executor and the event loop never blocks.
 
 Semantics per the done-condition and Feature 05:
 
-- A child has AT MOST ONE presence schedule (schema UNIQUE); upserting
-  by child updates the existing row rather than raising.
-- A child with NO schedule row is present every day — the absence of a
-  row is meaningful state, expressed by :meth:`PresenceSchedulesDao.get_by_child`
-  returning None, never by an empty pattern row.
+- A child has ZERO OR MORE presence patterns (schema 9 — no UNIQUE on
+  ``child_id``); each is created, updated and deleted by its own id.
+- A child with NO pattern row is present every day — the absence of a
+  row is meaningful state, expressed by
+  :meth:`PresencePatternsDao.list_by_child` returning an empty list,
+  never by an empty pattern row.
 - Overrides beat the pattern for their date range (that resolution is
   the presence engine's job, Feature 05); the DAO only stores and
   lists them.  A single-day override stores the same date as both
@@ -32,11 +33,13 @@ from .db import NestQuestDatabase
 
 
 @dataclass(frozen=True)
-class PresenceScheduleRecord:
-    """One row of ``presence_schedules``."""
+class PresencePatternRecord:
+    """One row of ``presence_patterns``."""
 
     id: int
     child_id: int
+    name: str
+    kind: str
     cycle_length_weeks: int
     anchor_date: str
     pattern: str
@@ -54,21 +57,23 @@ class PresenceOverrideRecord:
     note: str | None
 
 
-_SCHEDULE_COLUMNS = (
-    "id, child_id, cycle_length_weeks, anchor_date, pattern"
+_PATTERN_COLUMNS = (
+    "id, child_id, name, kind, cycle_length_weeks, anchor_date, pattern"
 )
 _OVERRIDE_COLUMNS = (
     "id, child_id, start_date, end_date, is_present, note"
 )
 
 
-def _schedule_from_row(row: tuple) -> PresenceScheduleRecord:
-    return PresenceScheduleRecord(
+def _pattern_from_row(row: tuple) -> PresencePatternRecord:
+    return PresencePatternRecord(
         id=row[0],
         child_id=row[1],
-        cycle_length_weeks=row[2],
-        anchor_date=row[3],
-        pattern=row[4],
+        name=row[2],
+        kind=row[3],
+        cycle_length_weeks=row[4],
+        anchor_date=row[5],
+        pattern=row[6],
     )
 
 
@@ -83,29 +88,27 @@ def _override_from_row(row: tuple) -> PresenceOverrideRecord:
     )
 
 
-class PresenceSchedulesDao:
-    """Typed async access to the ``presence_schedules`` table."""
+class PresencePatternsDao:
+    """Typed async access to the ``presence_patterns`` table."""
 
     def __init__(self, database: NestQuestDatabase) -> None:
         self._database = database
 
-    async def upsert_by_child(
+    async def create(
         self,
         child_id: int,
+        name: str,
+        kind: str,
         cycle_length_weeks: int,
         anchor_date: str,
         pattern: str,
-    ) -> PresenceScheduleRecord:
-        """Set the child's presence schedule, replacing any existing one.
+    ) -> PresencePatternRecord:
+        """Insert one pattern for the child and return it as stored.
 
-        Upsert semantics are the done-condition: a second schedule for
-        the same child updates the existing row rather than raising.
-        Runs under the connection lock so a concurrent upsert/delete
-        for the same child serializes instead of colliding on the
-        schema's UNIQUE(child_id).  Pattern validity (segment shape,
-        segment count = cycle_length_weeks) is enforced by the schema
-        CHECKs; the child must exist (FK) — validated atomically here
-        so a deleted child cannot pass a stale check.
+        The child must exist (FK) — validated atomically under the
+        connection lock so a deleted child cannot pass a stale check.
+        ``kind``, the cycle length and the pattern shape (segment count
+        = ``cycle_length_weeks``) are enforced by the schema CHECKs.
         """
         _validate_date(anchor_date, "anchor_date")
         async with _connection_lock(self._database):
@@ -115,53 +118,98 @@ class PresenceSchedulesDao:
                 )
                 if child is None:
                     raise ValueError(f"child {child_id} does not exist")
-                await self._database.execute(
-                    "INSERT INTO presence_schedules (child_id, "
+                result = await self._database.execute(
+                    "INSERT INTO presence_patterns (child_id, name, kind, "
                     "cycle_length_weeks, anchor_date, pattern) "
-                    "VALUES (?, ?, ?, ?) "
-                    "ON CONFLICT (child_id) DO UPDATE SET "
-                    "cycle_length_weeks = excluded.cycle_length_weeks, "
-                    "anchor_date = excluded.anchor_date, "
-                    "pattern = excluded.pattern",
-                    (child_id, cycle_length_weeks, anchor_date, pattern),
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        child_id,
+                        name,
+                        kind,
+                        cycle_length_weeks,
+                        anchor_date,
+                        pattern,
+                    ),
                 )
-                schedule = await self.get_by_child(child_id)
-        assert schedule is not None
-        return schedule
+                record = await self.get(result.lastrowid)
+        assert record is not None
+        return record
 
-    async def get_by_child(
-        self, child_id: int
-    ) -> PresenceScheduleRecord | None:
-        """Return the child's schedule, or None when the child has none.
+    async def list_by_child(self, child_id: int) -> list[PresencePatternRecord]:
+        """Return the child's patterns ordered by id; empty when none.
 
-        None is meaningful and UNAMBIGUOUS here: the child exists and
-        has no schedule row, i.e. the child is present every day
-        (Feature 05 guardrail).  An unknown child id raises ValueError
-        instead of returning None, because "nonexistent child" must
-        never be silently read as "present every day".
+        An empty list is meaningful and UNAMBIGUOUS here: the child
+        exists and has no pattern row, i.e. the child is present every
+        day (Feature 05 guardrail).  An unknown child id raises
+        ValueError instead of returning an empty list, because
+        "nonexistent child" must never be silently read as "present
+        every day".
         """
         child = await self._database.fetch_one(
             "SELECT 1 FROM children WHERE id = ?", (child_id,)
         )
         if child is None:
             raise ValueError(f"child {child_id} does not exist")
-        row = await self._database.fetch_one(
-            f"SELECT {_SCHEDULE_COLUMNS} FROM presence_schedules "
-            "WHERE child_id = ?",
+        rows = await self._database.fetch_all(
+            f"SELECT {_PATTERN_COLUMNS} FROM presence_patterns "
+            "WHERE child_id = ? ORDER BY id",
             (child_id,),
         )
-        return _schedule_from_row(row) if row is not None else None
+        return [_pattern_from_row(row) for row in rows]
 
-    async def delete(self, child_id: int) -> bool:
-        """Remove the child's schedule; True if a row was removed.
+    async def get(self, pattern_id: int) -> PresencePatternRecord | None:
+        """Return one pattern by id, or None when it does not exist."""
+        row = await self._database.fetch_one(
+            f"SELECT {_PATTERN_COLUMNS} FROM presence_patterns WHERE id = ?",
+            (pattern_id,),
+        )
+        return _pattern_from_row(row) if row is not None else None
 
-        After deletion the child is present every day (no row means
-        no restriction).  Deleting a schedule the child never had
-        returns False.
+    async def update(
+        self,
+        pattern_id: int,
+        name: str,
+        kind: str,
+        cycle_length_weeks: int,
+        anchor_date: str,
+        pattern: str,
+    ) -> PresencePatternRecord | None:
+        """Replace one pattern's fields; None when the id does not exist.
+
+        Every column but ``id`` and ``child_id`` is rewritten — a
+        pattern never moves to another child.  The schema CHECKs apply
+        exactly as on :meth:`create`.
+        """
+        _validate_date(anchor_date, "anchor_date")
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                result = await self._database.execute(
+                    "UPDATE presence_patterns SET name = ?, kind = ?, "
+                    "cycle_length_weeks = ?, anchor_date = ?, pattern = ? "
+                    "WHERE id = ?",
+                    (
+                        name,
+                        kind,
+                        cycle_length_weeks,
+                        anchor_date,
+                        pattern,
+                        pattern_id,
+                    ),
+                )
+                if result.rowcount == 0:
+                    return None
+                record = await self.get(pattern_id)
+        return record
+
+    async def delete(self, pattern_id: int) -> bool:
+        """Remove one pattern by id; True if a row was removed.
+
+        Deleting a child's last pattern leaves it present every day (no
+        row means no restriction).
         """
         result = await self._database.execute(
-            "DELETE FROM presence_schedules WHERE child_id = ?",
-            (child_id,),
+            "DELETE FROM presence_patterns WHERE id = ?",
+            (pattern_id,),
         )
         return result.rowcount > 0
 
@@ -345,22 +393,23 @@ async def read_snapshot_unlocked(
     range_start: str,
     range_end: str,
 ) -> tuple[
-    dict[int, PresenceScheduleRecord],
+    dict[int, list[PresencePatternRecord]],
     dict[int, list[PresenceOverrideRecord]],
 ]:
-    """Read schedules and overrides for ``child_ids`` WITHOUT locking.
+    """Read patterns and overrides for ``child_ids`` WITHOUT locking.
 
     MUST be called inside the connection lock and an open transaction, so
-    the schedules and overrides returned here stay coherent with every
+    the patterns and overrides returned here stay coherent with every
     other table the caller reads inside that same transaction (the
     materialization walk's single input snapshot does exactly that).  The
     date range comes already validated by the caller.
 
-    Returns ``(schedules, overrides)``:
+    Returns ``(patterns, overrides)``:
 
-    - ``schedules`` maps ``child_id`` to its :class:`PresenceScheduleRecord`
-      for every child that HAS a schedule row.  A child absent from the
-      mapping has no schedule, i.e. is present every day (Feature 05).
+    - ``patterns`` maps ``child_id`` to its :class:`PresencePatternRecord`
+      list (ordered by id) for every child that HAS a pattern row.  A
+      child absent from the mapping has no pattern, i.e. is present
+      every day (Feature 05).
     - ``overrides`` maps ``child_id`` to that child's overrides overlapping
       ``[range_start, range_end]`` (inclusive boundaries), ordered by start
       date; a child with no matching override is absent from the mapping.
@@ -372,9 +421,9 @@ async def read_snapshot_unlocked(
     if not children:
         return {}, {}
     placeholders = ",".join("?" for _ in children)
-    schedule_rows = await database.fetch_all(
-        f"SELECT {_SCHEDULE_COLUMNS} FROM presence_schedules "
-        f"WHERE child_id IN ({placeholders})",
+    pattern_rows = await database.fetch_all(
+        f"SELECT {_PATTERN_COLUMNS} FROM presence_patterns "
+        f"WHERE child_id IN ({placeholders}) ORDER BY id",
         tuple(children),
     )
     override_rows = await database.fetch_all(
@@ -383,12 +432,12 @@ async def read_snapshot_unlocked(
         "AND start_date <= ? ORDER BY start_date",
         tuple(children) + (range_start, range_end),
     )
-    schedules = {
-        record.child_id: record
-        for record in map(_schedule_from_row, schedule_rows)
-    }
+    patterns: dict[int, list[PresencePatternRecord]] = {}
+    for row in pattern_rows:
+        record = _pattern_from_row(row)
+        patterns.setdefault(record.child_id, []).append(record)
     overrides: dict[int, list[PresenceOverrideRecord]] = {}
     for row in override_rows:
         record = _override_from_row(row)
         overrides.setdefault(record.child_id, []).append(record)
-    return schedules, overrides
+    return patterns, overrides

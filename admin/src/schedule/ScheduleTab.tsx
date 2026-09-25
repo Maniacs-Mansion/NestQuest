@@ -1,51 +1,48 @@
 /**
- * Schedule tab — the presence month grid (design/ADMIN-SPEC.md §4).
+ * Schedule tab — the presence month grid (design/ADMIN-SPEC.md §4) and the
+ * selected child's presence patterns and overrides.
  *
- * Every day's cycle position comes from the anchor date (./cycle.ts), never
- * from ISO week numbers or week parity (D-004).
+ * The grid shows the COMBINED presence of every pattern (./cycle.ts
+ * `dayState`); each pattern's cycle position comes from its own anchor date,
+ * never from ISO week numbers or week parity (D-004).
  */
 import { useEffect, useRef, useState } from "react";
 import { ApiForbiddenError } from "../api/client";
 import { ApiRequestError, fetchChildren, type AdminChild } from "../api/definitions";
 import {
   deletePresenceOverride,
+  deletePresencePattern,
   fetchPresenceOverrides,
-  fetchPresenceSchedule,
-  savePresenceSchedule,
+  fetchPresencePatterns,
   type PresenceOverride,
-  type PresenceSchedule,
-  type PresenceScheduleBody,
+  type PresencePattern,
 } from "../api/presence";
 import {
-  cycleWeekIndex,
+  cycleLabel,
   dayState,
-  fullPattern,
   localTodayIso,
   monthDates,
   monthStart,
-  patternIncludes,
-  presenceRule,
-  resizePattern,
-  togglePatternDay,
+  patternDaysLabel,
   weekdayOf,
   type DayState,
 } from "./cycle";
-import { anchorLabel, dateRange, monthLabel, shortDate } from "./format";
+import { dateRange, monthLabel, shortDate } from "./format";
 import {
   CalendarCheckGlyph,
   CalendarXGlyph,
   ChevronLeftGlyph,
   ChevronRightGlyph,
+  PencilGlyph,
   Trash2Glyph,
 } from "./glyphs";
 import OverrideEditor from "./OverrideEditor";
+import PatternEditor from "./PatternEditor";
 import "./ScheduleTab.css";
 
 /** ADMIN-SPEC §1: every scroll column ends with 92px so content clears the tab bar. */
 export const SCROLL_BOTTOM_PADDING = "92px";
 
-export const DEFAULT_CYCLE_LENGTH_WEEKS = 2;
-const CYCLE_LENGTH_CHOICES = [1, 2, 3, 4];
 /** Sunday-first header; `weekdayOf` stays Monday=0. */
 const WEEKDAY_INITIALS = ["S", "M", "T", "W", "T", "F", "S"];
 
@@ -58,7 +55,7 @@ export const STATE_LABELS: Record<DayState, string> = {
 
 interface Loaded {
   children: AdminChild[];
-  schedules: Record<number, PresenceSchedule | null>;
+  patterns: Record<number, PresencePattern[]>;
   overrides: PresenceOverride[];
 }
 
@@ -73,23 +70,22 @@ type DeleteState =
   | { kind: "deleting"; id: number }
   | { kind: "error"; id: number; message: string };
 
-type SaveState =
-  | { kind: "idle" }
-  | { kind: "saving" }
-  | { kind: "saved" }
-  | { kind: "error"; message: string };
+type EditorState =
+  | { kind: "closed" }
+  | { kind: "override" }
+  | { kind: "pattern"; pattern: PresencePattern | null };
 
 async function loadSchedule(): Promise<Loaded> {
   const children = (await fetchChildren())
     .filter((child) => child.is_active)
     .sort((a, b) => a.sort_order - b.sort_order);
-  const [schedules, overrides] = await Promise.all([
-    Promise.all(children.map((child) => fetchPresenceSchedule(child.id))),
+  const [patterns, overrides] = await Promise.all([
+    Promise.all(children.map((child) => fetchPresencePatterns(child.id))),
     fetchPresenceOverrides(),
   ]);
   return {
     children,
-    schedules: Object.fromEntries(children.map((child, i) => [child.id, schedules[i]])),
+    patterns: Object.fromEntries(children.map((child, i) => [child.id, patterns[i]])),
     overrides,
   };
 }
@@ -100,10 +96,7 @@ function loadErrorMessage(error: unknown): string {
     : "The schedule could not be loaded. Check your connection and try again.";
 }
 
-function saveErrorMessage(
-  error: unknown,
-  fallback = "The pattern could not be saved. Check your connection and try again.",
-): string {
+function saveErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof ApiForbiddenError) return error.message;
   if (error instanceof ApiRequestError && error.detail) return error.detail;
   return fallback;
@@ -121,15 +114,13 @@ function ScreenHeader({ sub }: { sub: string }) {
 interface MonthGridProps {
   month: string;
   today: string;
-  schedule: PresenceScheduleBody;
-  /** Null when the child has no saved schedule and no edits: home every day. */
-  effective: PresenceScheduleBody | null;
+  /** Every pattern of the child; none means home every day. */
+  patterns: PresencePattern[];
   overrides: PresenceOverride[];
   onMonth: (delta: number) => void;
-  onToggle: (date: string) => void;
 }
 
-function MonthGrid({ month, today, schedule, effective, overrides, onMonth, onToggle }: MonthGridProps) {
+function MonthGrid({ month, today, patterns, overrides, onMonth }: MonthGridProps) {
   const dates = monthDates(month);
   const leading = (weekdayOf(month) + 1) % 7;
   return (
@@ -167,23 +158,21 @@ function MonthGrid({ month, today, schedule, effective, overrides, onMonth, onTo
           <span key={`pad-${i}`} aria-hidden="true" />
         ))}
         {dates.map((date) => {
-          const state = dayState(effective, overrides, date);
+          const state = dayState(patterns, overrides, date);
           const isToday = date === today;
           let className = `schedule-day schedule-day--${state}`;
           if (isToday) className += " schedule-day--today";
           return (
-            <button
+            <span
               key={date}
-              type="button"
+              role="img"
               className={className}
               data-date={date}
               data-state={state}
-              aria-pressed={patternIncludes(schedule, date)}
               aria-label={`${shortDate(date)}${isToday ? " (today)" : ""}: ${STATE_LABELS[state]}`}
-              onClick={() => onToggle(date)}
             >
               {Number(date.slice(8))}
-            </button>
+            </span>
           );
         })}
       </div>
@@ -199,7 +188,80 @@ function MonthGrid({ month, today, schedule, effective, overrides, onMonth, onTo
           Today
         </li>
       </ul>
+      <p className="schedule-legend-note">
+        Combined from every pattern: away beats home; overrides beat both.
+      </p>
     </>
+  );
+}
+
+interface PatternRowProps {
+  pattern: PresencePattern;
+  deletion: DeleteState;
+  onEdit: () => void;
+  onAskDelete: () => void;
+  onKeep: () => void;
+  onDelete: () => void;
+}
+
+function PatternRow({ pattern, deletion, onEdit, onAskDelete, onKeep, onDelete }: PatternRowProps) {
+  const mine =
+    (deletion.kind === "confirming" || deletion.kind === "deleting") && deletion.id === pattern.id;
+  return (
+    <li className="schedule-row" data-testid={`pattern-${pattern.id}`}>
+      <span className="schedule-row-glyph">
+        {pattern.kind === "home" ? <CalendarCheckGlyph /> : <CalendarXGlyph />}
+      </span>
+      <div className="schedule-row-text">
+        <div className="schedule-row-title">{pattern.name}</div>
+        <div className="schedule-row-meta">
+          {pattern.kind === "home" ? "Home" : "Away"} · {cycleLabel(pattern.cycle_length_weeks)}
+        </div>
+        <div className="schedule-row-meta" data-testid={`pattern-days-${pattern.id}`}>
+          {patternDaysLabel(pattern)}
+        </div>
+      </div>
+      {mine ? (
+        <div className="schedule-confirm" role="group" aria-label="Confirm delete">
+          <span className="schedule-confirm-text">Delete pattern?</span>
+          <button
+            type="button"
+            className="schedule-confirm-keep"
+            onClick={onKeep}
+            disabled={deletion.kind === "deleting"}
+          >
+            Keep
+          </button>
+          <button
+            type="button"
+            className="schedule-confirm-delete"
+            onClick={onDelete}
+            disabled={deletion.kind === "deleting"}
+          >
+            {deletion.kind === "deleting" ? "Deleting…" : "Delete"}
+          </button>
+        </div>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="schedule-icon-action schedule-icon-action--edit"
+            aria-label={`Edit ${pattern.name}`}
+            onClick={onEdit}
+          >
+            <PencilGlyph />
+          </button>
+          <button
+            type="button"
+            className="schedule-icon-action"
+            aria-label={`Delete ${pattern.name}`}
+            onClick={onAskDelete}
+          >
+            <Trash2Glyph />
+          </button>
+        </>
+      )}
+    </li>
   );
 }
 
@@ -271,21 +333,24 @@ export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProp
   const [attempt, setAttempt] = useState(0);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [month, setMonth] = useState(() => monthStart(today));
-  const [drafts, setDrafts] = useState<Record<number, PresenceScheduleBody>>({});
-  const [save, setSave] = useState<SaveState>({ kind: "idle" });
-  const [editorOpen, setEditorOpen] = useState(false);
+  const [editor, setEditor] = useState<EditorState>({ kind: "closed" });
   const [deletion, setDeletion] = useState<DeleteState>({ kind: "idle" });
+  const [patternDeletion, setPatternDeletion] = useState<DeleteState>({ kind: "idle" });
   const addRef = useRef<HTMLButtonElement>(null);
-  const editorWasOpen = useRef(false);
+  const addPatternRef = useRef<HTMLButtonElement>(null);
+  const openedEditor = useRef<EditorState["kind"]>("closed");
 
-  // The editor replaces this screen, so Add is remounted when it closes;
-  // hand focus back to it then.
+  // An editor replaces this screen, so the Add controls are remounted when
+  // it closes; hand focus back to the one that belongs to that editor.
   useEffect(() => {
-    if (editorWasOpen.current && !editorOpen) addRef.current?.focus();
-    editorWasOpen.current = editorOpen;
-  }, [editorOpen]);
+    if (editor.kind === "closed") {
+      if (openedEditor.current === "override") addRef.current?.focus();
+      if (openedEditor.current === "pattern") addPatternRef.current?.focus();
+    }
+    openedEditor.current = editor.kind;
+  }, [editor.kind]);
 
-  /** Reload children, schedules and overrides in place (no loading flash). */
+  /** Reload children, patterns and overrides in place (no loading flash). */
   const refresh = () =>
     loadSchedule()
       .then((data) => setState({ kind: "ready", data }))
@@ -309,16 +374,31 @@ export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProp
     };
   }, [attempt]);
 
-  if (editorOpen && state.kind === "ready" && state.data.children.length > 0) {
+  if (editor.kind !== "closed" && state.kind === "ready" && state.data.children.length > 0) {
     const { children } = state.data;
+    const current = children.find((c) => c.id === selectedId) ?? children[0];
+    if (editor.kind === "pattern") {
+      return (
+        <PatternEditor
+          child={current}
+          pattern={editor.pattern}
+          today={today}
+          onCancel={() => setEditor({ kind: "closed" })}
+          onSaved={() => {
+            setEditor({ kind: "closed" });
+            void refresh();
+          }}
+        />
+      );
+    }
     return (
       <OverrideEditor
         childOptions={children}
-        initialChildId={children.find((c) => c.id === selectedId)?.id ?? children[0].id}
+        initialChildId={current.id}
         today={today}
-        onCancel={() => setEditorOpen(false)}
+        onCancel={() => setEditor({ kind: "closed" })}
         onSaved={(override) => {
-          setEditorOpen(false);
+          setEditor({ kind: "closed" });
           setSelectedId(override.child_id);
           void refresh();
         }}
@@ -348,28 +428,13 @@ export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProp
   } else {
     const { data } = state;
     const child = data.children.find((c) => c.id === selectedId) ?? data.children[0];
-    const saved = data.schedules[child.id] ?? null;
-    const draft = drafts[child.id];
-    // Edits start from the saved schedule, or — with none — from "home every
-    // day" on a 2-week cycle anchored at the displayed month's 1st.
-    const schedule: PresenceScheduleBody = draft ??
-      saved ?? {
-        cycle_length_weeks: DEFAULT_CYCLE_LENGTH_WEEKS,
-        anchor_date: month,
-        pattern: fullPattern(DEFAULT_CYCLE_LENGTH_WEEKS),
-      };
-    const effective = draft ?? saved;
+    const patterns = data.patterns[child.id] ?? [];
     const childOverrides = data.overrides.filter((o) => o.child_id === child.id);
-    sub = `${schedule.cycle_length_weeks}-week cycle · anchor ${anchorLabel(schedule.anchor_date)}`;
+    sub =
+      patterns.length === 0
+        ? `${child.display_name} · no patterns, home every day`
+        : `${child.display_name} · ${patterns.length} ${patterns.length === 1 ? "pattern" : "patterns"}`;
 
-    const edit = (next: PresenceScheduleBody) => {
-      setDrafts((all) => ({ ...all, [child.id]: next }));
-      setSave({ kind: "idle" });
-    };
-    const toggle = (date: string) => {
-      const week = cycleWeekIndex(schedule.anchor_date, date, schedule.cycle_length_weeks);
-      edit({ ...schedule, pattern: togglePatternDay(schedule.pattern, week, weekdayOf(date)) });
-    };
     const confirmDelete = (id: number) => {
       setDeletion({ kind: "deleting", id });
       deletePresenceOverride(id)
@@ -386,32 +451,21 @@ export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProp
           }),
         );
     };
-    const submit = () => {
-      if (!draft) return;
-      const childId = child.id;
-      setSave({ kind: "saving" });
-      const { cycle_length_weeks, anchor_date, pattern } = draft;
-      savePresenceSchedule(childId, { cycle_length_weeks, anchor_date, pattern })
-        .then((stored) => {
-          setState((current) =>
-            current.kind === "ready"
-              ? {
-                  kind: "ready",
-                  data: {
-                    ...current.data,
-                    schedules: { ...current.data.schedules, [childId]: stored },
-                  },
-                }
-              : current,
-          );
-          setDrafts((all) => {
-            const rest = { ...all };
-            delete rest[childId];
-            return rest;
-          });
-          setSave({ kind: "saved" });
-        })
-        .catch((error: unknown) => setSave({ kind: "error", message: saveErrorMessage(error) }));
+    const confirmPatternDelete = (id: number) => {
+      setPatternDeletion({ kind: "deleting", id });
+      deletePresencePattern(id)
+        .then(() => refresh())
+        .then(() => setPatternDeletion({ kind: "idle" }))
+        .catch((error: unknown) =>
+          setPatternDeletion({
+            kind: "error",
+            id,
+            message: saveErrorMessage(
+              error,
+              "The pattern could not be deleted. Check your connection and try again.",
+            ),
+          }),
+        );
     };
 
     body = (
@@ -425,7 +479,7 @@ export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProp
               aria-pressed={c.id === child.id}
               onClick={() => {
                 setSelectedId(c.id);
-                setSave({ kind: "idle" });
+                setPatternDeletion({ kind: "idle" });
               }}
             >
               {c.display_name}
@@ -437,74 +491,48 @@ export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProp
           <MonthGrid
             month={month}
             today={today}
-            schedule={schedule}
-            effective={effective}
+            patterns={patterns}
             overrides={childOverrides}
             onMonth={(delta) => setMonth((m) => monthStart(m, delta))}
-            onToggle={toggle}
           />
-          <div className="schedule-controls">
-            <label className="schedule-field">
-              <span>Anchor date</span>
-              <input
-                type="date"
-                value={schedule.anchor_date}
-                onChange={(event) => {
-                  if (event.target.value) edit({ ...schedule, anchor_date: event.target.value });
-                }}
-              />
-            </label>
-            <label className="schedule-field">
-              <span>Cycle length</span>
-              <select
-                value={schedule.cycle_length_weeks}
-                onChange={(event) => {
-                  const weeks = Number(event.target.value);
-                  edit({
-                    ...schedule,
-                    cycle_length_weeks: weeks,
-                    pattern: resizePattern(schedule.pattern, weeks),
-                  });
-                }}
-              >
-                {CYCLE_LENGTH_CHOICES.map((weeks) => (
-                  <option key={weeks} value={weeks}>
-                    {weeks} {weeks === 1 ? "week" : "weeks"}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              type="button"
-              className="schedule-save"
-              disabled={!draft || save.kind === "saving"}
-              onClick={submit}
-            >
-              {save.kind === "saving" ? "Saving…" : "Save pattern"}
-            </button>
-          </div>
-          {save.kind === "error" ? (
-            <p className="schedule-save-status schedule-save-status--error" role="alert">
-              {save.message}
-            </p>
-          ) : save.kind === "saved" ? (
-            <p className="schedule-save-status" role="status">
-              Pattern saved.
-            </p>
-          ) : null}
         </section>
 
-        <h3 className="schedule-section-label">Presence pattern</h3>
-        <ul className="schedule-card schedule-list" aria-label="Presence pattern">
-          {data.children.map((c) => (
-            <li key={c.id} className="schedule-row" data-testid={`pattern-${c.id}`}>
-              <div className="schedule-row-text">
-                <div className="schedule-row-title">{c.display_name}</div>
-              </div>
-              <span className="schedule-rule">{presenceRule(data.schedules[c.id] ?? null)}</span>
-            </li>
-          ))}
-        </ul>
+        <div className="schedule-section-head">
+          <h3 className="schedule-section-label">Presence patterns</h3>
+          <button
+            ref={addPatternRef}
+            type="button"
+            className="schedule-text-action"
+            aria-label="Add pattern"
+            onClick={() => setEditor({ kind: "pattern", pattern: null })}
+          >
+            Add
+          </button>
+        </div>
+        {patterns.length > 0 ? (
+          <ul className="schedule-card schedule-list" aria-label="Presence patterns">
+            {patterns.map((pattern) => (
+              <PatternRow
+                key={pattern.id}
+                pattern={pattern}
+                deletion={patternDeletion}
+                onEdit={() => setEditor({ kind: "pattern", pattern })}
+                onAskDelete={() => setPatternDeletion({ kind: "confirming", id: pattern.id })}
+                onKeep={() => setPatternDeletion({ kind: "idle" })}
+                onDelete={() => confirmPatternDelete(pattern.id)}
+              />
+            ))}
+          </ul>
+        ) : (
+          <div className="schedule-card schedule-empty" data-testid="patterns-empty">
+            No patterns for {child.display_name} — home every day.
+          </div>
+        )}
+        {patternDeletion.kind === "error" ? (
+          <p className="schedule-save-status schedule-save-status--error" role="alert">
+            {patternDeletion.message}
+          </p>
+        ) : null}
 
         <div className="schedule-section-head">
           <h3 className="schedule-section-label">Overrides</h3>
@@ -512,7 +540,7 @@ export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProp
             ref={addRef}
             type="button"
             className="schedule-text-action"
-            onClick={() => setEditorOpen(true)}
+            onClick={() => setEditor({ kind: "override" })}
           >
             Add
           </button>

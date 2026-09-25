@@ -4,7 +4,7 @@ import App from "../App";
 import ScheduleTab from "./ScheduleTab";
 import { CONSEQUENCE_DEBOUNCE_MS, isIsoDate, isValidRange } from "./OverrideEditor";
 import type { AdminChild } from "../api/definitions";
-import type { PresenceOverride, PresenceSchedule } from "../api/presence";
+import type { PresenceOverride, PresencePattern } from "../api/presence";
 import { storeTokens } from "../auth/oidc";
 
 function child(id: number, display_name: string, sort_order: number): AdminChild {
@@ -13,8 +13,11 @@ function child(id: number, display_name: string, sort_order: number): AdminChild
 
 const CHILDREN = [child(1, "Declan", 1), child(2, "Maeve", 2), child(3, "Rory", 3)];
 
-const DECLAN: PresenceSchedule = {
+const DECLAN: PresencePattern = {
+  id: 1,
   child_id: 1,
+  name: "Home weeks",
+  kind: "home",
   cycle_length_weeks: 2,
   anchor_date: "2026-09-07",
   pattern: { "0": [0, 1, 2, 3, 4, 5, 6], "1": [5, 6] },
@@ -72,9 +75,9 @@ async function routeFetch(url: string, init: RequestInit = {}): Promise<Response
     return jsonResponse({ status: "ok" });
   }
   if (path.endsWith("/admin/children")) return jsonResponse({ children: CHILDREN });
-  const scheduleMatch = /\/children\/(\d+)\/presence-schedule$/.exec(path);
-  if (scheduleMatch) {
-    return jsonResponse({ schedule: Number(scheduleMatch[1]) === 1 ? DECLAN : null });
+  const patternsMatch = /\/children\/(\d+)\/presence-patterns$/.exec(path);
+  if (patternsMatch) {
+    return jsonResponse({ patterns: Number(patternsMatch[1]) === 1 ? [DECLAN] : [] });
   }
   if (path === OVERRIDES_PATH) return jsonResponse({ overrides });
   return jsonResponse({ detail: "unexpected" }, 500);
@@ -293,7 +296,7 @@ describe("OverrideEditor", () => {
     });
     await waitFor(() => expect(saveButton().disabled).toBe(false));
     const before = calls().length;
-    const schedulesBefore = calls().filter((c) => c.path.endsWith("/presence-schedule")).length;
+    const patternsBefore = calls().filter((c) => c.path.endsWith("/presence-patterns")).length;
 
     fireEvent.click(saveButton());
     const row = await screen.findByTestId("override-50");
@@ -321,10 +324,10 @@ describe("OverrideEditor", () => {
       },
     ]);
     expect(after.some((c) => c.method === "DELETE")).toBe(false);
-    // The overrides and the presence schedules are refetched for the grid.
+    // The overrides and the presence patterns are refetched for the grid.
     expect(after.some((c) => c.method === "GET" && c.path === OVERRIDES_PATH)).toBe(true);
-    expect(calls().filter((c) => c.path.endsWith("/presence-schedule")).length).toBeGreaterThan(
-      schedulesBefore,
+    expect(calls().filter((c) => c.path.endsWith("/presence-patterns")).length).toBeGreaterThan(
+      patternsBefore,
     );
     // The grid reflects the new override.
     expect(document.querySelector('[data-date="2026-09-25"]')?.getAttribute("data-state")).toBe(

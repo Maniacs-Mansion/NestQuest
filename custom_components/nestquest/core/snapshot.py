@@ -39,14 +39,14 @@ from typing import Any
 from .completion import derive_state
 from .dao_children import ChildrenDao
 from .dao_instances import CompletionEventsDao, QuestInstancesDao
-from .dao_presence import PresenceOverridesDao, PresenceSchedulesDao
+from .dao_presence import PresenceOverridesDao, PresencePatternsDao
 from .dao_rules import QuestDefinitionsDao
 from .db import NestQuestDatabase
 from .presence import (
     MAX_PREVIEW_SCAN_DAYS,
     PresenceEngine,
     PresenceOverride,
-    PresenceSchedule,
+    PresencePattern,
 )
 from .settings import NestQuestSettings
 
@@ -98,20 +98,26 @@ class NestQuestSnapshot:
 
 
 def _cycle_day(
-    schedules: dict[int, PresenceSchedule], children, today: datetime.date
+    patterns: dict[int, list[PresencePattern]],
+    children,
+    today: datetime.date,
 ) -> int:
-    """Return today's 1-based day in the first scheduled child's cycle.
+    """Return today's 1-based day in the first patterned child's cycle.
 
-    Anchor-date arithmetic ONLY (D-004): the day offset is computed from
-    the schedule's own anchor, never ISO week numbers or parity, so a
-    53-week year cannot silently invert the cycle.
+    The cycle is that child's FIRST pattern (lowest id) — one number
+    for the household's cycle-day sensor even when a child carries
+    several patterns.  Anchor-date arithmetic ONLY (D-004): the day
+    offset is computed from the pattern's own anchor, never ISO week
+    numbers or parity, so a 53-week year cannot silently invert the
+    cycle.
     """
     for child in children:
-        schedule = schedules.get(child.id)
-        if schedule is None:
+        entries = patterns.get(child.id)
+        if not entries:
             continue
-        days = (today - schedule.anchor_date).days
-        cycle_length = schedule.cycle_length_weeks * 7
+        pattern = entries[0]
+        days = (today - pattern.anchor_date).days
+        cycle_length = pattern.cycle_length_weeks * 7
         return (days % cycle_length) + 1
     return 0
 
@@ -191,16 +197,21 @@ async def build_snapshot(
 
     children = await ChildrenDao(database).list_active()
 
-    schedules: dict[int, PresenceSchedule] = {}
+    patterns: dict[int, list[PresencePattern]] = {}
     overrides: dict[int, list[PresenceOverride]] = {}
     for child in children:
-        schedule = await PresenceSchedulesDao(database).get_by_child(
-            child.id
-        )
-        if schedule is not None:
-            schedules[child.id] = PresenceSchedule.decode(
-                child.id, schedule.anchor_date, schedule.pattern
-            )
+        records = await PresencePatternsDao(database).list_by_child(child.id)
+        if records:
+            patterns[child.id] = [
+                PresencePattern.decode(
+                    record.child_id,
+                    record.name,
+                    record.kind,
+                    record.anchor_date,
+                    record.pattern,
+                )
+                for record in records
+            ]
         window_end = today + datetime.timedelta(
             days=MAX_PREVIEW_SCAN_DAYS
         )
@@ -222,7 +233,7 @@ async def build_snapshot(
                 )
                 for record in ranged
             ]
-    engine = PresenceEngine(schedules, overrides)
+    engine = PresenceEngine(patterns, overrides)
 
     instances_dao = QuestInstancesDao(database)
     events_dao = CompletionEventsDao(database)
@@ -302,5 +313,5 @@ async def build_snapshot(
     return NestQuestSnapshot(
         today_iso=today_iso,
         children=tuple(snapshots),
-        cycle_day=_cycle_day(schedules, children, today),
+        cycle_day=_cycle_day(patterns, children, today),
     )

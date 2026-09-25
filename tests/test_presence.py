@@ -7,133 +7,173 @@ import pytest
 
 from custom_components.nestquest.core.presence import (
     MAX_CYCLE_LENGTH_WEEKS,
+    PATTERN_KINDS,
     PresenceEngine,
     PresenceOverride,
-    PresenceSchedule,
+    PresencePattern,
     cycle_week_index,
 )
 
 
 ANCHOR = datetime.date(2026, 1, 5)  # a Monday
 
+#: Every pre-schema-9 single schedule is exactly one ``home`` pattern
+#: (migration 9 carries them across that way), so the model and engine
+#: tests below use this name/kind unless they are about name or kind.
+NAME = "Home schedule"
+HOME = "home"
+
 TWO_WEEK_PATTERN = {0: {0, 2, 4}, 1: {1, 3}}
 
 
 # ---------------------------------------------------------------------------
-# PresenceSchedule construction
+# PresencePattern construction
 # ---------------------------------------------------------------------------
 
 
-def test_schedule_holds_validated_fields() -> None:
-    schedule = PresenceSchedule(
-        3, 2, "2026-01-05", {0: {0, 2, 4}, 1: {1, 3}}
+def test_pattern_holds_validated_fields() -> None:
+    pattern = PresencePattern(
+        3, "Dad's weekends", "away", 2, "2026-01-05",
+        {0: {0, 2, 4}, 1: {1, 3}},
     )
-    assert schedule.child_id == 3
-    assert schedule.cycle_length_weeks == 2
-    assert schedule.anchor_date == ANCHOR
-    assert schedule.pattern == {0: frozenset({0, 2, 4}), 1: frozenset({1, 3})}
+    assert pattern.child_id == 3
+    assert pattern.name == "Dad's weekends"
+    assert pattern.kind == "away"
+    assert pattern.cycle_length_weeks == 2
+    assert pattern.anchor_date == ANCHOR
+    assert pattern.pattern == {0: frozenset({0, 2, 4}), 1: frozenset({1, 3})}
 
 
-def test_schedule_accepts_date_objects() -> None:
-    schedule = PresenceSchedule(1, 1, ANCHOR, {0: {0}})
-    assert schedule.anchor_date is ANCHOR
+def test_pattern_accepts_date_objects() -> None:
+    pattern = PresencePattern(1, NAME, HOME, 1, ANCHOR, {0: {0}})
+    assert pattern.anchor_date is ANCHOR
 
 
-def test_schedule_rejects_cycle_length_below_one() -> None:
+def test_pattern_name_is_stored_trimmed() -> None:
+    pattern = PresencePattern(1, "  Mum's week \t", HOME, 1, ANCHOR, {0: {0}})
+    assert pattern.name == "Mum's week"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "\t\n"])
+def test_pattern_rejects_blank_name(bad) -> None:
+    with pytest.raises(ValueError, match="name must not be empty"):
+        PresencePattern(1, bad, HOME, 1, ANCHOR, {0: {0}})
+
+
+@pytest.mark.parametrize("bad", [None, 5, b"Home", ["Home"]])
+def test_pattern_rejects_non_string_name(bad) -> None:
+    with pytest.raises(ValueError, match="name must be a string"):
+        PresencePattern(1, bad, HOME, 1, ANCHOR, {0: {0}})
+
+
+def test_pattern_kinds_are_home_and_away() -> None:
+    """The model's kinds match the schema's CHECK exactly."""
+    assert PATTERN_KINDS == ("home", "away")
+    for kind in PATTERN_KINDS:
+        assert PresencePattern(1, NAME, kind, 1, ANCHOR, {0: {0}}).kind == kind
+
+
+@pytest.mark.parametrize("bad", ["Home", "AWAY", "present", "", None, True, 1])
+def test_pattern_rejects_unknown_kind(bad) -> None:
+    with pytest.raises(ValueError, match="kind must be one of home, away"):
+        PresencePattern(1, NAME, bad, 1, ANCHOR, {0: {0}})
+
+
+def test_pattern_rejects_cycle_length_below_one() -> None:
     with pytest.raises(ValueError, match="between 1 and"):
-        PresenceSchedule(1, 0, ANCHOR, {})
+        PresencePattern(1, NAME, HOME, 0, ANCHOR, {})
     with pytest.raises(ValueError, match="between 1 and"):
-        PresenceSchedule(1, -1, ANCHOR, {})
+        PresencePattern(1, NAME, HOME, -1, ANCHOR, {})
 
 
-def test_schedule_rejects_cycle_length_above_documented_cap() -> None:
+def test_pattern_rejects_cycle_length_above_documented_cap() -> None:
     """The 4 cap matches the schema's CHECK — both documents agree."""
     with pytest.raises(ValueError, match="between 1 and"):
-        PresenceSchedule(1, MAX_CYCLE_LENGTH_WEEKS + 1, ANCHOR, {})
+        PresencePattern(1, NAME, HOME, MAX_CYCLE_LENGTH_WEEKS + 1, ANCHOR, {})
     assert MAX_CYCLE_LENGTH_WEEKS == 4
 
 
 @pytest.mark.parametrize("bad", [True, "2", 1.0, None])
-def test_schedule_rejects_non_int_cycle_length(bad) -> None:
+def test_pattern_rejects_non_int_cycle_length(bad) -> None:
     with pytest.raises(ValueError, match="cycle_length_weeks must be an integer"):
-        PresenceSchedule(1, bad, ANCHOR, {0: {0}})
+        PresencePattern(1, NAME, HOME, bad, ANCHOR, {0: {0}})
 
 
-def test_schedule_rejects_pattern_missing_week_indices() -> None:
+def test_pattern_rejects_pattern_missing_week_indices() -> None:
     with pytest.raises(ValueError, match="missing \\[1\\]"):
-        PresenceSchedule(1, 2, ANCHOR, {0: {0, 2}})
+        PresencePattern(1, NAME, HOME, 2, ANCHOR, {0: {0, 2}})
 
 
-def test_schedule_rejects_pattern_with_extra_week_indices() -> None:
+def test_pattern_rejects_pattern_with_extra_week_indices() -> None:
     with pytest.raises(ValueError, match="week index must be in 0"):
-        PresenceSchedule(1, 2, ANCHOR, {0: {0}, 1: {1}, 2: {2}})
+        PresencePattern(1, NAME, HOME, 2, ANCHOR, {0: {0}, 1: {1}, 2: {2}})
 
 
-def test_schedule_rejects_pattern_with_non_int_week_keys() -> None:
+def test_pattern_rejects_pattern_with_non_int_week_keys() -> None:
     with pytest.raises(ValueError, match="week index must be an integer"):
-        PresenceSchedule(1, 1, ANCHOR, {"0": {0}})
+        PresencePattern(1, NAME, HOME, 1, ANCHOR, {"0": {0}})
 
 
-def test_schedule_rejects_pattern_with_bool_week_key() -> None:
+def test_pattern_rejects_pattern_with_bool_week_key() -> None:
     """True would silently be week 1; bools are never valid indices."""
     with pytest.raises(ValueError, match="week index must be an integer"):
-        PresenceSchedule(1, 2, ANCHOR, {0: {0}, True: {1}})
+        PresencePattern(1, NAME, HOME, 2, ANCHOR, {0: {0}, True: {1}})
 
 
 @pytest.mark.parametrize("bad_weekday", [-1, 7, 100])
-def test_schedule_rejects_weekday_outside_zero_to_six(bad_weekday) -> None:
+def test_pattern_rejects_weekday_outside_zero_to_six(bad_weekday) -> None:
     with pytest.raises(ValueError, match="weekday must be in 0..6"):
-        PresenceSchedule(1, 1, ANCHOR, {0: {bad_weekday}})
+        PresencePattern(1, NAME, HOME, 1, ANCHOR, {0: {bad_weekday}})
 
 
 @pytest.mark.parametrize("bad", [True, "1", 1.5, None])
-def test_schedule_rejects_non_int_weekdays(bad) -> None:
+def test_pattern_rejects_non_int_weekdays(bad) -> None:
     with pytest.raises(ValueError, match="weekday must be an int"):
-        PresenceSchedule(1, 1, ANCHOR, {0: [bad]})
+        PresencePattern(1, NAME, HOME, 1, ANCHOR, {0: [bad]})
 
 
-def test_schedule_rejects_string_and_none_week_sets() -> None:
+def test_pattern_rejects_string_and_none_week_sets() -> None:
     """A string is iterable — "02" would silently mean {0, 2}."""
     with pytest.raises(ValueError, match="iterable of weekday ints"):
-        PresenceSchedule(1, 1, ANCHOR, {0: "02"})
+        PresencePattern(1, NAME, HOME, 1, ANCHOR, {0: "02"})
     with pytest.raises(ValueError, match="iterable of weekday ints"):
-        PresenceSchedule(1, 1, ANCHOR, {0: None})
+        PresencePattern(1, NAME, HOME, 1, ANCHOR, {0: None})
 
 
-def test_schedule_rejects_non_dict_pattern() -> None:
+def test_pattern_rejects_non_dict_pattern() -> None:
     with pytest.raises(ValueError, match="must map week index"):
-        PresenceSchedule(1, 1, ANCHOR, "0,2")
+        PresencePattern(1, NAME, HOME, 1, ANCHOR, "0,2")
 
 
 @pytest.mark.parametrize("bad", [True, 1.0, "2026-01-05", None])
-def test_schedule_rejects_non_int_child_id(bad) -> None:
+def test_pattern_rejects_non_int_child_id(bad) -> None:
     with pytest.raises(ValueError, match="child_id must be an integer"):
-        PresenceSchedule(bad, 1, ANCHOR, {0: {0}})
+        PresencePattern(bad, NAME, HOME, 1, ANCHOR, {0: {0}})
 
 
 @pytest.mark.parametrize(
     "bad", ["2026-1-5", "2026/01/05", "not-a-date", 5, None, True]
 )
-def test_schedule_rejects_non_strict_anchor_dates(bad) -> None:
+def test_pattern_rejects_non_strict_anchor_dates(bad) -> None:
     with pytest.raises(ValueError, match="anchor_date"):
-        PresenceSchedule(1, 1, bad, {0: {0}})
+        PresencePattern(1, NAME, HOME, 1, bad, {0: {0}})
 
 
-def test_schedule_empty_week_means_absent_week() -> None:
+def test_pattern_empty_week_means_absent_week() -> None:
     """An explicitly empty week is valid: absent every day of it —
-    distinct from having no schedule (the engine's default)."""
-    schedule = PresenceSchedule(1, 2, ANCHOR, {0: {0, 2}, 1: set()})
-    assert schedule.pattern[1] == frozenset()
+    distinct from having no pattern (the engine's default)."""
+    pattern = PresencePattern(1, NAME, HOME, 2, ANCHOR, {0: {0, 2}, 1: set()})
+    assert pattern.pattern[1] == frozenset()
 
 
-def test_schedule_empty_week_encodes_as_empty_segment() -> None:
-    schedule = PresenceSchedule(1, 2, ANCHOR, {0: {0, 2}, 1: set()})
-    assert schedule.encode() == "0,2|"
+def test_pattern_empty_week_encodes_as_empty_segment() -> None:
+    pattern = PresencePattern(1, NAME, HOME, 2, ANCHOR, {0: {0, 2}, 1: set()})
+    assert pattern.encode() == "0,2|"
 
 
-def test_schedule_equal_patterns_are_equal_and_encode_identically() -> None:
-    one = PresenceSchedule(1, 2, ANCHOR, {0: {4, 2, 0}, 1: {3, 1}})
-    two = PresenceSchedule(2, 2, ANCHOR, {0: {0, 2, 4}, 1: {1, 3}})
+def test_pattern_equal_patterns_are_equal_and_encode_identically() -> None:
+    one = PresencePattern(1, NAME, HOME, 2, ANCHOR, {0: {4, 2, 0}, 1: {3, 1}})
+    two = PresencePattern(2, NAME, HOME, 2, ANCHOR, {0: {0, 2, 4}, 1: {1, 3}})
     assert one.encode() == two.encode() == "0,2,4|1,3"
 
 
@@ -154,34 +194,60 @@ def test_schedule_equal_patterns_are_equal_and_encode_identically() -> None:
         "0,1,2,3,4,5,6|",
     ],
 )
-def test_schedule_decode_encode_round_trips_losslessly(encoded) -> None:
-    schedule = PresenceSchedule.decode(1, ANCHOR, encoded)
-    assert schedule.encode() == encoded
-    again = PresenceSchedule.decode(1, ANCHOR, schedule.encode())
-    assert again == schedule
+def test_pattern_decode_encode_round_trips_losslessly(encoded) -> None:
+    pattern = PresencePattern.decode(1, NAME, HOME, ANCHOR, encoded)
+    assert pattern.encode() == encoded
+    again = PresencePattern.decode(1, NAME, HOME, ANCHOR, pattern.encode())
+    assert again == pattern
 
 
-def test_schedule_decode_sets_cycle_length_from_segments() -> None:
-    one_week = PresenceSchedule.decode(1, ANCHOR, "0,2,4")
+def test_pattern_decode_sets_cycle_length_from_segments() -> None:
+    one_week = PresencePattern.decode(1, NAME, HOME, ANCHOR, "0,2,4")
     assert one_week.cycle_length_weeks == 1
-    four_week = PresenceSchedule.decode(1, ANCHOR, "0|1|2|3,4")
+    four_week = PresencePattern.decode(1, NAME, HOME, ANCHOR, "0|1|2|3,4")
     assert four_week.cycle_length_weeks == 4
 
 
-def test_schedule_decode_rejects_malformed_segments() -> None:
+def test_pattern_decode_rejects_malformed_segments() -> None:
     for bad in ("0,12|1", "0,,2|1", "x|1", "0|-1|2", "8", "0,|1"):
         with pytest.raises(ValueError, match="invalid weekday"):
-            PresenceSchedule.decode(1, ANCHOR, bad)
+            PresencePattern.decode(1, NAME, HOME, ANCHOR, bad)
 
 
-def test_schedule_decode_rejects_non_string() -> None:
+def test_pattern_decode_rejects_non_string() -> None:
     with pytest.raises(ValueError, match="must be a string"):
-        PresenceSchedule.decode(1, ANCHOR, None)
+        PresencePattern.decode(1, NAME, HOME, ANCHOR, None)
 
 
-def test_schedule_decode_rejects_too_many_segments(tmp_path) -> None:
+def test_pattern_decode_rejects_too_many_segments(tmp_path) -> None:
     with pytest.raises(ValueError, match="between 1 and"):
-        PresenceSchedule.decode(1, ANCHOR, "0|1|2|3|4")
+        PresencePattern.decode(1, NAME, HOME, ANCHOR, "0|1|2|3|4")
+
+
+def test_pattern_decode_carries_and_validates_name_and_kind() -> None:
+    """decode is ordinary construction: name trimmed, kind checked."""
+    decoded = PresencePattern.decode(1, " Away days ", "away", ANCHOR, "3,4")
+    assert (decoded.name, decoded.kind) == ("Away days", "away")
+    with pytest.raises(ValueError, match="name must not be empty"):
+        PresencePattern.decode(1, " ", "away", ANCHOR, "3,4")
+    with pytest.raises(ValueError, match="kind must be one of"):
+        PresencePattern.decode(1, NAME, "absent", ANCHOR, "3,4")
+
+
+def test_pattern_covers_follows_the_cycle_week() -> None:
+    """covers() is the weekday-in-this-cycle-week test, independent of
+    kind: an away pattern covers its days exactly like a home one."""
+    for kind in PATTERN_KINDS:
+        pattern = PresencePattern(1, NAME, kind, 2, ANCHOR, {0: {1, 3}, 1: {2}})
+        # Tue Jan 6: week 0, weekday 1 -> covered.
+        assert pattern.covers(datetime.date(2026, 1, 6)) is True
+        # Wed Jan 7: week 0, weekday 2 -> not covered.
+        assert pattern.covers(datetime.date(2026, 1, 7)) is False
+        # Wed Jan 14: week 1, weekday 2 -> covered.
+        assert pattern.covers(datetime.date(2026, 1, 14)) is True
+        # Tue Dec 30 2025: before the anchor, walks back into week 1.
+        assert pattern.covers(datetime.date(2025, 12, 30)) is False
+        assert pattern.covers(datetime.date(2025, 12, 31)) is True
 
 
 # ---------------------------------------------------------------------------
@@ -231,11 +297,11 @@ def test_override_rejects_non_strict_dates(start, end) -> None:
         PresenceOverride(1, start, end, True)
 
 
-def test_schedule_rejects_datetime_anchor() -> None:
+def test_pattern_rejects_datetime_anchor() -> None:
     """datetime.datetime subclasses date: a bare isinstance check would
     store a time component and every date comparison would TypeError."""
     with pytest.raises(ValueError, match="plain calendar date"):
-        PresenceSchedule(1, 1, datetime.datetime(2026, 1, 5, 9, 30), {0: {0}})
+        PresencePattern(1, NAME, HOME, 1, datetime.datetime(2026, 1, 5, 9, 30), {0: {0}})
 
 
 def test_override_rejects_datetime_bounds() -> None:
@@ -245,23 +311,23 @@ def test_override_rejects_datetime_bounds() -> None:
         )
 
 
-def test_schedule_pattern_is_immutable_after_construction() -> None:
-    """The frozen schedule must not leak a mutable dict: injecting
+def test_pattern_pattern_is_immutable_after_construction() -> None:
+    """The frozen pattern must not leak a mutable dict: injecting
     unvalidated weekdays or dropping required weeks after construction
     would bypass total validation."""
-    schedule = PresenceSchedule(1, 2, ANCHOR, {0: {0, 2}, 1: {1}})
+    pattern = PresencePattern(1, NAME, HOME, 2, ANCHOR, {0: {0, 2}, 1: {1}})
     with pytest.raises(TypeError):
-        schedule.pattern[0] = {9}
+        pattern.pattern[0] = {9}
     with pytest.raises(TypeError):
-        del schedule.pattern[1]
+        del pattern.pattern[1]
     # mappingproxy exposes no mutators at all.
     assert not any(
-        hasattr(schedule.pattern, name)
+        hasattr(pattern.pattern, name)
         for name in ("clear", "pop", "popitem", "setdefault", "update")
     )
     # The validated contents are still readable and encode correctly.
-    assert schedule.pattern[0] == frozenset({0, 2})
-    assert schedule.encode() == "0,2|1"
+    assert pattern.pattern[0] == frozenset({0, 2})
+    assert pattern.encode() == "0,2|1"
 
 
 # ---------------------------------------------------------------------------
@@ -270,13 +336,13 @@ def test_schedule_pattern_is_immutable_after_construction() -> None:
 
 
 def test_cycle_week_index_follows_the_anchor_formula() -> None:
-    schedule = PresenceSchedule(1, 2, ANCHOR, {0: {0}, 1: {1}})
+    pattern = PresencePattern(1, NAME, HOME, 2, ANCHOR, {0: {0}, 1: {1}})
     # The anchor day starts week 0; each whole 7 days steps the cycle.
     offsets = {0: 0, 1: 0, 6: 0, 7: 1, 8: 1, 13: 1, 14: 0, 15: 0, 22: 1}
     for offset, expected in offsets.items():
         assert (
             cycle_week_index(
-                schedule, ANCHOR + datetime.timedelta(days=offset)
+                pattern, ANCHOR + datetime.timedelta(days=offset)
             )
             == expected
         ), f"offset {offset}"
@@ -285,18 +351,18 @@ def test_cycle_week_index_follows_the_anchor_formula() -> None:
 def test_cycle_week_index_before_the_anchor_walks_backwards() -> None:
     """Python floor division: day -1 is the LAST week of the cycle,
     wrapping backwards — never inverting."""
-    schedule = PresenceSchedule(1, 2, ANCHOR, {0: {0}, 1: {1}})
-    assert cycle_week_index(schedule, ANCHOR - datetime.timedelta(days=1)) == 1
-    assert cycle_week_index(schedule, ANCHOR - datetime.timedelta(days=7)) == 1
-    assert cycle_week_index(schedule, ANCHOR - datetime.timedelta(days=8)) == 0
+    pattern = PresencePattern(1, NAME, HOME, 2, ANCHOR, {0: {0}, 1: {1}})
+    assert cycle_week_index(pattern, ANCHOR - datetime.timedelta(days=1)) == 1
+    assert cycle_week_index(pattern, ANCHOR - datetime.timedelta(days=7)) == 1
+    assert cycle_week_index(pattern, ANCHOR - datetime.timedelta(days=8)) == 0
 
 
 def test_cycle_week_index_three_week_pattern() -> None:
-    schedule = PresenceSchedule(
-        1, 3, ANCHOR, {0: {0}, 1: {1}, 2: {2}}
+    pattern = PresencePattern(
+        1, NAME, HOME, 3, ANCHOR, {0: {0}, 1: {1}, 2: {2}}
     )
     offsets = [0, 7, 14, 21, 28]
-    assert [cycle_week_index(schedule, ANCHOR + datetime.timedelta(days=o)) for o in offsets] == [
+    assert [cycle_week_index(pattern, ANCHOR + datetime.timedelta(days=o)) for o in offsets] == [
         0, 1, 2, 0, 1
     ]
 
@@ -307,8 +373,8 @@ def test_cycle_week_index_stable_across_three_year_boundaries() -> None:
     or +1 (mod cycle length) and NEVER resets or inverts — including
     2020, a 53-ISO-week year, where ISO week parity flips and would
     invert a two-week custody schedule on January 1st."""
-    schedule = PresenceSchedule(
-        1, 2, datetime.date(2019, 1, 6), {0: {0, 2, 4}, 1: {1, 3}}
+    pattern = PresencePattern(
+        1, NAME, HOME, 2, datetime.date(2019, 1, 6), {0: {0, 2, 4}, 1: {1, 3}}
     )
     # Independently derived expectations (anchor 2019-01-06, index =
     # floor(days-since-anchor / 7) % 2, hand-verified) — hardcoded so
@@ -357,7 +423,7 @@ def test_cycle_week_index_stable_across_three_year_boundaries() -> None:
         datetime.date(2022, 1, 7): 0,
     }
     for day, wanted in expected.items():
-        got = cycle_week_index(schedule, day)
+        got = cycle_week_index(pattern, day)
         assert got == wanted, f"{day}: expected week {wanted}, got {got}"
     # And 2020 really is the 53-ISO-week year this guards against.
     assert datetime.date(2020, 12, 31).isocalendar()[1] == 53
@@ -388,21 +454,22 @@ def test_module_uses_no_iso_week_functions() -> None:
 
 
 def _three_child_engine() -> PresenceEngine:
-    """Two children on opposite weeks of one two-week rotation, one
-    with no schedule at all (the always-present sibling)."""
+    """Two children on opposite weeks of one two-week rotation (each a
+    single ``home`` pattern), one with no pattern at all (the
+    always-present sibling)."""
     anchor = datetime.date(2026, 1, 5)  # Monday, week 0
-    declan = PresenceSchedule(
-        1, 2, anchor, {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()}
+    declan = PresencePattern(
+        1, NAME, HOME, 2, anchor, {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()}
     )
-    jordyn = PresenceSchedule(
-        2, 2, anchor, {0: set(), 1: {0, 1, 2, 3, 4, 5, 6}}
+    jordyn = PresencePattern(
+        2, NAME, HOME, 2, anchor, {0: set(), 1: {0, 1, 2, 3, 4, 5, 6}}
     )
-    return PresenceEngine({1: declan, 2: jordyn})
+    return PresenceEngine({1: [declan], 2: [jordyn]})
 
 
-def test_engine_child_without_schedule_is_always_present() -> None:
+def test_engine_child_without_pattern_is_always_present() -> None:
     """Every day of the four-week span, all three children get the
-    expected verdict: Chloe (no schedule) always present; the two
+    expected verdict: Chloe (no pattern) always present; the two
     rotation children complementary per the anchor pattern."""
     engine = _three_child_engine()
     anchor = datetime.date(2026, 1, 5)
@@ -446,9 +513,12 @@ def test_engine_weekend_absence_respects_the_pattern() -> None:
     child's present week."""
     engine = PresenceEngine(
         {
-            1: PresenceSchedule(
-                1, 2, datetime.date(2026, 1, 5), {0: {1, 3}, 1: {2, 4}}
-            )
+            1: [
+                PresencePattern(
+                    1, NAME, HOME, 2, datetime.date(2026, 1, 5),
+                    {0: {1, 3}, 1: {2, 4}},
+                )
+            ]
         }
     )
     # 2026-01-06 (Tue) is week 0, weekday 1 -> present.
@@ -460,18 +530,24 @@ def test_engine_weekend_absence_respects_the_pattern() -> None:
 
 
 def test_engine_rejects_bad_construction_and_inputs() -> None:
-    schedule = PresenceSchedule(1, 1, ANCHOR, {0: {0}})
+    pattern = PresencePattern(1, NAME, HOME, 1, ANCHOR, {0: {0}})
     with pytest.raises(ValueError, match="must map child_id"):
-        PresenceEngine([schedule])
-    with pytest.raises(ValueError, match="must be a PresenceSchedule"):
-        PresenceEngine({1: "not-a-schedule"})
-    with pytest.raises(ValueError, match="holds the schedule"):
-        PresenceEngine({2: schedule})
+        PresenceEngine([pattern])
+    # Values are LISTS now: a bare pattern (the retired one-schedule
+    # shape) is refused rather than silently iterated.
+    with pytest.raises(ValueError, match="must be a list of PresencePattern"):
+        PresenceEngine({1: pattern})
+    with pytest.raises(ValueError, match="must be a list of PresencePattern"):
+        PresenceEngine({1: (pattern,)})
+    with pytest.raises(ValueError, match="entries must be PresencePattern"):
+        PresenceEngine({1: ["not-a-pattern"]})
+    with pytest.raises(ValueError, match="holds a pattern of child 1"):
+        PresenceEngine({2: [pattern]})
     with pytest.raises(ValueError, match="child_id must be an integer"):
-        PresenceEngine({True: schedule})
+        PresenceEngine({True: [pattern]})
     with pytest.raises(ValueError, match="child_id must be an integer"):
-        PresenceEngine({1.0: PresenceSchedule(1, 1, ANCHOR, {0: {0}})})
-    engine = PresenceEngine({1: schedule})
+        PresenceEngine({1.0: [PresencePattern(1, NAME, HOME, 1, ANCHOR, {0: {0}})]})
+    engine = PresenceEngine({1: [pattern]})
     with pytest.raises(ValueError, match="child_id must be an integer"):
         engine.is_present(True, ANCHOR)
     with pytest.raises(ValueError, match="plain calendar date"):
@@ -481,9 +557,109 @@ def test_engine_rejects_bad_construction_and_inputs() -> None:
 def test_engine_is_immutable() -> None:
     engine = _three_child_engine()
     with pytest.raises(AttributeError, match="immutable snapshot"):
-        engine._schedules = {}
+        engine._patterns = {}
     with pytest.raises(AttributeError, match="immutable snapshot"):
         engine.something_new = 1
+
+
+# ---------------------------------------------------------------------------
+# PresenceEngine: combining several patterns per child
+# ---------------------------------------------------------------------------
+
+
+def _pattern(kind: str, pattern: dict, *, cycle: int = 1) -> PresencePattern:
+    return PresencePattern(1, f"{kind} pattern", kind, cycle, ANCHOR, pattern)
+
+
+def test_engine_empty_pattern_list_is_always_present() -> None:
+    """An empty list is the same as no entry: present every day."""
+    engine = PresenceEngine({1: []})
+    for offset in range(14):
+        day = ANCHOR + datetime.timedelta(days=offset)
+        assert engine.is_present(1, day) is True, f"offset {offset}"
+
+
+def test_engine_away_only_child_is_present_except_covered_days() -> None:
+    """Away patterns alone never make an uncovered day absent: the
+    household default (present) holds outside their coverage."""
+    engine = PresenceEngine({1: [_pattern("away", {0: {3, 4}})]})
+    for offset in range(14):
+        day = ANCHOR + datetime.timedelta(days=offset)
+        expected = day.weekday() not in {3, 4}
+        assert engine.is_present(1, day) is expected, f"{day}"
+
+
+def test_engine_several_home_patterns_union_their_days() -> None:
+    """Any covering home pattern makes the day present; a day no home
+    pattern covers is absent once the child has a home pattern."""
+    engine = PresenceEngine(
+        {
+            1: [
+                _pattern("home", {0: {0, 1}}),
+                _pattern("home", {0: {4}, 1: set()}, cycle=2),
+            ]
+        }
+    )
+    # Week 0 (Jan 5-11): Mon, Tue from the first, Fri from the second.
+    present = {
+        ANCHOR + datetime.timedelta(days=offset)
+        for offset in range(7)
+        if engine.is_present(1, ANCHOR + datetime.timedelta(days=offset))
+    }
+    assert present == {
+        datetime.date(2026, 1, 5),
+        datetime.date(2026, 1, 6),
+        datetime.date(2026, 1, 9),
+    }
+    # Week 1: the second pattern's empty week leaves only Mon/Tue.
+    assert engine.is_present(1, datetime.date(2026, 1, 16)) is False
+    assert engine.is_present(1, datetime.date(2026, 1, 12)) is True
+
+
+def test_engine_away_pattern_beats_covering_home_pattern() -> None:
+    """Rule order: a covering away pattern wins over a covering home
+    pattern, whichever is listed first."""
+    home = _pattern("home", {0: {0, 1, 2, 3, 4, 5, 6}})
+    away = _pattern("away", {0: {5, 6}})
+    for patterns in ([home, away], [away, home]):
+        engine = PresenceEngine({1: patterns})
+        assert engine.is_present(1, datetime.date(2026, 1, 9)) is True  # Fri
+        assert engine.is_present(1, datetime.date(2026, 1, 10)) is False  # Sat
+        assert engine.is_present(1, datetime.date(2026, 1, 11)) is False  # Sun
+
+
+def test_engine_home_pattern_makes_uncovered_days_absent_even_with_away() -> None:
+    """Mixing kinds: a day neither pattern covers is absent because the
+    child has a home pattern (rule 4), not present."""
+    engine = PresenceEngine(
+        {1: [_pattern("home", {0: {0, 1}}), _pattern("away", {0: {5}})]}
+    )
+    assert engine.is_present(1, datetime.date(2026, 1, 5)) is True  # Mon
+    assert engine.is_present(1, datetime.date(2026, 1, 7)) is False  # Wed
+    assert engine.is_present(1, datetime.date(2026, 1, 10)) is False  # Sat
+
+
+def test_engine_override_beats_away_pattern() -> None:
+    engine = PresenceEngine(
+        {1: [_pattern("away", {0: {5, 6}})]},
+        overrides={
+            1: [PresenceOverride(1, "2026-01-10", "2026-01-10", True)]
+        },
+    )
+    assert engine.is_present(1, datetime.date(2026, 1, 10)) is True
+    assert engine.is_present(1, datetime.date(2026, 1, 11)) is False
+
+
+def test_engine_pattern_lists_are_frozen() -> None:
+    """Mutating the caller's pattern list after construction must not
+    change the engine's answers."""
+    patterns = [_pattern("home", {0: {0}})]
+    engine = PresenceEngine({1: patterns})
+    assert engine.is_present(1, datetime.date(2026, 1, 6)) is False
+    patterns.append(_pattern("home", {0: {1}}))
+    assert engine.is_present(1, datetime.date(2026, 1, 6)) is False
+    with pytest.raises(AttributeError):
+        engine._patterns[1].append(patterns[1])
 
 
 # ---------------------------------------------------------------------------
@@ -495,9 +671,12 @@ def _engine_with_overrides(*overrides_for_declan) -> PresenceEngine:
     anchor = datetime.date(2026, 1, 5)  # Monday
     return PresenceEngine(
         {
-            1: PresenceSchedule(
-                1, 2, anchor, {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()}
-            )
+            1: [
+                PresencePattern(
+                    1, NAME, HOME, 2, anchor,
+                    {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()},
+                )
+            ]
         },
         overrides={1: list(overrides_for_declan)} if overrides_for_declan else {},
     )
@@ -523,8 +702,8 @@ def test_present_override_on_normally_absent_day_wins() -> None:
     assert engine.is_present(1, datetime.date(2026, 1, 14)) is False
 
 
-def test_override_applies_without_a_schedule() -> None:
-    """An override on a schedule-free child still applies: holidays and
+def test_override_applies_without_a_pattern() -> None:
+    """An override on a pattern-free child still applies: holidays and
     swaps must work for the always-present sibling too."""
     engine = PresenceEngine(
         {},
@@ -554,18 +733,18 @@ def test_override_range_beats_pattern_for_its_span() -> None:
 
 
 def test_engine_override_snapshot_validation() -> None:
-    schedule = PresenceSchedule(1, 1, ANCHOR, {0: {0}})
+    patterns = [PresencePattern(1, NAME, HOME, 1, ANCHOR, {0: {0}})]
     entry = PresenceOverride(1, "2026-07-20", "2026-07-20", True)
     with pytest.raises(ValueError, match="must map child_id"):
-        PresenceEngine({1: schedule}, overrides=[entry])
+        PresenceEngine({1: patterns}, overrides=[entry])
     with pytest.raises(ValueError, match="must be a list"):
-        PresenceEngine({1: schedule}, overrides={1: entry})
+        PresenceEngine({1: patterns}, overrides={1: entry})
     with pytest.raises(ValueError, match="must be"):
-        PresenceEngine({1: schedule}, overrides={1: ["nope"]})
+        PresenceEngine({1: patterns}, overrides={1: ["nope"]})
     with pytest.raises(ValueError, match="holds an override"):
-        PresenceEngine({1: schedule}, overrides={2: [entry]})
+        PresenceEngine({1: patterns}, overrides={2: [entry]})
     with pytest.raises(ValueError, match="child_id must be an integer"):
-        PresenceEngine({1: schedule}, overrides={True: [entry]})
+        PresenceEngine({1: patterns}, overrides={True: [entry]})
 
 
 def test_engine_overlapping_snapshot_uses_latest_start() -> None:
@@ -591,11 +770,11 @@ def test_engine_override_lists_are_frozen() -> None:
     frozen snapshot it must not."""
     entry = PresenceOverride(1, "2026-01-06", "2026-01-06", False)
     entries = [entry]
-    schedule = PresenceSchedule(
-        1, 2, ANCHOR, {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()}
+    pattern = PresencePattern(
+        1, NAME, HOME, 2, ANCHOR, {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()}
     )
     engine = PresenceEngine(
-        {1: schedule}, overrides={1: entries}  # caller-owned list
+        {1: [pattern]}, overrides={1: entries}  # caller-owned list
     )
     assert engine.is_present(1, datetime.date(2026, 1, 6)) is False
     entries.append(PresenceOverride(1, "2026-01-07", "2026-01-07", False))
@@ -620,10 +799,12 @@ def _preview_engine() -> PresenceEngine:
     would matter only for the override test."""
     return PresenceEngine(
         {
-            1: PresenceSchedule(
-                1, 2, datetime.date(2026, 1, 5),
-                {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()},
-            )
+            1: [
+                PresencePattern(
+                    1, NAME, HOME, 2, datetime.date(2026, 1, 5),
+                    {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()},
+                )
+            ]
         }
     )
 
@@ -669,12 +850,12 @@ def test_preview_start_date_is_inclusive() -> None:
 
 
 def test_preview_honours_overrides() -> None:
-    schedule = PresenceSchedule(
-        1, 2, datetime.date(2026, 1, 5),
+    pattern = PresencePattern(
+        1, NAME, HOME, 2, datetime.date(2026, 1, 5),
         {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()},
     )
     engine = PresenceEngine(
-        {1: schedule},
+        {1: [pattern]},
         overrides={
             1: [
                 PresenceOverride(
@@ -692,7 +873,7 @@ def test_preview_honours_overrides() -> None:
     ]
 
 
-def test_preview_schedule_free_child_returns_consecutive_days() -> None:
+def test_preview_pattern_free_child_returns_consecutive_days() -> None:
     engine = PresenceEngine({})
     preview = engine.next_present_dates(3, "2026-03-01", 3)
     assert preview == [
@@ -719,9 +900,11 @@ def test_preview_always_absent_child_raises_not_loops() -> None:
     hang the admin preview."""
     engine = PresenceEngine(
         {
-            1: PresenceSchedule(
-                1, 1, datetime.date(2026, 1, 5), {0: set()}
-            )
+            1: [
+                PresencePattern(
+                    1, NAME, HOME, 1, datetime.date(2026, 1, 5), {0: set()}
+                )
+            ]
         }
     )
     with pytest.raises(ValueError, match="not present on any"):
@@ -767,10 +950,10 @@ def test_custody_rotation_walks_full_years_without_inversion(
         days=(7 - datetime.date(year, 1, 1).weekday()) % 7
     )
     assert anchor.weekday() == 0
-    rotation = PresenceSchedule(
-        1, 2, anchor, {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()}
+    rotation = PresencePattern(
+        1, NAME, HOME, 2, anchor, {0: {0, 1, 2, 3, 4, 5, 6}, 1: set()}
     )
-    engine = PresenceEngine({1: rotation})
+    engine = PresenceEngine({1: [rotation]})
 
     # Walk EVERY day of the year.  The expectation is derived from the
     # anchor's 7-day BLOCKS, not from the engine: each block of seven

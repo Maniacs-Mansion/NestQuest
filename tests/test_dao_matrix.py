@@ -31,7 +31,7 @@ from custom_components.nestquest.core.dao_instances import (
 )
 from custom_components.nestquest.core.dao_presence import (
     PresenceOverridesDao,
-    PresenceSchedulesDao,
+    PresencePatternsDao,
 )
 from custom_components.nestquest.core.dao_rules import (
     ScheduleRulesDao,
@@ -72,7 +72,7 @@ ALL_TABLES = (
     "schedule_rules",
     "quest_definitions",
     "quest_definition_assignees",
-    "presence_schedules",
+    "presence_patterns",
     "presence_overrides",
     "quest_instances",
     "completion_events",
@@ -88,7 +88,7 @@ class World:
         self.admins = AdminUsersDao(database)
         self.rules = ScheduleRulesDao(database)
         self.definitions = QuestDefinitionsDao(database)
-        self.schedules = PresenceSchedulesDao(database)
+        self.patterns = PresencePatternsDao(database)
         self.overrides = PresenceOverridesDao(database)
         self.instances = QuestInstancesDao(database)
         self.events = CompletionEventsDao(database)
@@ -105,8 +105,8 @@ class World:
             _stamp(),
             assignee_child_ids=[self.child.id],
         )
-        self.schedule = await self.schedules.upsert_by_child(
-            self.child.id, 2, D1, "0,2,4|1,3"
+        self.pattern = await self.patterns.create(
+            self.child.id, "Home schedule", "home", 2, D1, "0,2,4|1,3"
         )
         self.override = await self.overrides.create(
             self.child.id, D1, D2, True, note="test"
@@ -244,28 +244,39 @@ def test_matrix_quest_definitions_crud_and_constraints(tmp_path) -> None:
     assert _with_world(tmp_path / "m-definitions.db")(_body) is True
 
 
-def test_matrix_presence_schedules_crud_and_constraints(tmp_path) -> None:
+def test_matrix_presence_patterns_crud_and_constraints(tmp_path) -> None:
     async def _body(w: World):
         # insert (seeded) + read
-        fetched = await w.schedules.get_by_child(w.child.id)
+        fetched = await w.patterns.get(w.pattern.id)
+        assert fetched == w.pattern
         assert fetched.pattern == "0,2,4|1,3"
-        # update path: upsert replaces in place (same row id)
-        replaced = await w.schedules.upsert_by_child(
-            w.child.id, 2, D2, "1,3|0,2,4"
+        # a second pattern for the same child is allowed (schema 9)
+        away = await w.patterns.create(
+            w.child.id, "Weekend away", "away", 1, D1, "5,6"
+        )
+        assert [r.id for r in await w.patterns.list_by_child(w.child.id)] == [
+            w.pattern.id,
+            away.id,
+        ]
+        # update path: rewrites in place (same row id)
+        replaced = await w.patterns.update(
+            w.pattern.id, "Home schedule", "home", 2, D2, "1,3|0,2,4"
         )
         assert replaced.id == fetched.id
-        assert (await w.schedules.get_by_child(w.child.id)).pattern == (
-            "1,3|0,2,4"
-        )
+        assert (await w.patterns.get(w.pattern.id)).pattern == "1,3|0,2,4"
         # constraint: malformed pattern CHECK
         with pytest.raises(sqlite3.IntegrityError):
-            await w.schedules.upsert_by_child(w.child.id, 2, D1, "0,2")
-        # delete: row gone, child present every day
-        assert await w.schedules.delete(w.child.id) is True
-        assert await w.schedules.get_by_child(w.child.id) is None
+            await w.patterns.create(w.child.id, "Bad", "home", 2, D1, "0,2")
+        # constraint: kind CHECK
+        with pytest.raises(sqlite3.IntegrityError):
+            await w.patterns.create(w.child.id, "Bad", "maybe", 1, D1, "0")
+        # delete: rows gone, child present every day
+        assert await w.patterns.delete(w.pattern.id) is True
+        assert await w.patterns.delete(away.id) is True
+        assert await w.patterns.list_by_child(w.child.id) == []
         return True
 
-    assert _with_world(tmp_path / "m-schedules.db")(_body) is True
+    assert _with_world(tmp_path / "m-patterns.db")(_body) is True
 
 
 def test_matrix_presence_overrides_crud_and_constraints(tmp_path) -> None:

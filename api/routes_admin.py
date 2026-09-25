@@ -39,15 +39,27 @@ The presence routes follow the same pattern over
 :mod:`nestquest_core.presence_management` — the ONE presence write
 layer the HA services share, so the two planes cannot drift:
 
-- ``PUT /children/{child_id}/presence-schedule`` sets (UPSERTS) the
-  child's repeating schedule: the body's ``cycle_length_weeks``,
-  ``anchor_date`` and ``pattern`` go straight into ONE
-  :class:`~nestquest_core.presence.PresenceSchedule` (the model
-  validates cycle length, the strict anchor date and the pattern's
-  week coverage at construction), the core upserts by child (setting
-  again REPLACES the one schedule a child can have) and regenerates
-  the child's future instances; the response is the STORED schedule
-  decoded back through the model.
+- ``GET /children/{child_id}/presence-patterns`` lists the child's
+  repeating presence patterns (zero or more, schema 9) through ONE
+  ``list_presence_patterns`` call, wrapped as ``{"patterns": [...]}``
+  ordered by id — an empty list when the child has none (present
+  every day), never a 404; an unknown child is 404.
+- ``POST /children/{child_id}/presence-patterns`` adds one pattern:
+  the body's ``name``, ``kind`` (``home``/``away``),
+  ``cycle_length_weeks``, ``anchor_date`` and ``pattern`` go straight
+  into ONE :class:`~nestquest_core.presence.PresencePattern` (the model
+  validates the name, the kind, cycle length, the strict anchor date
+  and the pattern's week coverage at construction), the core inserts
+  it beside the child's other patterns and regenerates the child's
+  future instances; the response (201) is the STORED pattern with its
+  ``id``, its weekday sets decoded back through the model.
+- ``PATCH /presence-patterns/{pattern_id}`` edits one pattern: only
+  SUPPLIED fields are forwarded (``exclude_unset``), the core lays them
+  over the stored pattern and rebuilds the WHOLE model, so a partial
+  edit is validated exactly as a create; it regenerates the pattern's
+  child.
+- ``DELETE /presence-patterns/{pattern_id}`` deletes one pattern and
+  regenerates its child.  It answers ``{"status": "ok"}``.
 - ``POST /presence-overrides`` creates one date-range override: the
   body becomes ONE :class:`~nestquest_core.presence.PresenceOverride`
   (the model validates the dates, ``end >= start``, the real bool and
@@ -65,11 +77,6 @@ layer the HA services share, so the two planes cannot drift:
   (instances with a completion event are never counted, D-005).
   Nothing is written; an unknown child is 404, a malformed or inverted
   range 422.
-- ``GET /children/{child_id}/presence-schedule`` reads the child's
-  schedule through ONE ``get_presence_schedule`` call, wrapped as
-  ``{"schedule": ...}`` in the PUT response's shape — ``null`` when the
-  child has none (present every day), never a 404; an unknown child is
-  404.
 - ``GET /presence-overrides`` lists the household's overrides through
   ONE ``list_presence_overrides`` call, wrapped as
   ``{"overrides": [...]}`` in the POST response's shape, ordered by
@@ -238,21 +245,24 @@ deliberately narrow):
   ``rule_type``, a shape-missing field such as a weekly rule without
   weekdays, a malformed date, a forbidden field), a bad window name or
   due time, a rejected window or assignee list (empty, duplicate,
-  wrong-typed); a rejected presence schedule or override (bad cycle
-  length, a pattern not covering the cycle's weeks, a malformed or
+  wrong-typed); a rejected presence pattern or override (a blank name,
+  an unknown kind, a bad cycle length, a pattern not covering the
+  cycle's weeks, a malformed anchor date, a malformed or
   inverted date range, an override overlapping the same child's
   existing one) — is mapped to 422: the body was well-formed JSON but
   semantically invalid, the same failure class Pydantic reports.  The
   core rejects these BEFORE any write, so a 422 never leaves a
   half-applied change behind.
-- A non-existent CHILD on a presence route (setting a schedule or
-  creating an override for an unknown id) is mapped to 404 through the
-  SAME :func:`_raise_child_error` the children routes use — the
-  message reads ``child N does not exist``.  A non-existent OVERRIDE
-  on the delete route is mapped to 404 through
+- A non-existent CHILD on a presence route (listing or creating a
+  pattern, or creating an override, for an unknown id) is mapped to 404
+  through the SAME :func:`_raise_child_error` the children routes use —
+  the message reads ``child N does not exist``.  A non-existent
+  OVERRIDE on the delete route is mapped to 404 through
   :func:`_raise_presence_override_error`, keyed on the
   ``override_id:`` prefix the core's unknown-id error carries (the
-  same convention as the quest-definition 404).
+  same convention as the quest-definition 404); a non-existent PATTERN
+  on the pattern edit/delete routes likewise through
+  :func:`_raise_presence_pattern_error`, keyed on ``pattern_id:``.
 - The UNCOMPLETE route maps the core completion layer's unknown-
   ``instance_id`` error (prefixed ``instance_id:``, the same
   convention the panel complete route keys on) to 404; every other
@@ -327,7 +337,6 @@ from api.nestquest_core import (
     core_dao_rules,
     core_history,
     core_materialize,
-    core_presence,
     core_presence_management,
     core_quest_definitions,
     core_recurrence,
@@ -605,35 +614,68 @@ class AdminQuestDefinitionActiveRequest(BaseModel):
     is_active: bool
 
 
-class AdminPresenceScheduleRequest(BaseModel):
-    """The body of ``PUT /api/v1/admin/children/{child_id}/presence-schedule``.
+class AdminPresencePatternCreateRequest(BaseModel):
+    """The body of ``POST /api/v1/admin/children/{child_id}/presence-patterns``.
 
-    The shape of :class:`~nestquest_core.presence.PresenceSchedule` —
+    The shape of :class:`~nestquest_core.presence.PresencePattern` —
     nothing more.  ``pattern`` maps each cycle week index (JSON object
-    keys, coerced to ints by the model) to that week's present weekdays
-    (Monday=0); every week of the cycle must be covered, which the
-    PRESENCE MODEL enforces at construction, not this shape.  A week
-    with an empty list means absent every day of that week.
+    keys, coerced to ints by the model) to the weekdays the pattern
+    covers that week (Monday=0); every week of the cycle must be
+    covered, which the PRESENCE MODEL enforces at construction, not
+    this shape — as it does the non-blank ``name`` and the
+    ``home``/``away`` ``kind``.  ``cycle_length_weeks`` and the weekday
+    values are strict JSON integers: ``2.0``, ``"2"`` or ``true`` is a
+    422, not a silent coercion.
     """
 
-    cycle_length_weeks: int
+    name: str
+    kind: str
+    cycle_length_weeks: StrictInt
     anchor_date: str
-    pattern: dict[int, list[int]]
+    pattern: dict[int, list[StrictInt]]
 
 
-class AdminPresenceScheduleResponse(BaseModel):
-    """A child's repeating presence schedule as the admin plane serializes it.
+class AdminPresencePatternEditRequest(BaseModel):
+    """The body of ``PATCH /api/v1/admin/presence-patterns/{pattern_id}``.
 
-    The stored schedule decoded back through
-    :meth:`nestquest_core.presence.PresenceSchedule.decode`: each
-    pattern week is the sorted list of present weekdays, and the child
-    has exactly ONE schedule (setting again replaces it).
+    Every field optional; only SUPPLIED fields are forwarded, and an
+    explicit ``null`` is forwarded too — and rejected by the model.
+    The pattern's child cannot be changed.
     """
 
+    name: str | None = None
+    kind: str | None = None
+    cycle_length_weeks: StrictInt | None = None
+    anchor_date: str | None = None
+    pattern: dict[int, list[StrictInt]] | None = None
+
+
+class AdminPresencePatternResponse(BaseModel):
+    """One presence pattern as the admin plane serializes it.
+
+    The stored row with its weekday sets decoded back through
+    :meth:`nestquest_core.presence.PresencePattern.decode`: each
+    pattern week is the sorted list of covered weekdays.  The ``id`` is
+    the handle the PATCH and DELETE routes take.
+    """
+
+    id: int
     child_id: int
+    name: str
+    kind: str
     cycle_length_weeks: int
     anchor_date: str
     pattern: dict[int, list[int]]
+
+
+class AdminPresencePatternListResponse(BaseModel):
+    """The ``GET /children/{child_id}/presence-patterns`` payload.
+
+    ``patterns`` is empty when the child has none — the child is
+    present every day (Feature 05); absence is state, not an error.
+    """
+
+    patterns: list[AdminPresencePatternResponse]
 
 
 class AdminPresenceOverrideCreateRequest(BaseModel):
@@ -667,16 +709,6 @@ class AdminPresenceOverrideResponse(BaseModel):
     end_date: str
     is_present: bool
     note: str | None
-
-
-class AdminPresenceScheduleReadResponse(BaseModel):
-    """The ``GET /children/{child_id}/presence-schedule`` payload.
-
-    ``schedule`` is ``None`` when the child has no schedule — the child
-    is present every day (Feature 05); absence is state, not an error.
-    """
-
-    schedule: AdminPresenceScheduleResponse | None
 
 
 class AdminPresenceOverrideListResponse(BaseModel):
@@ -989,12 +1021,33 @@ def _raise_presence_override_error(error: ValueError) -> NoReturn:
     ``override_id:`` (an unknown id), and that one case is this route's
     404.  Every other ``ValueError`` — a non-integer id the path
     parser's ``int`` already makes unreachable — becomes 422.  The
-    schedule and override-CREATE routes do NOT use this mapper: their
-    only 404 is an unknown CHILD, mapped by :func:`_raise_child_error`.
+    pattern list/create and override-CREATE routes do NOT use this
+    mapper: their only 404 is an unknown CHILD, mapped by
+    :func:`_raise_child_error`.
     """
     if str(error).startswith("override_id:"):
         raise HTTPException(
             status_code=404, detail=_PRESENCE_OVERRIDE_NOT_FOUND_DETAIL
+        ) from error
+    raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+#: 404 detail for a pattern id the core layer reports as non-existent.
+_PRESENCE_PATTERN_NOT_FOUND_DETAIL = "Presence pattern not found"
+
+
+def _raise_presence_pattern_error(error: ValueError) -> NoReturn:
+    """Map a core ``ValueError`` from the pattern PATCH/DELETE routes.
+
+    Mirrors :func:`_raise_presence_override_error`: the core names a
+    missing pattern by prefixing its error with ``pattern_id:``, and
+    that one case is 404.  Every other ``ValueError`` — a rejected edit
+    (blank name, unknown kind, bad cycle length, malformed anchor date
+    or pattern), each naming its field — becomes 422.
+    """
+    if str(error).startswith("pattern_id:"):
+        raise HTTPException(
+            status_code=404, detail=_PRESENCE_PATTERN_NOT_FOUND_DETAIL
         ) from error
     raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -1169,16 +1222,20 @@ def _quest_definition_response(
     )
 
 
-def _presence_schedule_response(
-    schedule: core_presence.PresenceSchedule,
-) -> AdminPresenceScheduleResponse:
-    """Serialize one decoded core PresenceSchedule into the payload."""
-    return AdminPresenceScheduleResponse(
-        child_id=schedule.child_id,
-        cycle_length_weeks=schedule.cycle_length_weeks,
-        anchor_date=schedule.anchor_date.isoformat(),
+def _presence_pattern_response(
+    record: core_presence_management.PresencePatternRecord,
+) -> AdminPresencePatternResponse:
+    """Serialize one stored core pattern, weekday sets decoded."""
+    pattern = core_presence_management.decode_pattern_record(record)
+    return AdminPresencePatternResponse(
+        id=record.id,
+        child_id=pattern.child_id,
+        name=pattern.name,
+        kind=pattern.kind,
+        cycle_length_weeks=pattern.cycle_length_weeks,
+        anchor_date=pattern.anchor_date.isoformat(),
         pattern={
-            week: sorted(days) for week, days in schedule.pattern.items()
+            week: sorted(days) for week, days in pattern.pattern.items()
         },
     )
 
@@ -1545,40 +1602,136 @@ async def admin_set_quest_definition_active(
     return _quest_definition_response(bundle)
 
 
-@router.put(
-    "/children/{child_id}/presence-schedule",
-    summary="Set a child's repeating presence schedule",
-    response_model=AdminPresenceScheduleResponse,
+@router.get(
+    "/children/{child_id}/presence-patterns",
+    summary="List a child's repeating presence patterns",
+    response_model=AdminPresencePatternListResponse,
 )
-async def admin_set_presence_schedule(
-    child_id: int, body: AdminPresenceScheduleRequest, request: Request
-) -> AdminPresenceScheduleResponse:
-    """Set (upsert) a child's repeating presence schedule.
+async def admin_list_presence_patterns(
+    child_id: int, request: Request
+) -> AdminPresencePatternListResponse:
+    """Return the child's presence patterns, ordered by id.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: one
+    :func:`nestquest_core.presence_management.list_presence_patterns`
+    call, each pattern serialized exactly as the POST response is; a
+    child without one answers ``{"patterns": []}`` (present every day).
+    Errors are mapped by :func:`_raise_child_error`: an unknown child
+    is 404.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        records = await core_presence_management.list_presence_patterns(
+            state.database, child_id
+        )
+    except ValueError as error:
+        _raise_child_error(error)
+    return AdminPresencePatternListResponse(
+        patterns=[_presence_pattern_response(record) for record in records]
+    )
+
+
+@router.post(
+    "/children/{child_id}/presence-patterns",
+    summary="Add a repeating presence pattern to a child",
+    status_code=201,
+    response_model=AdminPresencePatternResponse,
+)
+async def admin_create_presence_pattern(
+    child_id: int, body: AdminPresencePatternCreateRequest, request: Request
+) -> AdminPresencePatternResponse:
+    """Add one repeating presence pattern to a child.
 
     Requires a valid admin JWT (the router's shared
     :func:`~api.auth.require_admin` dependency — the ONE check; this
     handler performs NO auth of its own).  Thin adapter: the body model
-    carries the shape, and the cycle-length, anchor-date and
-    pattern-coverage policies all live in the
-    :class:`~nestquest_core.presence.PresenceSchedule` constructor the
-    core builds the schedule with — setting again REPLACES the child's
-    one schedule, and the core regenerates the child's future instances
-    so they track the new presence.  Errors are mapped by
-    :func:`_raise_child_error`: an unknown child is 404, a rejected
-    schedule 422.
+    carries the shape, and the name, kind, cycle-length, anchor-date
+    and pattern-coverage policies all live in the
+    :class:`~nestquest_core.presence.PresencePattern` constructor the
+    core builds the pattern with; the core regenerates the child's
+    future instances so they track the new presence.  Errors are
+    mapped by :func:`_raise_child_error`: an unknown child is 404, a
+    rejected pattern 422.
     """
     state: DatabaseState = request.app.state.db
     try:
-        schedule = await core_presence_management.set_presence_schedule(
+        record = await core_presence_management.create_presence_pattern(
             state.database,
             child_id,
+            body.name,
+            body.kind,
             body.cycle_length_weeks,
             body.anchor_date,
             body.pattern,
         )
     except ValueError as error:
         _raise_child_error(error)
-    return _presence_schedule_response(schedule)
+    return _presence_pattern_response(record)
+
+
+@router.patch(
+    "/presence-patterns/{pattern_id}",
+    summary="Edit a repeating presence pattern",
+    response_model=AdminPresencePatternResponse,
+)
+async def admin_edit_presence_pattern(
+    pattern_id: int, body: AdminPresencePatternEditRequest, request: Request
+) -> AdminPresencePatternResponse:
+    """Edit one presence pattern; only supplied fields change.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: the supplied
+    fields are forwarded with ``exclude_unset`` semantics to
+    :func:`nestquest_core.presence_management.update_presence_pattern`,
+    which rebuilds the whole pattern through the model (an explicit
+    ``null`` is rejected there) and regenerates the pattern's child.
+    Error mapping (:func:`_raise_presence_pattern_error`): an unknown
+    pattern id is 404; a rejected edit is 422.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        record = await core_presence_management.update_presence_pattern(
+            state.database,
+            pattern_id,
+            **body.model_dump(exclude_unset=True),
+        )
+    except ValueError as error:
+        _raise_presence_pattern_error(error)
+    return _presence_pattern_response(record)
+
+
+@router.delete(
+    "/presence-patterns/{pattern_id}",
+    summary="Delete a repeating presence pattern",
+)
+async def admin_delete_presence_pattern(
+    pattern_id: int, request: Request
+) -> dict[str, str]:
+    """Delete one presence pattern.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: the id goes
+    straight to
+    :func:`nestquest_core.presence_management.delete_presence_pattern`,
+    which looks the pattern up first (an unknown id is refused BEFORE
+    any delete), removes it and regenerates ITS child's future
+    instances.  On success the route answers ``{"status": "ok"}``.
+
+    Error mapping (:func:`_raise_presence_pattern_error`): an unknown
+    pattern id is 404; every other core ``ValueError`` is 422.
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        await core_presence_management.delete_presence_pattern(
+            state.database, pattern_id
+        )
+    except ValueError as error:
+        _raise_presence_pattern_error(error)
+    return {"status": "ok"}
 
 
 @router.post(
@@ -1692,39 +1845,6 @@ async def admin_presence_override_consequence(
     except ValueError as error:
         _raise_child_error(error)
     return AdminPresenceOverrideConsequenceResponse(removed=removed)
-
-
-@router.get(
-    "/children/{child_id}/presence-schedule",
-    summary="Read a child's repeating presence schedule",
-    response_model=AdminPresenceScheduleReadResponse,
-)
-async def admin_get_presence_schedule(
-    child_id: int, request: Request
-) -> AdminPresenceScheduleReadResponse:
-    """Return the child's presence schedule, or ``schedule: null``.
-
-    Requires a valid admin JWT (the router's shared
-    :func:`~api.auth.require_admin` dependency — the ONE check; this
-    handler performs NO auth of its own).  Thin adapter: one
-    :func:`nestquest_core.presence_management.get_presence_schedule`
-    call; a stored schedule is serialized exactly as the PUT response
-    is, and a child without one answers ``{"schedule": null}`` (present
-    every day).  Errors are mapped by :func:`_raise_child_error`: an
-    unknown child is 404.
-    """
-    state: DatabaseState = request.app.state.db
-    try:
-        schedule = await core_presence_management.get_presence_schedule(
-            state.database, child_id
-        )
-    except ValueError as error:
-        _raise_child_error(error)
-    return AdminPresenceScheduleReadResponse(
-        schedule=(
-            None if schedule is None else _presence_schedule_response(schedule)
-        )
-    )
 
 
 @router.get(

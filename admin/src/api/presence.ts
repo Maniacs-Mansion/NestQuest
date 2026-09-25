@@ -1,25 +1,35 @@
 /**
- * Typed client for the admin presence routes: a child's repeating schedule
- * (/api/v1/admin/children/{id}/presence-schedule) and the household's
- * date-range overrides (/api/v1/admin/presence-overrides).
+ * Typed client for the admin presence routes: a child's repeating patterns
+ * (/api/v1/admin/children/{id}/presence-patterns, /presence-patterns/{id})
+ * and the household's date-range overrides (/api/v1/admin/presence-overrides).
  */
 import { apiFetch } from "./client";
 import { CHILDREN_PATH, readJson } from "./definitions";
 
-/**
- * Cycle week index ("0".."n-1", JSON object keys) -> present weekdays
- * (0 = Monday .. 6 = Sunday). An empty list is away that whole week.
- */
-export type PresencePattern = Record<string, number[]>;
+/** A pattern claims its covered days as the child being home or away. */
+export type PatternKind = "home" | "away";
 
-export interface PresenceScheduleBody {
+/**
+ * Cycle week index ("0".."n-1", JSON object keys) -> covered weekdays
+ * (0 = Monday .. 6 = Sunday). An empty list covers nothing that week.
+ */
+export type PatternWeeks = Record<string, number[]>;
+
+/** The anchor-based cycle every pattern repeats on. */
+export interface PatternCycle {
   cycle_length_weeks: number;
   /** "YYYY-MM-DD"; pins cycle week 0. */
   anchor_date: string;
-  pattern: PresencePattern;
+  pattern: PatternWeeks;
 }
 
-export interface PresenceSchedule extends PresenceScheduleBody {
+export interface PresencePatternBody extends PatternCycle {
+  name: string;
+  kind: PatternKind;
+}
+
+export interface PresencePattern extends PresencePatternBody {
+  id: number;
   child_id: number;
 }
 
@@ -40,30 +50,48 @@ export interface PresenceOverrideFilter {
 }
 
 export const PRESENCE_OVERRIDES_PATH = "/api/v1/admin/presence-overrides";
+export const PRESENCE_PATTERNS_PATH = "/api/v1/admin/presence-patterns";
 
-export function presenceSchedulePath(childId: number): string {
-  return `${CHILDREN_PATH}/${childId}/presence-schedule`;
+export function childPatternsPath(childId: number): string {
+  return `${CHILDREN_PATH}/${childId}/presence-patterns`;
 }
 
-/** The child's schedule, or null when it has none (present every day). */
-export async function fetchPresenceSchedule(childId: number): Promise<PresenceSchedule | null> {
-  const body = await readJson<{ schedule: PresenceSchedule | null }>(
-    await apiFetch(presenceSchedulePath(childId)),
+function sendJson(path: string, method: "POST" | "PATCH", body: unknown): Promise<Response> {
+  return apiFetch(path, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** The child's patterns in id order; empty when it has none (present every day). */
+export async function fetchPresencePatterns(childId: number): Promise<PresencePattern[]> {
+  const body = await readJson<{ patterns: PresencePattern[] }>(
+    await apiFetch(childPatternsPath(childId)),
   );
-  return body.schedule;
+  return body.patterns;
 }
 
-/** Set (upsert) the child's schedule; resolves to the schedule as stored. */
-export async function savePresenceSchedule(
+export async function createPresencePattern(
   childId: number,
-  body: PresenceScheduleBody,
-): Promise<PresenceSchedule> {
-  return readJson<PresenceSchedule>(
-    await apiFetch(presenceSchedulePath(childId), {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
+  body: PresencePatternBody,
+): Promise<PresencePattern> {
+  return readJson<PresencePattern>(await sendJson(childPatternsPath(childId), "POST", body));
+}
+
+/** Change only the supplied fields; resolves to the pattern as stored. */
+export async function updatePresencePattern(
+  patternId: number,
+  body: Partial<PresencePatternBody>,
+): Promise<PresencePattern> {
+  return readJson<PresencePattern>(
+    await sendJson(`${PRESENCE_PATTERNS_PATH}/${patternId}`, "PATCH", body),
+  );
+}
+
+export async function deletePresencePattern(patternId: number): Promise<void> {
+  await readJson<{ status: string }>(
+    await apiFetch(`${PRESENCE_PATTERNS_PATH}/${patternId}`, { method: "DELETE" }),
   );
 }
 
@@ -96,27 +124,19 @@ export interface PresenceOverrideBody extends PresenceOverrideRange {
 
 export const PRESENCE_OVERRIDE_CONSEQUENCE_PATH = `${PRESENCE_OVERRIDES_PATH}/consequence`;
 
-function postJson(path: string, body: unknown): Promise<Response> {
-  return apiFetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-}
-
 /**
  * How many open upcoming tasks saving this override would remove. Computed
  * by the API before anything is saved; completed instances never count.
  */
 export async function previewOverrideConsequence(range: PresenceOverrideRange): Promise<number> {
   const body = await readJson<{ removed: number }>(
-    await postJson(PRESENCE_OVERRIDE_CONSEQUENCE_PATH, range),
+    await sendJson(PRESENCE_OVERRIDE_CONSEQUENCE_PATH, "POST", range),
   );
   return body.removed;
 }
 
 export async function createPresenceOverride(body: PresenceOverrideBody): Promise<PresenceOverride> {
-  return readJson<PresenceOverride>(await postJson(PRESENCE_OVERRIDES_PATH, body));
+  return readJson<PresenceOverride>(await sendJson(PRESENCE_OVERRIDES_PATH, "POST", body));
 }
 
 export async function deletePresenceOverride(overrideId: number): Promise<void> {

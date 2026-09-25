@@ -13,7 +13,7 @@ from custom_components.nestquest.core.schema import (
     SCHEMA_V1_COMPLETION_EVENTS_DDL,
     SCHEMA_V7_META_STATE_DDL,
     SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
-    SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
+    SCHEMA_V9_PRESENCE_PATTERNS_DDL,
     SCHEMA_V1_SCHEDULE_RULES_DDL,
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V1_QUEST_DEFINITIONS_DDL,
@@ -112,14 +112,16 @@ def _insert_definition(database, rule_id=1, assignees=(1,), **overrides):
     return result.lastrowid
 
 
-def _insert_schedule(database, child_id, **overrides):
-    """Insert one valid presence_schedule, returning the schedule id.
+def _insert_pattern(database, child_id, **overrides):
+    """Insert one valid presence_pattern, returning the pattern id.
 
     Pass ``_OMIT`` as a value to leave that column out of the INSERT so
     its DDL DEFAULT applies.
     """
     values: dict[str, object] = {
         "child_id": child_id,
+        "name": "Home schedule",
+        "kind": "home",
         "cycle_length_weeks": 2,
         "anchor_date": "2026-09-13",
         "pattern": "0,2,4|1,3",
@@ -130,7 +132,7 @@ def _insert_schedule(database, child_id, **overrides):
     placeholders = ", ".join("?" for _ in values)
     result = _run(
         database.execute(
-            f"INSERT INTO presence_schedules ({columns}) VALUES ({placeholders})",
+            f"INSERT INTO presence_patterns ({columns}) VALUES ({placeholders})",
             tuple(values.values()),
         )
     )
@@ -177,7 +179,7 @@ def test_schema_v1_statements_compose_the_nine_tables() -> None:
         *SCHEMA_V1_QUEST_DEFINITIONS_DDL,
         *SCHEMA_V1_QUEST_DEFINITION_ASSIGNEES_DDL,
         *SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL,
-        *SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
+        *SCHEMA_V9_PRESENCE_PATTERNS_DDL,
         *SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
         *SCHEMA_V1_QUEST_INSTANCES_DDL,
         *SCHEMA_V1_COMPLETION_EVENTS_DDL,
@@ -1317,7 +1319,7 @@ def test_applying_extended_ddl_twice_keeps_new_table_rows(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# presence_schedules and presence_overrides constraint enforcement
+# presence_patterns and presence_overrides constraint enforcement
 # ---------------------------------------------------------------------------
 
 
@@ -1331,17 +1333,26 @@ def _child(database, name="Ada") -> int:
     return 1
 
 
-def test_presence_schedules_table_exists_after_applying_ddl(tmp_path) -> None:
-    database = _open_db(tmp_path / "presence-schedules.db")
+def test_presence_patterns_table_exists_after_applying_ddl(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-patterns.db")
     try:
         _apply(database)
         row = _run(
             database.fetch_one(
                 "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'presence_patterns'"
+            )
+        )
+        assert row is not None and row[0] == "presence_patterns"
+        # Schema 9 replaced the one-per-child presence_schedules table;
+        # the current-schema DDL must not create it.
+        gone = _run(
+            database.fetch_one(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
                 "AND name = 'presence_schedules'"
             )
         )
-        assert row is not None and row[0] == "presence_schedules"
+        assert gone is None
     finally:
         _run(database.close())
 
@@ -1361,15 +1372,17 @@ def test_presence_overrides_table_exists_after_applying_ddl(tmp_path) -> None:
         _run(database.close())
 
 
-def test_presence_schedules_columns_types_and_constraints(tmp_path) -> None:
-    database = _open_db(tmp_path / "presence-schedules-columns.db")
+def test_presence_patterns_columns_types_and_constraints(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-patterns-columns.db")
     try:
         _apply(database)
-        columns = _run(database.fetch_all("PRAGMA table_info(presence_schedules)"))
+        columns = _run(database.fetch_all("PRAGMA table_info(presence_patterns)"))
         # cid, name, type, notnull, dflt_value, pk
         assert [(row[1], row[2], row[3], row[4], row[5]) for row in columns] == [
             ("id", "INTEGER", 0, None, 1),
             ("child_id", "INTEGER", 1, None, 0),
+            ("name", "TEXT", 1, None, 0),
+            ("kind", "TEXT", 1, None, 0),
             ("cycle_length_weeks", "INTEGER", 1, None, 0),
             ("anchor_date", "TEXT", 1, None, 0),
             ("pattern", "TEXT", 1, None, 0),
@@ -1395,11 +1408,11 @@ def test_presence_overrides_columns_types_and_constraints(tmp_path) -> None:
         _run(database.close())
 
 
-def test_presence_schedules_foreign_key_declared(tmp_path) -> None:
-    database = _open_db(tmp_path / "presence-schedules-fks.db")
+def test_presence_patterns_foreign_key_declared(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-patterns-fks.db")
     try:
         _apply(database)
-        fks = _run(database.fetch_all("PRAGMA foreign_key_list(presence_schedules)"))
+        fks = _run(database.fetch_all("PRAGMA foreign_key_list(presence_patterns)"))
         declared = {(row[2], row[3], row[4]) for row in fks}
         assert declared == {("children", "child_id", "id")}
     finally:
@@ -1417,48 +1430,119 @@ def test_presence_overrides_foreign_key_declared(tmp_path) -> None:
         _run(database.close())
 
 
-def test_presence_schedules_valid_insert_round_trips(tmp_path) -> None:
-    database = _open_db(tmp_path / "presence-schedules-valid.db")
+def test_presence_patterns_valid_insert_round_trips(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-patterns-valid.db")
     try:
         _apply(database)
         _child(database)
-        schedule_id = _insert_schedule(database, child_id=1)
+        pattern_id = _insert_pattern(database, child_id=1)
         row = _run(
             database.fetch_one(
-                "SELECT child_id, cycle_length_weeks, anchor_date, pattern "
-                "FROM presence_schedules WHERE id = ?",
-                (schedule_id,),
+                "SELECT child_id, name, kind, cycle_length_weeks, anchor_date, "
+                "pattern FROM presence_patterns WHERE id = ?",
+                (pattern_id,),
             )
         )
-        assert row == (1, 2, "2026-09-13", "0,2,4|1,3")
+        assert row == (1, "Home schedule", "home", 2, "2026-09-13", "0,2,4|1,3")
     finally:
         _run(database.close())
 
 
-def test_presence_schedules_second_schedule_for_same_child_fails(tmp_path) -> None:
-    database = _open_db(tmp_path / "presence-schedules-unique.db")
+def test_presence_patterns_allow_several_patterns_per_child(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-patterns-many.db")
     try:
         _apply(database)
         _child(database)
-        _insert_schedule(database, child_id=1)
-        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
-            _insert_schedule(database, child_id=1)
+        first = _insert_pattern(database, child_id=1)
+        second = _insert_pattern(
+            database, child_id=1, name="Weekend away", kind="away",
+            cycle_length_weeks=1, pattern="5,6",
+        )
+        third = _insert_pattern(database, child_id=1)  # identical row is fine
+        rows = _run(
+            database.fetch_all(
+                "SELECT id, name, kind FROM presence_patterns "
+                "WHERE child_id = 1 ORDER BY id"
+            )
+        )
+        assert rows == [
+            (first, "Home schedule", "home"),
+            (second, "Weekend away", "away"),
+            (third, "Home schedule", "home"),
+        ]
     finally:
         _run(database.close())
 
 
-def test_presence_schedules_unknown_child_fails(tmp_path) -> None:
-    database = _open_db(tmp_path / "presence-schedules-bad-child.db")
+def test_presence_patterns_declare_no_unique_index(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-patterns-no-unique.db")
+    try:
+        _apply(database)
+        indexes = _run(database.fetch_all("PRAGMA index_list(presence_patterns)"))
+        assert [row for row in indexes if row[2]] == []
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize("bad_kind", ["", "HOME", "Away", "present", "absent", 1])
+def test_presence_patterns_kind_check_enforced(tmp_path, bad_kind) -> None:
+    database = _open_db(tmp_path / "presence-patterns-kind.db")
+    try:
+        _apply(database)
+        _child(database)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            _insert_pattern(database, child_id=1, kind=bad_kind)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize("kind", ["home", "away"])
+def test_presence_patterns_both_kinds_accepted(tmp_path, kind) -> None:
+    database = _open_db(tmp_path / f"presence-patterns-kind-{kind}.db")
+    try:
+        _apply(database)
+        _child(database)
+        pattern_id = _insert_pattern(database, child_id=1, kind=kind)
+        row = _run(
+            database.fetch_one(
+                "SELECT kind FROM presence_patterns WHERE id = ?", (pattern_id,)
+            )
+        )
+        assert row == (kind,)
+    finally:
+        _run(database.close())
+
+
+@pytest.mark.parametrize("column", ["name", "kind"])
+def test_presence_patterns_name_and_kind_not_null(tmp_path, column) -> None:
+    database = _open_db(tmp_path / f"presence-patterns-null-{column}.db")
+    try:
+        _apply(database)
+        _child(database)
+        with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+            _insert_pattern(database, child_id=1, **{column: None})
+    finally:
+        _run(database.close())
+
+
+def test_presence_schedules_absent_from_current_schema_ddl() -> None:
+    assert not any(
+        "presence_schedules" in sql for sql in SCHEMA_V1_STATEMENTS
+    )
+
+
+def test_presence_patterns_unknown_child_fails(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-patterns-bad-child.db")
     try:
         _apply(database)
         with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
-            _insert_schedule(database, child_id=999)
+            _insert_pattern(database, child_id=999)
     finally:
         _run(database.close())
 
 
 @pytest.mark.parametrize("bad_cycle", [0, 5, "abc", 1.5])
-def test_presence_schedules_cycle_length_out_of_range_or_type_fails(
+def test_presence_patterns_cycle_length_out_of_range_or_type_fails(
     tmp_path, bad_cycle
 ) -> None:
     database = _open_db(tmp_path / f"cycle-{type(bad_cycle).__name__}.db")
@@ -1466,7 +1550,7 @@ def test_presence_schedules_cycle_length_out_of_range_or_type_fails(
         _apply(database)
         _child(database)
         with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
-            _insert_schedule(database, child_id=1, cycle_length_weeks=bad_cycle)
+            _insert_pattern(database, child_id=1, cycle_length_weeks=bad_cycle)
     finally:
         _run(database.close())
 
@@ -1487,18 +1571,18 @@ def test_presence_schedules_cycle_length_out_of_range_or_type_fails(
         (4, "0,1|0,1|0,1|0,1"),
     ],
 )
-def test_presence_schedules_valid_patterns_succeed(tmp_path, cycle, pattern) -> None:
-    database = _open_db(tmp_path / "presence-schedules-patterns-valid.db")
+def test_presence_patterns_valid_patterns_succeed(tmp_path, cycle, pattern) -> None:
+    database = _open_db(tmp_path / "presence-patterns-patterns-valid.db")
     try:
         _apply(database)
         _child(database)
-        schedule_id = _insert_schedule(
+        pattern_id = _insert_pattern(
             database, child_id=1, cycle_length_weeks=cycle, pattern=pattern
         )
         row = _run(
             database.fetch_one(
-                "SELECT pattern FROM presence_schedules WHERE id = ?",
-                (schedule_id,),
+                "SELECT pattern FROM presence_patterns WHERE id = ?",
+                (pattern_id,),
             )
         )
         assert row == (pattern,)
@@ -1529,32 +1613,32 @@ def test_presence_schedules_valid_patterns_succeed(tmp_path, cycle, pattern) -> 
         (1, "0,1,2,3,4,5,6,0"),  # more than 7 elements
     ],
 )
-def test_presence_schedules_invalid_patterns_fail(tmp_path, cycle, pattern) -> None:
-    database = _open_db(tmp_path / "presence-schedules-patterns-invalid.db")
+def test_presence_patterns_invalid_patterns_fail(tmp_path, cycle, pattern) -> None:
+    database = _open_db(tmp_path / "presence-patterns-patterns-invalid.db")
     try:
         _apply(database)
         _child(database)
         with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
-            _insert_schedule(
+            _insert_pattern(
                 database, child_id=1, cycle_length_weeks=cycle, pattern=pattern
             )
     finally:
         _run(database.close())
 
 
-def test_presence_schedules_cycle_length_bounds_pass(tmp_path) -> None:
-    database = _open_db(tmp_path / "presence-schedules-cycle-bounds.db")
+def test_presence_patterns_cycle_length_bounds_pass(tmp_path) -> None:
+    database = _open_db(tmp_path / "presence-patterns-cycle-bounds.db")
     try:
         _apply(database)
         _child(database)
-        _insert_schedule(database, child_id=1, cycle_length_weeks=1, pattern="0")
+        _insert_pattern(database, child_id=1, cycle_length_weeks=1, pattern="0")
         _run(
             database.execute(
                 "INSERT INTO children (display_name, created_at) VALUES (?, ?)",
                 ("Bo", "2026-09-13T00:00:00+00:00"),
             )
         )
-        _insert_schedule(database, child_id=2, cycle_length_weeks=4, pattern="|||")
+        _insert_pattern(database, child_id=2, cycle_length_weeks=4, pattern="|||")
     finally:
         _run(database.close())
 
@@ -1732,11 +1816,11 @@ def test_applying_presence_ddl_twice_keeps_rows(tmp_path) -> None:
     try:
         _apply(database)
         _child(database)
-        _insert_schedule(database, child_id=1)
+        _insert_pattern(database, child_id=1)
         _insert_override(database, child_id=1)
         _apply(database)
         counts = []
-        for table in ("presence_schedules", "presence_overrides"):
+        for table in ("presence_patterns", "presence_overrides"):
             row = _run(database.fetch_one(f"SELECT COUNT(*) FROM {table}"))
             counts.append(row[0])
         assert counts == [1, 1]

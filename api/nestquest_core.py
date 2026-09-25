@@ -159,12 +159,12 @@ core_quest_definitions = importlib.import_module(
 core_recurrence = importlib.import_module(f"{_CORE_MODULE_NAME}.recurrence")
 
 #: The presence model (``core.presence.PresenceEngine``,
-#: ``PresenceSchedule``, ``PresenceOverride``) the admin plane's
+#: ``PresencePattern``, ``PresenceOverride``) the admin plane's
 #: presence routes serialize and the tests resolve presence with.
 core_presence = importlib.import_module(f"{_CORE_MODULE_NAME}.presence")
 
 #: The presence-write business layer
-#: (``core.presence_management.set_presence_schedule`` et al.) the
+#: (``core.presence_management.create_presence_pattern`` et al.) the
 #: admin plane's presence routes call — the ONE implementation the HA
 #: services share.
 core_presence_management = importlib.import_module(
@@ -172,7 +172,7 @@ core_presence_management = importlib.import_module(
 )
 
 #: The typed presence DAOs (``core.dao_presence``) the admin-plane tests
-#: read stored schedules and overrides back through.
+#: read stored patterns and overrides back through.
 core_dao_presence = importlib.import_module(
     f"{_CORE_MODULE_NAME}.dao_presence"
 )

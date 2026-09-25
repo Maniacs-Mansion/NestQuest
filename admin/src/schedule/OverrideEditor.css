@@ -95,6 +95,15 @@
   grid-template-columns: repeat(2, 1fr);
 }
 
+.override-segments--7 {
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+.override-segments--7 .override-segment {
+  padding: 0;
+}
+
 .override-segment {
   min-height: var(--nq-a-tap-min);
   padding: 0 8px;
