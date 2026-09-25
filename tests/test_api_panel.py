@@ -149,13 +149,18 @@ async def _seed_household(
             (today + datetime.timedelta(days=3)).isoformat(),
             today=today,
         )
-        # The stale quest is created AFTER the today walk, so its only
-        # instance is the yesterday one written below.
+        # The stale quest's rule ends YESTERDAY, so create's own
+        # regeneration writes nothing and its only instance is the
+        # yesterday one written below.
         await _quest_definitions.create_quest_definition(
             database,
             "Stale chore",
             _recurrence.ScheduleRule.from_dict(
-                {"rule_type": "daily", "start_date": yesterday_iso}
+                {
+                    "rule_type": "daily",
+                    "start_date": yesterday_iso,
+                    "end_date": yesterday_iso,
+                }
             ),
             [ada.id],
             [("morning", "09:00")],
