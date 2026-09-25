@@ -1,5 +1,41 @@
 # NestQuest Release Notes
 
+## Version 0.8.0 — 2026-09-25
+
+### Scope
+
+Minor release carrying the multi-pattern presence model (schema 9), the
+Sunday-first calendar week, and the create-materializes fix, plus the
+definition start-date field, onto `main`.
+
+- **Multiple presence patterns per child (schema 9):** a child now has zero or
+  more presence patterns instead of at most one. Each pattern has a name, a kind
+  (`home` or `away`), its own cycle length (1–4 weeks), its own anchor date and a
+  per-week weekday set. Evaluation is first-match-wins — overrides, then away,
+  then home, then absent when the child has at least one home pattern, else
+  present. Migration 9 copies each existing schedule into a `home` pattern named
+  "Home schedule" and drops the old `presence_schedules` table. (PRs #231, #232.)
+- **Sunday-first calendar week:** the admin Schedule month grid and the
+  Definitions weekday picker now render weeks Sunday-first; the stored/API
+  weekday numbering is unchanged (Monday=0..Sunday=6). (PR #230.)
+- **Fix — newly created tasks materialize immediately:** creating a quest
+  definition now regenerates its future instances over the rolling horizon, so a
+  new task reaches the panel without waiting for an unrelated write. (PRs #235,
+  #236.)
+- **Definition start date:** the definition edit sheet gains a Start date field
+  so a task can be scheduled to begin on a future date. (PRs #237, #238.)
+- **Docs:** the multi-pattern decision (D-016), the migration-9 rollback step in
+  the runbook, and the ADMIN-SPEC Schedule section. (PRs #233, #234.)
+
+### Upgrade note
+
+This release runs schema version **9**. Version 0.7.1 refuses a version-9
+database, so take a copy of the SQLite file (or note the Litestream generation)
+before the first start on 0.8.0 if you need a rollback path.
+
+### Requirements
+
+
 ## Version 0.7.1 — 2026-09-24
 
 ### Scope
