@@ -37,7 +37,7 @@ One card, rows divided by `--nq-a-divider`, row padding 11px 13px:
 meta 11px/600 (`3 of 7 · 1 overdue`; all-done in `--nq-a-success`; away reads
 `Away · returns <Mon D>`) · 82×6px progress track with gradient fill. An away child's
 avatar is flat `#9898A8` and the row carries a lowercase `override` pill when the absence
-comes from a presence override rather than the pattern.
+comes from a presence override rather than a presence pattern.
 
 ### 2.4 Roomy variant (1h)
 Header becomes a hero: kicker 11px/700 uppercase, `8 of 12 done` 32px/800, 10px gradient
@@ -89,19 +89,54 @@ yet defined** — pick 24–40 household-relevant glyphs and ship them as a grid
 
 ## 4. Schedule (1f)
 
-- Header `Schedule` / `2-week cycle · anchor <weekday>, <Mon D>`.
+A child has **zero or more** presence patterns (schema 9). Each pattern has a name, a
+kind (`Home` or `Away`), its own cycle length (1–4 weeks), its own anchor date, and a
+weekday set per cycle week. The screen shows one child at a time.
+
+- Header `Schedule` / `<Child> · N patterns` (`<Child> · no patterns, home every day`
+  when the child has none).
+- **Child** chip row: one chip per child; the selected chip drives everything below.
 - **Month grid** card: month label 11px/700 uppercase + chevron pair; weekday initials
-  10px/700 `--nq-a-ink-tertiary`; day cells `aspect-ratio: 1`, radius 6px —
-  rotation-home days `--nq-a-selected` with `#201F7A` numerals, away days
-  `--nq-a-page` with `--nq-a-ink-secondary`, override days `--nq-a-warning-bg` with
-  `--nq-a-warning-ink` and a 1px warning border, today filled with the brand gradient in
-  white 800. Legend row beneath, 10.5px/600, one swatch per state.
-- **Presence pattern** card: one row per child, name 13px/700 + rule 12px/600
-  (`Weeks 1 & 3 of cycle`, `Every day`).
+  10px/700 `--nq-a-ink-tertiary`, **Sunday first** (`S M T W T F S`); day cells
+  `aspect-ratio: 1`, radius 6px — home days `--nq-a-selected` with `#201F7A` numerals,
+  away days `--nq-a-page` with `--nq-a-ink-secondary`, override days
+  `--nq-a-warning-bg` with `--nq-a-warning-ink` and a 1px warning border, today filled
+  with the brand gradient in white 800. Legend row beneath, 10.5px/600, one swatch per
+  state (`Home`, `Away`, `Override · away`, `Override · home`, `Today`), then the note
+  "Combined from every pattern: away beats home; overrides beat both."
+- The grid shows the child's **combined** presence, first match wins: an override
+  covering the date; else away if any Away pattern covers it; else home if any Home
+  pattern covers it; else away when the child has at least one Home pattern (a Home
+  pattern lists the days the child is here); else home (only Away patterns, or none).
+- **Presence patterns** card: `Add` text action; one row per pattern with
+  `calendar-check` (Home) / `calendar-x` (Away), title = pattern name 13px/700, meta
+  `Home · Every 2 weeks` 12px/600, and the weekday set (`Thu, Fri` for a 1-week cycle,
+  otherwise `Week 1: Sat, Sun · Week 2: No days`). Trailing `pencil` opens the pattern
+  editor (§4.1); trailing `trash-2` asks `Delete pattern?` inline before deleting. With
+  no patterns the card reads "No patterns for <Child> — home every day."
 - **Overrides** card: `Add` text action; rows with `calendar-x` / `calendar-check`,
   title `<Child> away · <Mon D – D>`, meta reason, trailing `trash-2`.
-- Cycle position is always computed from the anchor date. **Never** from ISO week numbers
-  or week parity (D-004).
+- Cycle position is always computed from each pattern's own anchor date. **Never** from
+  ISO week numbers or week parity (D-004).
+- Weekday numbering on the wire stays **Monday=0 .. Sunday=6**; Sunday-first is display
+  order only.
+
+### 4.1 Pattern editor
+
+Pushed screen with a back chevron; title `New pattern` / `Edit pattern`, sub "Repeating
+presence for <Child>". Form card fields:
+
+- **Name** text field (required, not blank).
+- **Covered days are** 2-up segmented (`Away` / `Home`), selected = `#18181D`.
+- **Cycle length** select (`1 week` … `4 weeks`) and **Anchor date** side by side.
+  Changing the cycle length keeps existing weeks and adds new weeks covering no day.
+- One **weekday picker** per cycle week, labelled `Week N · from <Mon D>` (the date is
+  anchor + (N−1) weeks): seven toggle cells in **Sunday-first** order
+  (`Su Mo Tu We Th Fr Sa`). A week may cover no day.
+
+Footer: `Cancel` (flex 1, white, bordered) + `Save pattern` (flex 2, gradient), as the
+override editor (§6). Save stays disabled until the name is set, the anchor is a valid
+date, and something changed.
 
 ## 5. History (1g)
 

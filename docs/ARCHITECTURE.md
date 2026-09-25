@@ -61,6 +61,44 @@ two-writer problem entirely.
 - **Backups:** continuous replication (e.g. Litestream) plus a proven restore.
   A configured-but-untested backup is not a backup.
 
+### Presence model (schema 9)
+
+A child has **zero or more** presence patterns, stored one row each in
+`presence_patterns` (`child_id` is not unique):
+
+| Column | Meaning |
+|---|---|
+| `name` | Label shown in the admin PWA, not blank |
+| `kind` | `home` or `away` — what the pattern claims on the days it covers |
+| `cycle_length_weeks` | 1–4; the pattern's own repeating cycle |
+| `anchor_date` | ISO date that starts week 1 of the pattern's cycle |
+| `pattern` | Pipe-separated weekday sets, one CSV segment per cycle week, weekdays **Monday=0 .. Sunday=6** (e.g. `0,2,4\|1,3`); an empty segment covers no day that week |
+
+Cycle position is anchor-date arithmetic per pattern — **never** ISO week
+numbers or week parity (D-004). A child's presence on a date is decided
+first match wins:
+
+1. A presence override covering the date — its flag is the answer.
+2. Any `away` pattern covers the date — **away**.
+3. Any `home` pattern covers the date — **present**.
+4. The child has at least one `home` pattern — **away** (a home pattern lists
+   the days the child is home; every other day is away).
+5. Otherwise (only `away` patterns, or no patterns) — **present**.
+
+The core presence engine, the snapshot's `present_today`, the materialiser's
+skip-on-away-days rule, and the admin PWA's month grid all apply this order.
+The admin plane manages patterns with
+`GET`/`POST /api/v1/admin/children/{child_id}/presence-patterns` and
+`PATCH`/`DELETE /api/v1/admin/presence-patterns/{pattern_id}`.
+
+**Migration 9** replaced the older one-schedule-per-child table: it creates
+`presence_patterns`, copies every old schedule row into a `home` pattern
+named `Home schedule` (cycle length, anchor date and weekday sets
+unchanged, row id kept), and drops the old table, all in one transaction.
+A lone `home` pattern answers exactly as the old schedule did, so no
+child's presence changes. The drop is one-way and 0.7.1 refuses a
+version-9 database; see the rollback step in `deploy/RUNBOOK.md` §11.
+
 ## 4. Authentication: two planes
 
 The kid panel and the admin PWA have opposite trust levels, so they use

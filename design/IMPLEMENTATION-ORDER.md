@@ -11,7 +11,9 @@ rather than aliasing.
 
 - `schema.py`: `task_definitions` → `quest_definitions`, `task_instances` →
   `quest_instances`. Keep `completion_events`, `children`, `admin_users`,
-  `schedule_rules`, `presence_schedules`, `presence_overrides`.
+  `schedule_rules`, `presence_patterns`, `presence_overrides`. (`presence_patterns` —
+  zero or more `home`/`away` patterns per child — replaced the retired one-per-child
+  schedule table in schema 9; migration 9 converts its rows into `home` patterns.)
 - `db.py` / `store.py`: rename DAO methods and any SQL literals.
 - `const.py`: no table names live there today; keep it that way.
 - `tests/test_schema.py`, `tests/test_store.py`, `tests/test_db.py`: update expectations.
@@ -43,8 +45,9 @@ Nullable int. Set for panel completions, null for admin ones. Still append-only.
 
 ## 2. Engines and materialisation
 Unchanged in intent: pure recurrence engine, pure presence engine with anchor-date
-arithmetic, daily materialiser over `horizon_days` at `day_rollover_time`. Only the
-instance fan-out changes (assignees × windows).
+arithmetic (per pattern, each with its own anchor; since schema 9 it combines a child's
+patterns and overrides first-match-wins), daily materialiser over `horizon_days` at
+`day_rollover_time`. Only the instance fan-out changes (assignees × windows).
 
 ## 3. Services, permissions, entities
 Implement the service table in `ENTITIES-AND-SERVICES.md` §2 behind the permission
