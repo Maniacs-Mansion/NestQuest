@@ -551,3 +551,72 @@ The file provider reloads the dynamic file on save.
 | 5 | Panel refused externally | section 9 check 4 | `403` |
 | 6 | Non-Traefik source refused | from a LAN machine other than `10.60.1.33`/`10.60.1.14`: `curl -s -o /dev/null -w '%{http_code}\n' http://10.60.1.14:8081/` | `403` (nginx `deny all`) |
 | 7 | Proxy source allowed | on `10.60.1.14`: `curl -s -o /dev/null -w '%{http_code}\n' http://10.60.1.14:8081/` | `200` |
+
+## 11. Upgrades and rollback
+
+The API applies pending schema migrations when it starts (FastAPI
+lifespan, before `/health` answers), so **the first start of a new
+version is the point of no return** for any migration it carries. A
+build refuses a database whose schema version is newer than it
+understands ("newer than this integration understands … downgrades are
+not supported") and does not start.
+
+### Migration 9 (multiple presence patterns)
+
+Migration 9 creates `presence_patterns`, copies every row of the old
+one-per-child `presence_schedules` table into it as a `home` pattern
+named `Home schedule`, and **drops `presence_schedules`**. Version 0.7.1
+refuses the resulting version-9 database, and could not read
+`presence_patterns` anyway, so the only way back to 0.7.1 is a copy of
+the database taken **before** the first start on the new version.
+
+**Before the first start on the new version**, with the old version
+still deployed:
+
+1. Stop writers (as section 8 step 1):
+
+       dc stop api litestream
+
+2. Copy the database file beside the live one with SQLite's online
+   backup (includes anything still in the WAL), then check it:
+
+       ts=$(date -u +%Y%m%dT%H%M%SZ)
+       dc run --rm --no-deps --entrypoint sqlite3 litestream \
+         /var/lib/nestquest/nestquest.db \
+         ".backup /var/lib/nestquest/pre-v9-$ts.db"
+       dc run --rm --no-deps --entrypoint sqlite3 litestream \
+         /var/lib/nestquest/pre-v9-$ts.db \
+         'PRAGMA integrity_check;' \
+         'SELECT version FROM nestquest_schema_version;' \
+         'SELECT count(*) FROM presence_schedules;'
+
+   Expect `ok`, schema version `8`, and the number of presence
+   schedules. Write down `$ts`.
+
+3. Also record the Litestream replica position and the UTC time, so a
+   point-in-time restore (section 8, `-timestamp`) can reach the
+   pre-upgrade state even if the local copy is lost:
+
+       dc up -d litestream
+       dc exec litestream litestream status      # note the txid
+       date -u +%Y-%m-%dT%H:%M:%SZ               # note the time
+       dc stop litestream
+
+   The replica only covers the 7-day retention window (section 7).
+
+4. Deploy the new version (sections 1–2) and run section 9. Confirm the
+   live database is at version `9` (the section 8 step 3 `sqlite3`
+   command against `nestquest.db`, with
+   `'SELECT version FROM nestquest_schema_version;'`) and that the
+   Schedule tab lists each child's old schedule as a `Home schedule`
+   pattern.
+
+**Rollback to 0.7.1:** check out and build 0.7.1 (section 1), then put
+the pre-upgrade database back with section 8: either steps 1 and 4–6
+with `pre-v9-<ts>.db` in place of `nestquest.db.restored`, or the full
+restore with `-timestamp` set to the time noted in step 3. Presence
+pattern changes made after the upgrade are not in that copy and are
+lost. Once the new version has proven itself, remove the copy:
+`dc run --rm --no-deps --entrypoint rm litestream -f /var/lib/nestquest/pre-v9-<ts>.db`.
+
+This rollback has not yet been rehearsed.

@@ -2,11 +2,11 @@
 
 Sits between the write callers (the Feature 09 HA service handlers and
 the API admin plane's presence routes) and the typed presence DAOs plus
-the pure presence model: callers get the model validation, the upsert /
-create / delete operations and the regeneration side effect here, and
+the pure presence model: callers get the model validation, the create /
+update / delete operations and the regeneration side effect here, and
 never touch the DAO or SQL directly.  This is the ONE implementation of
 these business rules — every caller constructs the same
-:class:`~.presence.PresenceSchedule` / :class:`~.presence.PresenceOverride`
+:class:`~.presence.PresencePattern` / :class:`~.presence.PresenceOverride`
 models (whose constructors are total, so no re-validation happens in a
 handler) and gets the same post-write
 :func:`~.materialize.regenerate_for_child`, so a child's future quest
@@ -15,16 +15,16 @@ write.  Like the model it is Home-Assistant-free: ``today`` is a plain
 calendar date threaded through to the regeneration, defaulting to the
 host clock there.
 
-Upsert policy (Feature 05, unchanged): a child has AT MOST ONE presence
-schedule — setting again REPLACES the existing row rather than
-duplicating it.  Overrides are deletable by design (children are not —
-the children layer owns that guardrail).  Deleting a nonexistent
-override raises ValueError prefixed ``override_id:`` so a caller can
-distinguish "unknown id" from a rejected argument the same way the
+Pattern policy (schema 9): a child has ZERO OR MORE presence patterns,
+each created, edited and deleted by its own id.  Patterns and overrides
+are deletable by design (children are not — the children layer owns
+that guardrail).  An unknown pattern or override id raises ValueError
+prefixed ``pattern_id:`` / ``override_id:`` so a caller can distinguish
+"unknown id" from a rejected argument the same way the
 quest-definitions layer prefixes ``definition_id:``.
 
 The admin plane's presence READS go through here too
-(:func:`get_presence_schedule`, :func:`list_presence_overrides`), so a
+(:func:`list_presence_patterns`, :func:`list_presence_overrides`), so a
 reader never touches the DAO directly either.
 """
 from __future__ import annotations
@@ -35,11 +35,13 @@ from .dao_children import ChildrenDao
 from .dao_presence import (
     PresenceOverrideRecord,
     PresenceOverridesDao,
-    PresenceSchedulesDao,
+    PresencePatternRecord,
+    PresencePatternsDao,
 )
+from .dao_rules import _UNSET
 from .db import NestQuestDatabase
 from .materialize import count_removed_by_override, regenerate_for_child
-from .presence import PresenceOverride, PresenceSchedule
+from .presence import PresenceOverride, PresencePattern
 
 
 def _validate_override_id(value: object) -> int:
@@ -49,49 +51,159 @@ def _validate_override_id(value: object) -> int:
     return value
 
 
-async def set_presence_schedule(
+def _validate_pattern_id(value: object) -> int:
+    """Reject non-int pattern ids (bools would silently address id 1)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"pattern_id must be an integer, got {value!r}")
+    return value
+
+
+async def _get_pattern_or_raise(
+    dao: PresencePatternsDao, pattern_id: object
+) -> PresencePatternRecord:
+    """Return the stored pattern; an unknown id raises ``pattern_id:``."""
+    record = await dao.get(_validate_pattern_id(pattern_id))
+    if record is None:
+        raise ValueError(
+            f"pattern_id: presence pattern {pattern_id} does not exist"
+        )
+    return record
+
+
+def decode_pattern_record(record: PresencePatternRecord) -> PresencePattern:
+    """Decode one stored pattern row back through the model."""
+    return PresencePattern.decode(
+        record.child_id,
+        record.name,
+        record.kind,
+        record.anchor_date,
+        record.pattern,
+    )
+
+
+async def create_presence_pattern(
     database: NestQuestDatabase,
     child_id: int,
+    name: str,
+    kind: str,
     cycle_length_weeks: int,
     anchor_date: object,
     pattern: dict[int, object],
     *,
     today: datetime.date | None = None,
     horizon_days: int | None = None,
-) -> PresenceSchedule:
-    """Set (upsert) a child's repeating presence schedule.
+) -> PresencePatternRecord:
+    """Add one repeating presence pattern to a child.
 
-    The :class:`~.presence.PresenceSchedule` model validates at
-    construction — cycle length 1..4, a strict calendar anchor date,
-    and a pattern covering week indices 0..n-1 with weekday sets — so
-    no invalid schedule reaches the DAO.  The encoded pattern is
-    UPSERTed by child (a second set REPLACES the child's existing
-    schedule; the schema's UNIQUE(child_id) makes duplication
-    unrepresentable), then :func:`~.materialize.regenerate_for_child`
+    The :class:`~.presence.PresencePattern` model validates at
+    construction — a non-blank name, ``kind`` ``home``/``away``, cycle
+    length 1..4, a strict calendar anchor date, and a pattern covering
+    week indices 0..n-1 with weekday sets — so no invalid pattern
+    reaches the DAO.  The encoded pattern is inserted beside the
+    child's other patterns, then :func:`~.materialize.regenerate_for_child`
     re-materializes the child's future instances against the new
     presence.  ``today``/``horizon_days`` thread through to that
     regeneration; raising ValueError names what to fix (an unknown
     child reads ``child N does not exist``).
 
-    Returns the STORED schedule decoded back through the model — the
-    round-trip proves the encoded pattern the database now holds is
-    exactly the one the caller asked for.
+    Returns the STORED record WITH its ``id`` — the handle
+    :func:`update_presence_pattern` and :func:`delete_presence_pattern`
+    take.
     """
-    schedule = PresenceSchedule(
-        child_id, cycle_length_weeks, anchor_date, pattern
+    model = PresencePattern(
+        child_id, name, kind, cycle_length_weeks, anchor_date, pattern
     )
-    record = await PresenceSchedulesDao(database).upsert_by_child(
-        schedule.child_id,
-        schedule.cycle_length_weeks,
-        schedule.anchor_date.isoformat(),
-        schedule.encode(),
+    record = await PresencePatternsDao(database).create(
+        model.child_id,
+        model.name,
+        model.kind,
+        model.cycle_length_weeks,
+        model.anchor_date.isoformat(),
+        model.encode(),
     )
     await regenerate_for_child(
-        database, schedule.child_id, today=today, horizon_days=horizon_days
+        database, model.child_id, today=today, horizon_days=horizon_days
     )
-    return PresenceSchedule.decode(
-        record.child_id, record.anchor_date, record.pattern
+    return record
+
+
+async def update_presence_pattern(
+    database: NestQuestDatabase,
+    pattern_id: int,
+    *,
+    name: str | object = _UNSET,
+    kind: str | object = _UNSET,
+    cycle_length_weeks: int | object = _UNSET,
+    anchor_date: object = _UNSET,
+    pattern: dict[int, object] | object = _UNSET,
+    today: datetime.date | None = None,
+    horizon_days: int | None = None,
+) -> PresencePatternRecord:
+    """Edit one presence pattern; only supplied fields change.
+
+    The pattern is looked up FIRST (an unknown id raises ValueError
+    prefixed ``pattern_id:``), the supplied fields are laid over the
+    stored ones and the WHOLE result is rebuilt through the
+    :class:`~.presence.PresencePattern` model — so a partial edit is
+    validated exactly as a create is (changing ``cycle_length_weeks``
+    without a matching ``pattern`` is rejected), and an explicit None
+    is rejected rather than ignored.  The pattern stays with its child;
+    the child's future instances are regenerated afterwards.
+    """
+    dao = PresencePatternsDao(database)
+    stored = decode_pattern_record(await _get_pattern_or_raise(dao, pattern_id))
+    model = PresencePattern(
+        stored.child_id,
+        stored.name if name is _UNSET else name,
+        stored.kind if kind is _UNSET else kind,
+        (
+            stored.cycle_length_weeks
+            if cycle_length_weeks is _UNSET
+            else cycle_length_weeks
+        ),
+        stored.anchor_date if anchor_date is _UNSET else anchor_date,
+        dict(stored.pattern) if pattern is _UNSET else pattern,
     )
+    record = await dao.update(
+        pattern_id,
+        model.name,
+        model.kind,
+        model.cycle_length_weeks,
+        model.anchor_date.isoformat(),
+        model.encode(),
+    )
+    if record is None:
+        raise ValueError(
+            f"pattern_id: presence pattern {pattern_id} does not exist"
+        )
+    await regenerate_for_child(
+        database, model.child_id, today=today, horizon_days=horizon_days
+    )
+    return record
+
+
+async def delete_presence_pattern(
+    database: NestQuestDatabase,
+    pattern_id: int,
+    *,
+    today: datetime.date | None = None,
+    horizon_days: int | None = None,
+) -> PresencePatternRecord:
+    """Delete one presence pattern by id and return it as it was stored.
+
+    The pattern is looked up FIRST and an unknown id raises ValueError
+    prefixed ``pattern_id:`` BEFORE any delete, so a mistyped id can
+    never be silently swallowed by a no-op.  The deletion is followed
+    by :func:`~.materialize.regenerate_for_child` for the pattern's own
+    child — the id decides the child, never a caller-supplied one.
+    """
+    dao = PresencePatternsDao(database)
+    record = await _get_pattern_or_raise(dao, pattern_id)
+    await dao.delete(record.id)
+    await regenerate_for_child(
+        database, record.child_id, today=today, horizon_days=horizon_days
+    )
+    return record
 
 
 async def create_presence_override(
@@ -171,21 +283,16 @@ async def preview_presence_override_consequence(
     )
 
 
-async def get_presence_schedule(
+async def list_presence_patterns(
     database: NestQuestDatabase, child_id: int
-) -> PresenceSchedule | None:
-    """Return the child's presence schedule decoded, or None when unset.
+) -> list[PresencePatternRecord]:
+    """Return the child's presence patterns ordered by id.
 
-    None means the child exists and has no schedule row — present
+    An empty list means the child exists and has no pattern — present
     every day (Feature 05).  An unknown child raises ValueError
     (``child N does not exist``) rather than reading as present.
     """
-    record = await PresenceSchedulesDao(database).get_by_child(child_id)
-    if record is None:
-        return None
-    return PresenceSchedule.decode(
-        record.child_id, record.anchor_date, record.pattern
-    )
+    return await PresencePatternsDao(database).list_by_child(child_id)
 
 
 async def list_presence_overrides(

@@ -151,12 +151,17 @@ async def _seed_missed_household(
             database, yesterday_iso, yesterday_iso, today=yesterday
         )
         # Today's quest: created after the yesterday walk so it has no
-        # past-due instance, then materialized for today only.
+        # past-due instance; ``end_date`` keeps it (and create's horizon
+        # regeneration) to today only.
         await _quest_definitions.create_quest_definition(
             database,
             "Recoverable chore",
             _recurrence.ScheduleRule.from_dict(
-                {"rule_type": "daily", "start_date": today_iso}
+                {
+                    "rule_type": "daily",
+                    "start_date": today_iso,
+                    "end_date": today_iso,
+                }
             ),
             [ada.id],
             [("afternoon", "17:00")],

@@ -1319,16 +1319,16 @@ async def load_materialization_input(
 ):
     """Read every materialization input in ONE locked transaction.
 
-    Returns ``(snapshots, schedules, overrides)``:
+    Returns ``(snapshots, patterns, overrides)``:
 
     - ``snapshots``: every active definition with its rule, assignees and
       windows (the :class:`QuestDefinitionSnapshot` shape).
-    - ``schedules`` / ``overrides``: the presence schedules and
+    - ``patterns`` / ``overrides``: the presence patterns and
       range-scoped overrides of every assignee child, in
       :mod:`.dao_presence`'s record shapes.
 
     The whole read — definitions, rules, assignees, windows, and the
-    assignees' presence schedules and overrides — runs inside a single
+    assignees' presence patterns and overrides — runs inside a single
     BEGIN..COMMIT span under the connection lock, so a concurrent edit
     (definition, assignment, window, or presence) cannot interleave
     between the parts and the walk never sees a mixed-time view.  Each
@@ -1349,7 +1349,7 @@ async def load_materialization_input(
             )
             from . import dao_presence  # lazy: dao_presence imports us
 
-            schedules, overrides = await dao_presence.read_snapshot_unlocked(
+            patterns, overrides = await dao_presence.read_snapshot_unlocked(
                 database, child_ids, range_start, range_end
             )
-    return snapshots, schedules, overrides
+    return snapshots, patterns, overrides

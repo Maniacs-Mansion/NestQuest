@@ -102,15 +102,20 @@ async def _seed_missed_household(
             database, "Old chore", rule, [ada.id], [("evening", "18:30")]
         )
         await materialize(database, yesterday_iso, yesterday_iso, today=yesterday)
-        # A quest due TODAY (created after the yesterday walk so it has
-        # no past-due instance): the post-downtime catch-up run's
+        # A quest due TODAY only (created after the yesterday walk so it
+        # has no past-due instance; ``end_date`` keeps create's horizon
+        # regeneration to today): the post-downtime catch-up run's
         # target — inside [watermark=today, later_today) but not
         # inside the day-one sweep's window.
         await create_quest_definition(
             database,
             "Recoverable chore",
             ScheduleRule.from_dict(
-                {"rule_type": "daily", "start_date": today_iso}
+                {
+                    "rule_type": "daily",
+                    "start_date": today_iso,
+                    "end_date": today_iso,
+                }
             ),
             [ada.id],
             [("afternoon", "17:00")],

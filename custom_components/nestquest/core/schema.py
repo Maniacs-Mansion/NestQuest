@@ -43,18 +43,19 @@ rule or a monthly rule could later be pinned to a month) nor extra
 fields on weekly/monthly/yearly rules generally, so the CHECKs only
 reject what the rule engine definitively cannot express now.
 
-Presence pattern format: ``presence_schedules.pattern`` encodes the
+Presence pattern format: ``presence_patterns.pattern`` encodes the
 whole N-week repeating cycle in one TEXT column as pipe-separated
 segments, one per week of the cycle: segment ``i`` is a ``weekday_set``
 CSV (same single-digit 0-6 convention as ``schedule_rules.weekday_set``)
 for week ``i``, e.g. ``'0,2,4|1,3'`` = Mon/Wed/Fri in week 0, Tue/Thu in
-week 1.  An empty segment means the child is absent every day of that
-week; a wholly empty pattern with ``cycle_length_weeks = 1`` means
-absent every day of every week, which is distinct from having no
-schedule row at all (a child with no schedule is present every day, per
-the feature guardrails).  Chosen over JSON or per-week rows to stay
-consistent with the CSV ``weekday_set`` convention and fully checkable
-by plain CHECKs.  DB-level validation is pure CHECK, no triggers or
+week 1.  An empty segment means the pattern covers no day of that week.
+A child carries zero or more patterns, each ``kind`` ``home`` or
+``away``; a child with no pattern row at all is present every day, per
+the feature guardrails (how patterns combine is the presence engine's
+job).  The encoding and its CHECKs are carried over verbatim from the
+retired ``presence_schedules`` table (schema 9).  Chosen over JSON or
+per-week rows to stay consistent with the CSV ``weekday_set``
+convention and fully checkable by plain CHECKs.  DB-level validation is pure CHECK, no triggers or
 custom functions: char-class GLOBs reject every character outside
 digits 0-6, comma and pipe; adjacency GLOBs reject empty elements
 (double comma, comma next to a pipe, leading/trailing comma) and
@@ -68,7 +69,8 @@ weekday_set this is not full CSV-set normalisation (duplicates like
 the engine treats the segment as a set.  A
 one-row-per-``week_index`` normalization was considered and rejected:
 the flat single-column encoding keeps the done-condition's table shape
-and proved fully checkable with plain CHECKs.
+and proved fully checkable with plain CHECKs.  ``name`` is a short
+label and carries no CHECK; the model rejects a blank one.
 
 ``cycle_length_weeks`` is capped at 4: 2 (alternating weeks) is the
 common case, and a small cap keeps anchor arithmetic and the encoded
@@ -288,11 +290,19 @@ SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL: list[str] = [
     """,
 ]
 
-SCHEMA_V1_PRESENCE_SCHEDULES_DDL: list[str] = [
-    f"""
-    CREATE TABLE IF NOT EXISTS presence_schedules (
+#: ``presence_patterns`` (schema version 9): zero or more repeating
+#: presence rules per child, replacing the retired one-per-child
+#: ``presence_schedules`` table.  ``child_id`` is deliberately NOT
+#: unique; ``kind`` is what a covering pattern claims (``home`` or
+#: ``away``); ``pattern`` keeps the retired table's encoding and CHECKs
+#: verbatim.
+SCHEMA_V9_PRESENCE_PATTERNS_DDL: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS presence_patterns (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        child_id INTEGER NOT NULL UNIQUE REFERENCES children(id),
+        child_id INTEGER NOT NULL REFERENCES children(id),
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('home', 'away')),
         cycle_length_weeks INTEGER NOT NULL CHECK (typeof(cycle_length_weeks) = 'integer' AND cycle_length_weeks >= 1 AND cycle_length_weeks <= 4),
         anchor_date TEXT NOT NULL,
         pattern TEXT NOT NULL CHECK (
@@ -407,7 +417,7 @@ SCHEMA_V1_STATEMENTS: list[str] = [
     *SCHEMA_V1_QUEST_DEFINITIONS_DDL,
     *SCHEMA_V1_QUEST_DEFINITION_ASSIGNEES_DDL,
     *SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL,
-    *SCHEMA_V1_PRESENCE_SCHEDULES_DDL,
+    *SCHEMA_V9_PRESENCE_PATTERNS_DDL,
     *SCHEMA_V1_PRESENCE_OVERRIDES_DDL,
     *SCHEMA_V1_QUEST_INSTANCES_DDL,
     *SCHEMA_V1_COMPLETION_EVENTS_DDL,

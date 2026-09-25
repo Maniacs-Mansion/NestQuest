@@ -12,7 +12,7 @@ from custom_components.nestquest.core.dao_instances import (
     CompletionEventsDao,
     QuestInstancesDao,
 )
-from custom_components.nestquest.core.dao_presence import PresenceSchedulesDao
+from custom_components.nestquest.core.dao_presence import PresencePatternsDao
 from custom_components.nestquest.core.dao_rules import (
     QuestDefinitionsDao,
     schedule_rule_to_storage,
@@ -27,6 +27,10 @@ from custom_components.nestquest.core.migrations import apply_migrations
 from custom_components.nestquest.core.quest_definitions import (
     create_quest_definition,
     edit_quest_definition,
+)
+from custom_components.nestquest.core.presence_management import (
+    create_presence_pattern,
+    delete_presence_pattern,
 )
 from custom_components.nestquest.core.recurrence import (
     RuleType,
@@ -83,7 +87,7 @@ def _build_expected(start, def1_id, def2_id, a_id, b_id, c_id) -> set:
     due_time) tuples over the four-week window.
 
     Custody: A is present week 0 and 2 of the two-week cycle, absent
-    1 and 3; B is the mirror; C has no schedule (present every day).
+    1 and 3; B is the mirror; C has no pattern (present every day).
     """
     expected: set = set()
     start_dt = datetime.date.fromisoformat(start)
@@ -128,21 +132,21 @@ async def _collect_instances(database, child_ids, start, end) -> set:
 def test_materialize_two_custody_one_always_present(tmp_path) -> None:
     async def _body(database):
         children = ChildrenDao(database)
-        schedules = PresenceSchedulesDao(database)
+        patterns = PresencePatternsDao(database)
 
         a = await children.create("Ada", NOW)      # present weeks 0, 2
         b = await children.create("Bo", NOW)       # present weeks 1, 3
-        c = await children.create("Cleo", NOW)     # no schedule: always present
+        c = await children.create("Cleo", NOW)     # no pattern: always present
 
         start = _future_monday()
         start_iso = start.isoformat()
         end_iso = (start + datetime.timedelta(days=27)).isoformat()
 
-        await schedules.upsert_by_child(
-            a.id, 2, start_iso, "0,1,2,3,4,5,6|"
+        await patterns.create(
+            a.id, "Home schedule", "home", 2, start_iso, "0,1,2,3,4,5,6|"
         )
-        await schedules.upsert_by_child(
-            b.id, 2, start_iso, "|0,1,2,3,4,5,6"
+        await patterns.create(
+            b.id, "Home schedule", "home", 2, start_iso, "|0,1,2,3,4,5,6"
         )
 
         def1 = await create_quest_definition(
@@ -179,6 +183,136 @@ def test_materialize_two_custody_one_always_present(tmp_path) -> None:
         return count
 
     _with_db(tmp_path, "materialize.db")(_body)
+
+
+async def _due_dates(database, child_id, start_iso, end_iso) -> set[str]:
+    records = await QuestInstancesDao(database).list_by_date_range(
+        child_id, start_iso, end_iso
+    )
+    return {record.due_date for record in records}
+
+
+def test_materialize_home_and_away_patterns_combine(tmp_path) -> None:
+    """Several patterns per child combine: a covering ``away`` beats a
+    covering ``home``.  An every-day home pattern plus an away Thu+Fri
+    pattern leaves the child absent exactly on Thursday and Friday, so a
+    skip_on_away definition skips those days while a non-skipping one
+    still generates them."""
+    async def _body(database):
+        child = await ChildrenDao(database).create("Ada", NOW)
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=6)).isoformat()
+        patterns = PresencePatternsDao(database)
+        await patterns.create(
+            child.id, "Home schedule", "home", 1, start_iso, "0,1,2,3,4,5,6"
+        )
+        await patterns.create(
+            child.id, "Thu-Fri away", "away", 1, start_iso, "3,4"
+        )
+        skipping = await create_quest_definition(
+            database,
+            "Skipping chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            ["morning"],
+            skip_on_away=True,
+        )
+        keeping = await create_quest_definition(
+            database,
+            "Keeping chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            ["evening"],
+            skip_on_away=False,
+        )
+
+        count = await materialize(database, start_iso, end_iso)
+        assert count == 5 + 7
+
+        records = await QuestInstancesDao(database).list_by_date_range(
+            child.id, start_iso, end_iso
+        )
+        by_definition: dict[int, set[str]] = {}
+        for record in records:
+            by_definition.setdefault(record.definition_id, set()).add(
+                record.due_date
+            )
+        thursday_friday = {
+            (start + datetime.timedelta(days=offset)).isoformat()
+            for offset in (3, 4)
+        }
+        all_week = {
+            (start + datetime.timedelta(days=offset)).isoformat()
+            for offset in range(7)
+        }
+        assert by_definition[skipping.definition.id] == (
+            all_week - thursday_friday
+        )
+        assert by_definition[keeping.definition.id] == all_week
+
+    _with_db(tmp_path, "materialize-multi-pattern.db")(_body)
+
+
+def test_presence_pattern_create_and_delete_regenerate_instances(
+    tmp_path,
+) -> None:
+    """Creating and deleting patterns re-materializes the child's future.
+
+    Home Mon..Wed plus away Tuesday leaves Monday and Wednesday; deleting
+    the away pattern restores Tuesday; deleting the last (home) pattern
+    makes the child present every day again.
+    """
+    async def _body(database):
+        child = await ChildrenDao(database).create("Ada", NOW)
+        start = _future_monday()
+        start_iso = start.isoformat()
+        end_iso = (start + datetime.timedelta(days=6)).isoformat()
+        await create_quest_definition(
+            database,
+            "Daily chore",
+            ScheduleRule(rule_type=RuleType.DAILY, start_date=start_iso),
+            [child.id],
+            ["morning"],
+        )
+        window = {"today": start, "horizon_days": 6}
+
+        def days(*offsets: int) -> set[str]:
+            return {
+                (start + datetime.timedelta(days=offset)).isoformat()
+                for offset in offsets
+            }
+
+        home = await create_presence_pattern(
+            database, child.id, "Home schedule", "home", 1, start_iso,
+            {0: {0, 1, 2}}, **window,
+        )
+        assert await _due_dates(database, child.id, start_iso, end_iso) == (
+            days(0, 1, 2)
+        )
+        away = await create_presence_pattern(
+            database, child.id, "Tuesday away", "away", 1, start_iso,
+            {0: {1}}, **window,
+        )
+        assert await _due_dates(database, child.id, start_iso, end_iso) == (
+            days(0, 2)
+        )
+
+        deleted = await delete_presence_pattern(database, away.id, **window)
+        assert deleted == away
+        assert await _due_dates(database, child.id, start_iso, end_iso) == (
+            days(0, 1, 2)
+        )
+
+        await delete_presence_pattern(database, home.id, **window)
+        assert await PresencePatternsDao(database).list_by_child(
+            child.id
+        ) == []
+        assert await _due_dates(database, child.id, start_iso, end_iso) == (
+            days(*range(7))
+        )
+
+    _with_db(tmp_path, "materialize-pattern-delete.db")(_body)
 
 
 def test_materialize_shares_one_generated_at_per_run(tmp_path) -> None:
@@ -334,7 +468,11 @@ async def _materialize_with_change(
     proceeds with the snapped presence).  This deterministically
     exercises the snapshot-to-insert gap that a config edit can
     interleave into.
+
+    ``create_quest_definition`` already materializes its horizon, so the
+    table is cleared first: the gated walk must be the only writer.
     """
+    await database.execute("DELETE FROM quest_instances")
     original_upsert = QuestInstancesDao.upsert_if_valid
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -638,7 +776,7 @@ def test_materialize_honours_overrides(tmp_path) -> None:
         start = _future_monday()
         start_iso = start.isoformat()
         end_iso = (start + datetime.timedelta(days=6)).isoformat()
-        # No schedule means the child is present every day; a blocking
+        # No presence pattern means the child is present every day; a blocking
         # override covering the whole week must still suppress every day.
         await overrides.create(
             child.id, start_iso, end_iso, False, note="away all week"
@@ -1623,27 +1761,38 @@ def test_materialize_end_to_end_six_rule_types(tmp_path, monkeypatch) -> None:
         from custom_components.nestquest.core.dao_presence import (
             PresenceOverridesDao,
         )
-        from custom_components.nestquest.core.presence import PresenceSchedule
+        from custom_components.nestquest.core.presence import PresencePattern
 
         children = ChildrenDao(database)
-        schedules = PresenceSchedulesDao(database)
+        patterns = PresencePatternsDao(database)
         overrides = PresenceOverridesDao(database)
 
         a = await children.create("Ada", NOW)      # present weeks 0, 2
         b = await children.create("Bo", NOW)       # present weeks 1, 3
-        c = await children.create("Cleo", NOW)     # no schedule: always present
+        c = await children.create("Cleo", NOW)     # no pattern: always present
 
         anchor = datetime.date.fromisoformat(_E2E_ANCHOR)
         start_iso = anchor.isoformat()
         end_iso = (anchor + datetime.timedelta(days=27)).isoformat()
 
         # Two-week custody with OPPOSITE weeks, encoded through the
-        # PresenceSchedule model on the fixed Monday anchor.
+        # PresencePattern model (one ``home`` pattern each) on the fixed
+        # Monday anchor.
         all_week = frozenset(range(7))
-        a_schedule = PresenceSchedule(a.id, 2, anchor, {0: all_week, 1: frozenset()})
-        b_schedule = PresenceSchedule(b.id, 2, anchor, {0: frozenset(), 1: all_week})
-        await schedules.upsert_by_child(a.id, 2, start_iso, a_schedule.encode())
-        await schedules.upsert_by_child(b.id, 2, start_iso, b_schedule.encode())
+        a_home = PresencePattern(
+            a.id, "Home schedule", "home", 2, anchor,
+            {0: all_week, 1: frozenset()},
+        )
+        b_home = PresencePattern(
+            b.id, "Home schedule", "home", 2, anchor,
+            {0: frozenset(), 1: all_week},
+        )
+        await patterns.create(
+            a.id, a_home.name, a_home.kind, 2, start_iso, a_home.encode()
+        )
+        await patterns.create(
+            b.id, b_home.name, b_home.kind, 2, start_iso, b_home.encode()
+        )
 
         def_ids = {}
         def_ids["daily"] = (await create_quest_definition(

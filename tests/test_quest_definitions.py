@@ -168,6 +168,42 @@ def test_create_several_children_several_windows_with_due_times(
     _with_db(tmp_path, "create-many.db")(_body)
 
 
+def test_create_materializes_future_instances(tmp_path) -> None:
+    """A fresh create regenerates its rolling horizon immediately.
+
+    Without this the new definition has no ``quest_instances`` rows until
+    some unrelated write regenerates it, so it never reaches the board.
+    """
+    assert DEFAULT_HORIZON_DAYS >= 7
+
+    async def _body(database, children, rules, definitions, child):
+        today = _today_iso()
+        created = await create_quest_definition(
+            database,
+            "Take out bins",
+            ScheduleRule(
+                rule_type=RuleType.WEEKLY,
+                weekday_set={0},
+                start_date=today,
+            ),
+            [child.id],
+            ["morning"],
+        )
+        rows = await database.fetch_all(
+            "SELECT child_id, due_date FROM quest_instances "
+            "WHERE definition_id = ?",
+            (created.definition.id,),
+        )
+        assert rows, "create materialized no instances"
+        assert {row[0] for row in rows} == {child.id}
+        for _child_id, due_date in rows:
+            assert due_date >= today
+            assert datetime.date.fromisoformat(due_date).weekday() == 0
+        return None
+
+    _with_db(tmp_path, "create-materializes.db")(_body)
+
+
 # ---------------------------------------------------------------------------
 # create_quest_definition: argument rejections
 # ---------------------------------------------------------------------------

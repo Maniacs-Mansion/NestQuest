@@ -9,7 +9,7 @@ task and lives elsewhere.
 The walk is deterministic and idempotent:
 
 - All inputs — the active definitions with their rules, assignees and
-  windows, AND the assignee children's presence schedules and scoped
+  windows, AND the assignee children's presence patterns and scoped
   overrides — are read inside ONE locked transaction (see
   :func:`~.dao_rules.load_materialization_input`), so the walk sees a
   single coherent snapshot rather than a definition state from one
@@ -51,12 +51,12 @@ never the past — and re-run the walk over the rolling horizon
 HOOK (Feature 09 presence services): the presence business layer that
 lands in Feature 09 MUST call :func:`regenerate_for_child` after EVERY
 presence-state write so a child's future instances track its presence:
-``set_presence_pattern`` (including clearing/setting an empty pattern),
-deleting/clearing the presence schedule
-(:meth:`~.dao_presence.PresenceSchedulesDao.delete`),
+creating, updating and deleting a presence pattern
+(:mod:`.presence_management`'s ``create_presence_pattern`` /
+``update_presence_pattern`` / ``delete_presence_pattern``),
 ``create_presence_override``, and ``delete_presence_override``.  A
-schedule delete changes presence state too (the child becomes
-always-present), so it must regenerate just like the others.  This hook
+pattern delete changes presence state too, so it must regenerate just
+like the others.  This hook
 is documented, not yet wired: no presence business layer exists yet, and
 the presence DAO (``dao_presence.py``) must stay free of business rules
 — never call :func:`regenerate_for_child` from inside the DAO layer.
@@ -79,7 +79,7 @@ from .dao_rules import (
     schedule_rule_storage_from_record,
 )
 from .db import NestQuestDatabase
-from .presence import PresenceEngine, PresenceOverride, PresenceSchedule
+from .presence import PresenceEngine, PresenceOverride, PresencePattern
 from .recurrence import ScheduleRule, occurs_on
 
 
@@ -129,7 +129,7 @@ def _decode_rule(snapshot) -> ScheduleRule:
 
 
 def _build_engine(
-    schedules_records,
+    patterns_records,
     overrides_records,
     *,
     extra_overrides: tuple[PresenceOverride, ...] = (),
@@ -140,11 +140,18 @@ def _build_engine(
     overrides on top of the stored ones — the consequence preview's
     proposed override (:func:`count_removed_by_override`).
     """
-    schedules: dict[int, PresenceSchedule] = {}
-    for child_id, record in schedules_records.items():
-        schedules[child_id] = PresenceSchedule.decode(
-            child_id, record.anchor_date, record.pattern
-        )
+    patterns: dict[int, list[PresencePattern]] = {}
+    for child_id, records in patterns_records.items():
+        patterns[child_id] = [
+            PresencePattern.decode(
+                record.child_id,
+                record.name,
+                record.kind,
+                record.anchor_date,
+                record.pattern,
+            )
+            for record in records
+        ]
     overrides: dict[int, list[PresenceOverride]] = {}
     for child_id, records in overrides_records.items():
         overrides[child_id] = [
@@ -159,7 +166,7 @@ def _build_engine(
         ]
     for override in extra_overrides:
         overrides.setdefault(override.child_id, []).append(override)
-    return PresenceEngine(schedules, overrides)
+    return PresenceEngine(patterns, overrides)
 
 
 class GeneratedTuple(NamedTuple):
@@ -279,10 +286,10 @@ async def materialize(
             f"{end_date!r} < {start_date!r}"
         )
 
-    snapshots, schedules_records, overrides_records = await (
+    snapshots, patterns_records, overrides_records = await (
         load_materialization_input(database, start_date, end_date)
     )
-    engine = _build_engine(schedules_records, overrides_records)
+    engine = _build_engine(patterns_records, overrides_records)
     child_filter = None if child_ids is None else set(child_ids)
 
     generated_at = _now_stamp()
@@ -366,12 +373,11 @@ async def regenerate_for_definition(
 # child-presence counterpart to ``regenerate_for_definition``.  The
 # presence business layer that lands in Feature 09 MUST call
 # ``regenerate_for_child`` after EVERY presence-state write, so future
-# instances track a child's changed presence: set_presence_pattern
-# (including clearing/setting an empty pattern), deleting/clearing the
-# presence schedule (PresenceSchedulesDao.delete),
-# create_presence_override, and delete_presence_override.  A schedule
-# delete changes presence state too (the child becomes always-present),
-# so it must regenerate just like the others.  It is deliberately NOT
+# instances track a child's changed presence: create_presence_pattern,
+# update_presence_pattern, delete_presence_pattern,
+# create_presence_override, and delete_presence_override.  A pattern
+# delete changes presence state too, so it must regenerate just like
+# the others.  It is deliberately NOT
 # wired into ``dao_presence.py``: the DAO layer stays pure storage (no
 # business rules), and no presence business layer exists yet to host the
 # call — see the module docstring note above.
@@ -385,9 +391,8 @@ async def regenerate_for_child(
     """Regenerate a child's future instances after a presence change.
 
     The Feature 09 presence services call this after every
-    presence-state write — set_presence_pattern (including clearing or
-    setting an empty pattern), deleting/clearing the presence schedule
-    (:meth:`~.dao_presence.PresenceSchedulesDao.delete`),
+    presence-state write — create_presence_pattern,
+    update_presence_pattern, delete_presence_pattern,
     create_presence_override, and delete_presence_override — so a
     child's future instances track its new presence: the child's open
     instances at or after today are deleted across ALL its definitions
@@ -481,12 +486,12 @@ async def count_removed_by_override(
     start_date, end_date = start.isoformat(), end.isoformat()
     child_id = override.child_id
 
-    snapshots, schedules_records, overrides_records = await (
+    snapshots, patterns_records, overrides_records = await (
         load_materialization_input(database, start_date, end_date)
     )
     current = _generation_preview(
         snapshots,
-        _build_engine(schedules_records, overrides_records),
+        _build_engine(patterns_records, overrides_records),
         start,
         end,
         child_filter={child_id},
@@ -495,7 +500,7 @@ async def count_removed_by_override(
         _generation_preview(
             snapshots,
             _build_engine(
-                schedules_records,
+                patterns_records,
                 overrides_records,
                 extra_overrides=(override,),
             ),

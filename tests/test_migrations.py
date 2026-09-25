@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
 import logging
 import sqlite3
@@ -12,6 +13,9 @@ import pytest
 from custom_components.nestquest.core.db import NestQuestDatabase
 from custom_components.nestquest.core.schema import SCHEMA_V7_META_STATE_DDL
 from custom_components.nestquest.core.migrations import (
+    MIGRATED_PRESENCE_PATTERN_NAME,
+    MIGRATION_1_V1_DDL,
+    MIGRATION_9_PRESENCE_PATTERNS,
     MIGRATIONS,
     VERSION_TABLE,
     VERSION_TABLE_DDL,
@@ -69,7 +73,7 @@ def _counts(database) -> dict[str, int]:
         "quest_definitions",
         "quest_definition_assignees",
         "quest_definition_windows",
-        "presence_schedules",
+        "presence_patterns",
         "presence_overrides",
         "quest_instances",
         "completion_events",
@@ -107,7 +111,7 @@ def test_fresh_file_migration_creates_all_v1_tables(tmp_path) -> None:
             "quest_definitions",
             "quest_definition_assignees",
             "quest_definition_windows",
-            "presence_schedules",
+            "presence_patterns",
             "presence_overrides",
             "quest_instances",
             "completion_events",
@@ -154,10 +158,26 @@ def test_migration_list_shape() -> None:
     model, migration 4 adds the windows table, migration 5 rebuilds
     quest_instances onto the widened (definition, child, date, window)
     key, migration 6 adds actor_child_id to completion_events,
-    migration 7 adds the meta_state table and migration 8 adds
-    skip_on_away to quest_definitions.
+    migration 7 adds the meta_state table, migration 8 adds
+    skip_on_away to quest_definitions and migration 9 retires
+    presence_schedules for presence_patterns.
+
+    Migration 1 is the v1 DDL as it shipped: the canonical statements
+    except that it still creates the retired presence_schedules table
+    where the canonical list now creates presence_patterns.
     """
-    assert MIGRATIONS[0] == SCHEMA_V1_STATEMENTS
+    assert MIGRATIONS[0] is MIGRATION_1_V1_DDL
+    assert len(MIGRATION_1_V1_DDL) == len(SCHEMA_V1_STATEMENTS)
+    differing = [
+        (shipped, canonical)
+        for shipped, canonical in zip(MIGRATION_1_V1_DDL, SCHEMA_V1_STATEMENTS)
+        if shipped != canonical
+    ]
+    assert len(differing) == 1
+    shipped, canonical = differing[0]
+    assert "CREATE TABLE IF NOT EXISTS presence_schedules" in shipped
+    assert "CREATE TABLE IF NOT EXISTS presence_patterns" in canonical
+    assert not any("presence_patterns" in sql for sql in MIGRATION_1_V1_DDL)
     assert callable(MIGRATIONS[1])
     assert callable(MIGRATIONS[2])
     assert MIGRATIONS[3] == SCHEMA_V1_QUEST_DEFINITION_WINDOWS_DDL
@@ -165,7 +185,8 @@ def test_migration_list_shape() -> None:
     assert callable(MIGRATIONS[5])
     assert MIGRATIONS[6] == SCHEMA_V7_META_STATE_DDL
     assert callable(MIGRATIONS[7])
-    assert len(MIGRATIONS) == 8
+    assert MIGRATIONS[8] is MIGRATION_9_PRESENCE_PATTERNS
+    assert len(MIGRATIONS) == 9
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +495,8 @@ def _seed_v2_multi_assignee_upgrade(database) -> None:
     """
     # Freeze the version-2 shape: definitions carry child_id, the
     # instance table has no window column, and the assignees/windows
-    # tables do not exist yet — everything else matches the current DDL.
+    # tables do not exist yet — everything else matches the shipped v1
+    # DDL (migration 1, which still creates presence_schedules).
     _v2_replaced = (
         "quest_definitions ",
         "quest_definition_assignees ",
@@ -482,7 +504,7 @@ def _seed_v2_multi_assignee_upgrade(database) -> None:
         "quest_instances ",
         "completion_events ",
     )
-    for sql in SCHEMA_V1_STATEMENTS:
+    for sql in MIGRATION_1_V1_DDL:
         if any(name in sql for name in _v2_replaced):
             continue
         _run(database.execute(sql))
@@ -694,7 +716,7 @@ def test_v7_definitions_gain_skip_on_away_defaulting_true(tmp_path) -> None:
         before = _version(database)
         assert before == 7
 
-        final = _migrate(database)
+        final = _migrate(database, MIGRATIONS[:8])
 
         assert final == before + 1
         assert _version(database) == before + 1
@@ -724,6 +746,311 @@ def test_skip_on_away_migration_is_noop_on_fresh_schema(tmp_path) -> None:
             database.fetch_all("PRAGMA table_info(quest_definitions)")
         )
         assert [c[1] for c in columns].count("skip_on_away") == 1
+    finally:
+        _run(database.close())
+
+
+# ---------------------------------------------------------------------------
+# Migration 9: presence_schedules -> presence_patterns
+# ---------------------------------------------------------------------------
+
+#: Pre-migration presence_schedules rows: (id, child_id, cycle, anchor,
+#: pattern).  Covers a 1-, 2- and 4-week cycle, an anchor that is not a
+#: Monday, and the all-absent empty pattern; child 4 has no schedule.
+_V8_SCHEDULES = (
+    (1, 1, 2, "2026-01-05", "0,1,2,3,4|5,6"),
+    (2, 2, 1, "2025-12-31", "0,2,4"),
+    (5, 3, 4, "2024-02-26", "0|1,2|3,4,5|6"),
+    (7, 5, 1, "2026-03-01", ""),
+)
+
+#: Pre-migration overrides: they must keep beating the migrated patterns.
+_V8_OVERRIDES = (
+    (1, "2026-02-02", "2026-02-08", 1),
+    (4, "2026-02-10", "2026-02-11", 0),
+)
+
+
+def _seed_v8_database(database) -> None:
+    """Build a genuine version-8 database holding presence schedules.
+
+    Migrations 1..8 run first — migration 1 still creates the retired
+    presence_schedules table — then five children, the schedules and
+    overrides above are written through the old table's column list.
+    """
+    assert _migrate(database, MIGRATIONS[:8]) == 8
+    tables = _tables(database)
+    assert "presence_schedules" in tables
+    assert "presence_patterns" not in tables
+    for child_id in range(1, 6):
+        _run(
+            database.execute(
+                "INSERT INTO children (id, display_name, created_at) "
+                "VALUES (?, ?, '2026-01-01T00:00:00+00:00')",
+                (child_id, f"Child {child_id}"),
+            )
+        )
+    for row in _V8_SCHEDULES:
+        _run(
+            database.execute(
+                "INSERT INTO presence_schedules (id, child_id, "
+                "cycle_length_weeks, anchor_date, pattern) "
+                "VALUES (?, ?, ?, ?, ?)",
+                row,
+            )
+        )
+    for row in _V8_OVERRIDES:
+        _run(
+            database.execute(
+                "INSERT INTO presence_overrides (child_id, start_date, "
+                "end_date, is_present) VALUES (?, ?, ?, ?)",
+                row,
+            )
+        )
+
+
+def _v8_presence(database, child_id: int, day: datetime.date) -> bool:
+    """Presence as a version-8 build answered it, read from the OLD rows.
+
+    The retired single-schedule rule, spelled out independently of the
+    new engine: a covering override wins; a child with no schedule row
+    is present; otherwise present iff the weekday is in the segment of
+    the anchor-arithmetic cycle week.
+    """
+    iso = day.isoformat()
+    override = _run(
+        database.fetch_one(
+            "SELECT is_present FROM presence_overrides WHERE child_id = ? "
+            "AND start_date <= ? AND end_date >= ? "
+            "ORDER BY start_date DESC LIMIT 1",
+            (child_id, iso, iso),
+        )
+    )
+    if override is not None:
+        return bool(override[0])
+    row = _run(
+        database.fetch_one(
+            "SELECT cycle_length_weeks, anchor_date, pattern "
+            "FROM presence_schedules WHERE child_id = ?",
+            (child_id,),
+        )
+    )
+    if row is None:
+        return True
+    cycle, anchor, pattern = row
+    days = (day - datetime.date.fromisoformat(anchor)).days
+    segment = pattern.split("|")[(days // 7) % cycle]
+    return str(day.weekday()) in segment.split(",")
+
+
+def _v9_engine(database):
+    """Build the new PresenceEngine from the migrated tables."""
+    from custom_components.nestquest.core.dao_presence import (
+        PresenceOverridesDao,
+        PresencePatternsDao,
+    )
+    from custom_components.nestquest.core.presence import (
+        PresenceEngine,
+        PresenceOverride,
+    )
+    from custom_components.nestquest.core.presence_management import (
+        decode_pattern_record,
+    )
+
+    patterns = {}
+    overrides = {}
+    for child_id in range(1, 6):
+        records = _run(PresencePatternsDao(database).list_by_child(child_id))
+        if records:
+            patterns[child_id] = [decode_pattern_record(r) for r in records]
+        stored = _run(
+            PresenceOverridesDao(database).list_filtered(child_id=child_id)
+        )
+        if stored:
+            overrides[child_id] = [
+                PresenceOverride(
+                    r.child_id, r.start_date, r.end_date, r.is_present
+                )
+                for r in stored
+            ]
+    return PresenceEngine(patterns, overrides)
+
+
+#: Every day from 2023-12-25 through 2027-01-10: before and after each
+#: anchor, across three year boundaries and the 2024 leap day.
+_COMPARE_DAYS = [
+    datetime.date(2023, 12, 25) + datetime.timedelta(days=offset)
+    for offset in range(
+        (datetime.date(2027, 1, 10) - datetime.date(2023, 12, 25)).days + 1
+    )
+]
+
+
+def test_v8_presence_is_unchanged_after_migration_9(tmp_path) -> None:
+    """Presence for a pre-migration fixture is identical after migrating.
+
+    The old table is built and filled, every child's presence is
+    recorded day by day under the version-8 rule, the database is
+    migrated, and the new engine must answer the SAME for every child
+    (including the one with no schedule and the all-absent one) on
+    every day of the three-year window.
+    """
+    database = _open_db(tmp_path / "v8-presence.db")
+    try:
+        _seed_v8_database(database)
+        before = {
+            (child_id, day): _v8_presence(database, child_id, day)
+            for child_id in range(1, 6)
+            for day in _COMPARE_DAYS
+        }
+        # The fixture must exercise both answers for the scheduled
+        # children, or "unchanged" would be vacuous.
+        for child_id in (1, 2, 3):
+            answers = {
+                before[(child_id, day)] for day in _COMPARE_DAYS
+            }
+            assert answers == {True, False}
+
+        assert _migrate(database) == 9
+
+        engine = _v9_engine(database)
+        after = {
+            (child_id, day): engine.is_present(child_id, day)
+            for child_id in range(1, 6)
+            for day in _COMPARE_DAYS
+        }
+        changed = [key for key in before if before[key] != after[key]]
+        assert changed == []
+    finally:
+        _run(database.close())
+
+
+def test_migration_9_copies_every_schedule_verbatim(tmp_path) -> None:
+    database = _open_db(tmp_path / "v8-copy.db")
+    try:
+        _seed_v8_database(database)
+        assert _migrate(database) == 9
+
+        tables = _tables(database)
+        assert "presence_schedules" not in tables
+        assert "presence_patterns" in tables
+        rows = _run(
+            database.fetch_all(
+                "SELECT id, child_id, name, kind, cycle_length_weeks, "
+                "anchor_date, pattern FROM presence_patterns ORDER BY id"
+            )
+        )
+        assert rows == [
+            (
+                schedule_id,
+                child_id,
+                MIGRATED_PRESENCE_PATTERN_NAME,
+                "home",
+                cycle,
+                anchor,
+                pattern,
+            )
+            for schedule_id, child_id, cycle, anchor, pattern in _V8_SCHEDULES
+        ]
+        assert MIGRATED_PRESENCE_PATTERN_NAME == "Home schedule"
+        assert _counts(database)["presence_overrides"] == len(_V8_OVERRIDES)
+        assert _run(database.fetch_all("PRAGMA foreign_key_check")) == []
+    finally:
+        _run(database.close())
+
+
+def test_migrated_database_accepts_several_patterns_per_child(
+    tmp_path,
+) -> None:
+    """The migrated table drops the retired UNIQUE(child_id)."""
+    database = _open_db(tmp_path / "v8-multi.db")
+    try:
+        _seed_v8_database(database)
+        _migrate(database)
+        _run(
+            database.execute(
+                "INSERT INTO presence_patterns (child_id, name, kind, "
+                "cycle_length_weeks, anchor_date, pattern) "
+                "VALUES (1, 'Thu+Fri away', 'away', 1, '2026-01-05', '3,4')"
+            )
+        )
+        row = _run(
+            database.fetch_one(
+                "SELECT COUNT(*) FROM presence_patterns WHERE child_id = 1"
+            )
+        )
+        assert row == (2,)
+    finally:
+        _run(database.close())
+
+
+def test_fresh_file_walks_through_and_retires_presence_schedules(
+    tmp_path,
+) -> None:
+    """Migration 1 still makes the old table; migration 9 retires it."""
+    database = _open_db(tmp_path / "fresh-v9.db")
+    try:
+        assert _migrate(database, MIGRATIONS[:8]) == 8
+        assert "presence_schedules" in _tables(database)
+        assert "presence_patterns" not in _tables(database)
+
+        assert _migrate(database) == 9
+        assert "presence_schedules" not in _tables(database)
+        assert _counts(database)["presence_patterns"] == 0
+    finally:
+        _run(database.close())
+
+
+def test_migrated_presence_patterns_match_the_canonical_ddl(tmp_path) -> None:
+    """A migrated table and one made from schema.py are the same shape."""
+    migrated = _open_db(tmp_path / "migrated-shape.db")
+    canonical = _open_db(tmp_path / "canonical-shape.db")
+    try:
+        _migrate(migrated)
+        for sql in SCHEMA_V1_STATEMENTS:
+            _run(canonical.execute(sql))
+        for pragma in ("table_info", "foreign_key_list", "index_list"):
+            assert _run(
+                migrated.fetch_all(f"PRAGMA {pragma}(presence_patterns)")
+            ) == _run(
+                canonical.fetch_all(f"PRAGMA {pragma}(presence_patterns)")
+            )
+    finally:
+        _run(migrated.close())
+        _run(canonical.close())
+
+
+def test_failed_migration_9_keeps_the_schedules(tmp_path) -> None:
+    """Migration 9 is atomic: a failure after the copy loses nothing.
+
+    The real migration 9 statements are followed by a broken one in
+    the SAME step, so the create, the copy and the drop have all run
+    when it fails — the runner's one transaction must roll every one
+    of them back together with the stamp.
+    """
+    database = _open_db(tmp_path / "v8-atomic.db")
+    try:
+        _seed_v8_database(database)
+        broken = [
+            *MIGRATIONS[:8],
+            [*MIGRATION_9_PRESENCE_PATTERNS, "CREATE TABLE broken ("],
+        ]
+        with pytest.raises(sqlite3.OperationalError):
+            _migrate(database, broken)
+
+        assert _version(database) == 8
+        tables = _tables(database)
+        assert "presence_patterns" not in tables
+        rows = _run(
+            database.fetch_all(
+                "SELECT id, child_id, cycle_length_weeks, anchor_date, "
+                "pattern FROM presence_schedules ORDER BY id"
+            )
+        )
+        assert rows == list(_V8_SCHEDULES)
+
+        assert _migrate(database) == 9
+        assert _counts(database)["presence_patterns"] == len(_V8_SCHEDULES)
     finally:
         _run(database.close())
 

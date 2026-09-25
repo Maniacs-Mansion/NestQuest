@@ -141,7 +141,7 @@ async def _seed_household(
             [bo.id],
             [("morning", "17:00")],
         )
-        # Today's instances first, while Ada has no presence schedule
+        # Today's instances first, while Ada has no presence pattern
         # (she is present every day, so her instance IS generated).
         await _materialize.materialize(
             database,
@@ -149,13 +149,18 @@ async def _seed_household(
             (today + datetime.timedelta(days=3)).isoformat(),
             today=today,
         )
-        # The stale quest is created AFTER the today walk, so its only
-        # instance is the yesterday one written below.
+        # The stale quest's rule ends YESTERDAY, so create's own
+        # regeneration writes nothing and its only instance is the
+        # yesterday one written below.
         await _quest_definitions.create_quest_definition(
             database,
             "Stale chore",
             _recurrence.ScheduleRule.from_dict(
-                {"rule_type": "daily", "start_date": yesterday_iso}
+                {
+                    "rule_type": "daily",
+                    "start_date": yesterday_iso,
+                    "end_date": yesterday_iso,
+                }
             ),
             [ada.id],
             [("morning", "09:00")],
@@ -183,12 +188,14 @@ async def _seed_household(
             if record.due_time == "09:00"
         )
 
-        # Ada's custody schedule, added AFTER materialization (the
+        # Ada's custody pattern (one home pattern), added AFTER materialization (the
         # same order test_core_snapshot.py seeds): 2-week cycle
         # anchored yesterday, empty week 0 covers today => absent
         # today; an override returns her on today+2.
-        await _dao_presence.PresenceSchedulesDao(database).upsert_by_child(
+        await _dao_presence.PresencePatternsDao(database).create(
             ada.id,
+            name="Custody",
+            kind="home",
             cycle_length_weeks=2,
             anchor_date=yesterday_iso,
             pattern="|0,1,2,3,4,5,6",
