@@ -5,7 +5,8 @@
 ### Scope
 
 Minor release carrying the multi-pattern presence model (schema 9), the
-Sunday-first calendar week, and two admin fixes onto `main`.
+Sunday-first calendar week, and the create-materializes fix, plus the
+definition start-date field, onto `main`.
 
 - **Multiple presence patterns per child (schema 9):** a child now has zero or
   more presence patterns instead of at most one. Each pattern has a name, a kind
