@@ -177,6 +177,7 @@ function parseWhole(value: string, min: number, max: number): number | null {
 function buildRule(draft: Draft): DefinitionRule | string {
   const interval = parseWhole(draft.interval, 1, 999);
   if (interval === null) return "Interval must be a whole number of at least 1.";
+  if (draft.startDate === "") return "Pick a start date.";
   const rule: DefinitionRule = {
     rule_type: "daily",
     interval,
@@ -738,6 +739,16 @@ function EditSheet({
               />
             ) : null}
             <OccurrencePreview ruleKey={previewKey} />
+          </Field>
+
+          <Field label="Start date" id="defs-label-start">
+            <input
+              className="defs-input"
+              type="date"
+              aria-labelledby="defs-label-start"
+              value={draft.startDate}
+              onChange={(e) => update({ startDate: e.target.value })}
+            />
           </Field>
 
           <Field label="Due time" id="defs-label-due">
