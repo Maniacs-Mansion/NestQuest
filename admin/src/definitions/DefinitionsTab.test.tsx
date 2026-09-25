@@ -1118,3 +1118,95 @@ describe("DefinitionsTab icon picker", () => {
     expect(rowIcon(screen.getByTestId("definition-20"))).toBeNull();
   });
 });
+
+/* ── Start date ─────────────────────────────────────────────────────── */
+
+function startDateInput(s: HTMLElement): HTMLInputElement {
+  return within(s).getByLabelText("Start date", { selector: "input" }) as HTMLInputElement;
+}
+
+describe("DefinitionsTab start date", () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("a new task defaults to today and POSTs the chosen start date", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 8, 23, 9, 0)); // Wed 23 Sep 2026, local
+    await renderReady();
+
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    const s = sheet();
+    const input = startDateInput(s);
+    expect(input.type).toBe("date");
+    expect(input.value).toBe("2026-09-23");
+
+    fireEvent.change(within(s).getByRole("textbox", { name: "Title" }), {
+      target: { value: "Feed the cat" },
+    });
+    fireEvent.click(within(s).getByRole("button", { name: /Assigned children/ }));
+    fireEvent.click(within(s).getByRole("checkbox", { name: "Declan" }));
+    fireEvent.click(within(s).getByRole("button", { name: "Evening" }));
+    fireEvent.change(input, { target: { value: "2026-10-15" } });
+
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+    expect(api.writes()).toHaveLength(1);
+    expect(api.writes()[0].method).toBe("POST");
+    expect((api.writes()[0].body as { rule: DefinitionRule }).rule.start_date).toBe("2026-10-15");
+  });
+
+  it("an edit pre-fills the definition's start date and PATCHes a changed one", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByTestId("definition-10"));
+    const s = sheet();
+    const input = startDateInput(s);
+    expect(input.value).toBe("2026-01-01");
+
+    fireEvent.change(input, { target: { value: "2026-11-02" } });
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+    expect(api.writes()).toEqual([
+      expect.objectContaining({
+        method: "PATCH",
+        path: "/api/v1/admin/quest-definitions/10",
+        body: expect.objectContaining({ rule: rule({ start_date: "2026-11-02" }) }),
+      }),
+    ]);
+  });
+
+  it("the occurrence preview requests the chosen start date", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByTestId("definition-10"));
+    const s = sheet();
+    await waitFor(() => expect(api.previews()).toHaveLength(1));
+
+    fireEvent.change(startDateInput(s), { target: { value: "2027-03-01" } });
+    await settleDebounce();
+    await waitFor(() => expect(api.previews()).toHaveLength(2));
+    expect((api.previews()[1].body as { rule: DefinitionRule }).rule.start_date).toBe(
+      "2027-03-01",
+    );
+  });
+
+  it("a cleared start date is not submitted", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByTestId("definition-10"));
+    const s = sheet();
+    fireEvent.change(startDateInput(s), { target: { value: "" } });
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+    expect(api.writes()).toHaveLength(0);
+    expect(within(s).getByText("Pick a start date.")).toBeTruthy();
+  });
+});
