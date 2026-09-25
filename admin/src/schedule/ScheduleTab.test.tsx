@@ -335,7 +335,7 @@ describe("ScheduleTab", () => {
     fireEvent.click(screen.getByRole("button", { name: "Rory" }));
     fireEvent.click(screen.getByRole("button", { name: "Add pattern" }));
     expect(await screen.findByRole("heading", { name: "New pattern" })).toBeTruthy();
-    // Nothing named and no day covered yet.
+    // Nothing named yet.
     expect(saveButton().disabled).toBe(true);
 
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "  Dad's weekends " } });
@@ -406,6 +406,90 @@ describe("ScheduleTab", () => {
     // A home pattern: uncovered days are now away.
     expect(day("2026-09-14").dataset.state).toBe("home"); // Monday
     expect(day("2026-09-15").dataset.state).toBe("away"); // Tuesday
+  });
+
+  it("Save requires a name; covered days alone are not enough", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: "Rory" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add pattern" }));
+    await screen.findByRole("heading", { name: "New pattern" });
+    fireEvent.click(within(weekGroup(1)).getByRole("button", { name: "Monday" }));
+    expect(saveButton().disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "   " } });
+    expect(saveButton().disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Mondays" } });
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "" } });
+    expect(saveButton().disabled).toBe(true);
+    fireEvent.click(saveButton());
+    expect(writes()).toEqual([]);
+  });
+
+  it("Add saves a pattern that covers no weekday and lists it", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: "Rory" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add pattern" }));
+    await screen.findByRole("heading", { name: "New pattern" });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Always away" } });
+    fireEvent.click(screen.getByRole("button", { name: "Home" }));
+    fireEvent.change(screen.getByLabelText("Cycle length"), { target: { value: "2" } });
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.click(saveButton());
+    const row = await screen.findByTestId("pattern-50");
+
+    expect(writes()).toEqual([
+      {
+        method: "POST",
+        path: "/api/v1/admin/children/3/presence-patterns",
+        body: {
+          name: "Always away",
+          kind: "home",
+          cycle_length_weeks: 2,
+          anchor_date: TODAY,
+          pattern: { "0": [], "1": [] },
+        },
+      },
+    ]);
+    expect(findPattern(50)?.pattern).toEqual({ "0": [], "1": [] });
+    expect(within(row).getByText("Always away")).toBeTruthy();
+    expect(within(row).getByText("Home · Every 2 weeks")).toBeTruthy();
+    expect(within(row).getByText("Week 1: No days · Week 2: No days")).toBeTruthy();
+    // A home pattern covering no day: the child is away every day.
+    for (const date of monthDates("2026-09-01")) expect(day(date).dataset.state, date).toBe("away");
+  });
+
+  it("Edit of a migrated all-absent home pattern saves without touching any weekday", async () => {
+    const migrated: PresencePattern = {
+      id: 7,
+      child_id: 3,
+      name: "Home weeks",
+      kind: "home",
+      cycle_length_weeks: 2,
+      anchor_date: "2026-09-07",
+      pattern: { "0": [], "1": [] },
+    };
+    patterns[3] = [migrated];
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: "Rory" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Home weeks" }));
+    await screen.findByRole("heading", { name: "Edit pattern" });
+    for (const week of [1, 2]) {
+      for (const button of within(weekGroup(week)).getAllByRole("button")) {
+        expect(button.getAttribute("aria-pressed")).toBe("false");
+      }
+    }
+    // Unchanged: nothing to save.
+    expect(saveButton().disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Never home" } });
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Edit pattern" })).toBeNull());
+
+    expect(writes()).toEqual([{ method: "PATCH", path: `${PATTERNS_PATH}/7`, body: { name: "Never home" } }]);
+    expect(findPattern(7)).toEqual({ ...migrated, name: "Never home" });
+    const row = await screen.findByTestId("pattern-7");
+    expect(within(row).getByText("Week 1: No days · Week 2: No days")).toBeTruthy();
   });
 
   it("Edit PATCHes only the changed fields to /presence-patterns/{id} and refreshes", async () => {

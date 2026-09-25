@@ -97,9 +97,8 @@ export default function PatternEditor({ child, pattern, today, onCancel, onSaved
     pattern: resizePattern(weeks, cycleLength),
   };
   const changes = pattern ? changedFields(pattern, body) : body;
-  const coversADay = Object.values(body.pattern).some((days) => days.length > 0);
-  const canSave =
-    body.name !== "" && isIsoDate(anchor) && coversADay && Object.keys(changes).length > 0 && !saving;
+  // A pattern covering no day is valid (e.g. a migrated all-absent home schedule).
+  const canSave = body.name !== "" && isIsoDate(anchor) && Object.keys(changes).length > 0 && !saving;
 
   function save() {
     if (!canSave) return;
