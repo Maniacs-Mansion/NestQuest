@@ -468,7 +468,11 @@ async def _materialize_with_change(
     proceeds with the snapped presence).  This deterministically
     exercises the snapshot-to-insert gap that a config edit can
     interleave into.
+
+    ``create_quest_definition`` already materializes its horizon, so the
+    table is cleared first: the gated walk must be the only writer.
     """
+    await database.execute("DELETE FROM quest_instances")
     original_upsert = QuestInstancesDao.upsert_if_valid
     entered = asyncio.Event()
     release = asyncio.Event()

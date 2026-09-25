@@ -514,8 +514,10 @@ async def test_regenerate_household_never_duplicates(
     client = admin_household.client
     database = admin_household.database
 
-    before = await _instance_count(database)
-    assert before > 0  # the seed already materialized a few days
+    # The seed's creates materialized the horizon BEFORE Ada's custody
+    # pattern existed, so the first household walk may legitimately
+    # drop her away-day rows; only the second run must be stable.
+    assert await _instance_count(database) > 0
 
     first = await client.post(
         "/api/v1/admin/regenerate", json={}, headers=_admin_headers()
@@ -525,9 +527,8 @@ async def test_regenerate_household_never_duplicates(
     assert body["scope"] == "household"
     assert body["definition_id"] is None
     assert body["child_id"] is None
-    assert body["count"] >= before
+    assert body["count"] > 0
     after_first = await _instance_count(database)
-    assert after_first >= before
 
     second = await client.post(
         "/api/v1/admin/regenerate", json={}, headers=_admin_headers()
@@ -544,17 +545,18 @@ async def test_regenerate_definition_scope_rematerializes(
 ) -> None:
     """The definition scope rebuilds that definition's horizon, twice, stably.
 
-    Creating a definition through the admin route materializes NOTHING
-    (the core's create path does not regenerate); the scoped regenerate
-    call is what materializes its instances, and re-running it leaves
-    the row count exactly where the first run left it.
+    Creating a definition through the admin route already materializes
+    its horizon (the core's create path regenerates); the scoped
+    regenerate call rebuilds the same rows, and re-running it leaves
+    the row count exactly where the create left it.
     """
     client = admin_api.client
     database = admin_api.database
     ada = await _create_child(client, "Ada")
     definition_id = await _create_daily_definition(client, [ada])
 
-    assert await _instance_count(database) == 0
+    created_count = await _instance_count(database)
+    assert created_count > 0
 
     first = await client.post(
         "/api/v1/admin/regenerate",
@@ -568,7 +570,7 @@ async def test_regenerate_definition_scope_rematerializes(
     assert body["child_id"] is None
     assert body["count"] > 0
     after_first = await _instance_count(database)
-    assert after_first == body["count"]
+    assert after_first == body["count"] == created_count
 
     second = await client.post(
         "/api/v1/admin/regenerate",

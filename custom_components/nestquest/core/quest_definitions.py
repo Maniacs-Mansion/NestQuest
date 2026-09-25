@@ -235,6 +235,11 @@ async def create_quest_definition(
     transaction, so the returned bundle is a consistent creation
     snapshot.  Raises ValueError on any rejected argument; a rejected or
     failed create persists nothing.
+
+    After the write, :func:`~.materialize.regenerate_for_definition`
+    materializes the new definition's instances over the rolling horizon
+    (host clock, :data:`~.const.DEFAULT_HORIZON_DAYS`), so it reaches the
+    board without waiting for an unrelated write.
     """
     name = _validate_text(title, "title", required=True)
     assert name is not None
@@ -269,6 +274,9 @@ async def create_quest_definition(
             ) from error
         raise
     decoded_rule = schedule_rule_from_storage(storage)
+
+    await regenerate_for_definition(database, snapshot.definition.id)
+
     return CreatedQuestDefinition(
         definition=snapshot.definition,
         rule=decoded_rule,
