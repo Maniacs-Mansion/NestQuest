@@ -370,7 +370,7 @@ describe("SettingsScreen — preferences", () => {
     fireEvent.click(within(form).getByRole("button", { name: "Save preferences" }));
   }
 
-  it("renders the current value of all ten fields", async () => {
+  it("renders the current value of the ten settings form fields (timezone is API-only)", async () => {
     const { form } = await renderPreferences();
     expect(field(form, "Planning horizon (days)").value).toBe("14");
     expect(field(form, "Day rollover").value).toBe("03:00");

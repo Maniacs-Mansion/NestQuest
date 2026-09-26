@@ -165,10 +165,12 @@ integration's Home-Assistant config-entry options remain a temporary,
 SEPARATE source until Feature 18 wires the client to the API — the two
 are deliberately not unified here:
 
-- ``GET /settings`` returns the current effective settings: all ten
+- ``GET /settings`` returns the current effective settings: all eleven
   documented fields (the rolling horizon, the day rollover time, the
-  notify target, the three notification times and the four enable
-  toggles) — the defaults on a fresh database.
+  notify target, the three notification times, the four enable
+  toggles and the ``timezone`` — the IANA household zone the
+  household-local dates derive from, empty meaning host local) — the
+  defaults on a fresh database.
 - ``PATCH /settings`` updates ONLY the supplied fields: the body is a
   JSON object of settings field names to new values, passed STRAIGHT
   to :func:`nestquest_core.settings_store.update_settings` — the
@@ -184,18 +186,19 @@ The missed-sweep trigger (task 058c7b69) follows the same pattern over
 :mod:`nestquest_core.sweep` — the HA-free sweep policy the
 integration's rollover listener shares:
 
-- ``POST /missed-sweep`` runs the sweep for the API host's local
-  ``today`` (ONE :func:`_local_now` clock read threaded into the core
-  call) and publishes each returned ``(event_type, payload)`` pair
-  DIRECTLY on the app's ONE transition publisher — the sweep-built
-  payload, never re-fetched (the core commits its watermark before
-  returning, so a failed re-fetch after it would lose the missed event
-  forever), the same publish-what-the-core-built shape
-  api/scheduler.py uses.  The watermark rule
-  (a same-day rerun announces nothing, a post-downtime run sweeps the
-  accumulated window once), the no-completion-event rule and the
-  read-only-over-the-domain-tables guarantee all live in the core; the
-  response reports how many transitions were published.
+- ``POST /missed-sweep`` runs the sweep for the household-local
+  ``today`` (ONE :func:`_local_now` clock read re-expressed in the
+  configured household ``timezone`` — empty falls back to host local —
+  threaded into the core call) and publishes each returned
+  ``(event_type, payload)`` pair DIRECTLY on the app's ONE transition
+  publisher — the sweep-built payload, never re-fetched (the core
+  commits its watermark before returning, so a failed re-fetch after it
+  would lose the missed event forever), the same
+  publish-what-the-core-built shape api/scheduler.py uses.  The
+  watermark rule (a same-day rerun announces nothing, a post-downtime
+  run sweeps the accumulated window once), the no-completion-event rule
+  and the read-only-over-the-domain-tables guarantee all live in the
+  core; the response reports how many transitions were published.
 
 The occurrence-preview route (task 5f843564) lets the admin PWA's
 Definitions edit sheet show the next dates a rule fires on WITHOUT
@@ -205,9 +208,10 @@ reimplementing the recurrence rules client-side:
   ``rule`` object create/edit take (:class:`AdminRuleRequest`, built
   through the SAME :func:`_rule_from_request` / core ``from_dict``
   validation, so a rejected rule is 422 exactly as on create), an
-  optional ``start_date`` (default: the API host's local ``today``,
-  ONE :func:`_local_now` clock read) and an optional ``count`` (1..50,
-  default 10).  The dates come from ONE
+  optional ``start_date`` (default: the household-local ``today`` —
+  ONE :func:`_local_now` clock read re-expressed in the configured
+  household ``timezone``, empty falling back to host local) and an
+  optional ``count`` (1..50, default 10).  The dates come from ONE
   :func:`nestquest_core.recurrence.occurrences_between` call — the
   same engine the materializer walks — so the preview can only agree
   with what would be generated.  The scan is BOUNDED server-side: the
@@ -532,9 +536,10 @@ class AdminOccurrencesPreviewRequest(BaseModel):
 
     ``rule`` is the SAME object create/edit take.  ``start_date`` is an
     optional strict ``YYYY-MM-DD`` (validated by the core; default the
-    API host's today).  ``count`` is a strict JSON integer in
-    1..``_PREVIEW_MAX_COUNT`` — anything else is 422 before any handler
-    code runs.
+    household-local today in the configured ``timezone``, empty falling
+    back to the API host's local time).  ``count`` is a strict JSON
+    integer in 1..``_PREVIEW_MAX_COUNT`` — anything else is 422 before
+    any handler code runs.
     """
 
     rule: AdminRuleRequest
@@ -868,7 +873,7 @@ class AdminSettingsResponse(BaseModel):
     """The effective settings as the admin plane serializes them.
 
     Mirrors the core :class:`~nestquest_core.settings.NestQuestSettings`
-    — all TEN documented fields, resolved (every absent stored field
+    — all ELEVEN documented fields, resolved (every absent stored field
     already fell back to its default in the core).  The same shape both
     the GET and the PATCH route answer with.
     """
@@ -883,6 +888,9 @@ class AdminSettingsResponse(BaseModel):
     afternoon_reminder_enabled: bool
     end_of_day_report_enabled: bool
     celebration_enabled: bool
+    #: The household IANA time zone the API reads its clock in; ``""``
+    #: means the API host's local time.
+    timezone: str
 
 
 class AdminMissedSweepResponse(BaseModel):
@@ -1177,6 +1185,26 @@ def _local_now() -> datetime.datetime:
     route's ``_local_now`` is pinned.
     """
     return datetime.datetime.now().astimezone()
+
+
+async def _household_clock(
+    database: object,
+) -> tuple[object, datetime.datetime]:
+    """Return the stored settings and ONE household-local clock read.
+
+    The API host may run UTC while the household does not, so the one
+    :func:`_local_now` read is re-expressed in the stored settings'
+    ``timezone`` (:meth:`NestQuestSettings.household_now`); an unset
+    zone keeps the host's local time.
+    """
+    settings = await core_settings_store.load_settings(database)
+    return settings, settings.household_now(_local_now())
+
+
+async def _household_today(database: object) -> datetime.date:
+    """Return the household-local date of ONE :func:`_household_clock` read."""
+    _settings, now = await _household_clock(database)
+    return now.date()
 
 
 def _rule_from_request(rule: AdminRuleRequest) -> core_recurrence.ScheduleRule:
@@ -1497,7 +1525,7 @@ async def admin_create_quest_definition(
     response_model=AdminOccurrencesPreviewResponse,
 )
 async def admin_preview_occurrences(
-    body: AdminOccurrencesPreviewRequest,
+    body: AdminOccurrencesPreviewRequest, request: Request
 ) -> AdminOccurrencesPreviewResponse:
     """Return the first ``count`` dates the supplied rule fires on.
 
@@ -1510,12 +1538,15 @@ async def admin_preview_occurrences(
     call over the bounded window ``[start_date, start_date + 366
     days]`` — ``start_date`` defaulting to ONE :func:`_local_now` clock
     read — truncated to ``count``.  Every core ``ValueError`` is 422
-    (:func:`_raise_preview_error`).  No database access.
+    (:func:`_raise_preview_error`).  The only database access is the
+    settings read behind the household clock.
     """
     start_date = (
         body.start_date
         if body.start_date is not None
-        else _local_now().date().isoformat()
+        else (
+            await _household_today(request.app.state.db.database)
+        ).isoformat()
     )
     try:
         rule = _rule_from_request(body.rule)
@@ -1840,7 +1871,7 @@ async def admin_presence_override_consequence(
                 body.start_date,
                 body.end_date,
                 body.is_present,
-                today=_local_now().date(),
+                today=await _household_today(state.database),
             )
         )
     except ValueError as error:
@@ -1927,7 +1958,7 @@ async def admin_uncomplete_instance(
     """
     state: DatabaseState = request.app.state.db
     database = state.database
-    now = _local_now()
+    _settings, now = await _household_clock(database)
     sub = claims.get("sub")
     try:
         result = await core_completion.uncomplete_instance(
@@ -1993,7 +2024,7 @@ async def admin_regenerate(
     """
     state: DatabaseState = request.app.state.db
     database = state.database
-    today = _local_now().date()
+    today = await _household_today(state.database)
 
     if body.scope == "household":
         end_date = today + datetime.timedelta(
@@ -2078,7 +2109,7 @@ def _settings_response(
     """Serialize one core NestQuestSettings into the documented payload.
 
     Explicit field-by-field (not ``dataclasses.asdict``) so the payload
-    stays pinned to the ten documented fields even if the core
+    stays pinned to the eleven documented fields even if the core
     dataclass later grows another one.
     """
     return AdminSettingsResponse(
@@ -2092,6 +2123,7 @@ def _settings_response(
         afternoon_reminder_enabled=settings.afternoon_reminder_enabled,
         end_of_day_report_enabled=settings.end_of_day_report_enabled,
         celebration_enabled=settings.celebration_enabled,
+        timezone=settings.timezone,
     )
 
 
@@ -2123,7 +2155,7 @@ async def admin_history_query(
     ``ValueError`` is 422 (:func:`_raise_history_error`).
     """
     state: DatabaseState = request.app.state.db
-    today = _local_now().date()
+    today = await _household_today(state.database)
     try:
         rows = await core_history.query_history(
             state.database, filter, start, end, today=today
@@ -2166,7 +2198,7 @@ async def admin_history_csv(
     JSON route's (:func:`_raise_history_error`).
     """
     state: DatabaseState = request.app.state.db
-    today = _local_now().date()
+    today = await _household_today(state.database)
     try:
         csv_text = await core_history.export_history_csv(
             state.database, filter, start, end, today=today
@@ -2189,7 +2221,7 @@ async def admin_history_csv(
     response_model=AdminSettingsResponse,
 )
 async def admin_get_settings(request: Request) -> AdminSettingsResponse:
-    """Return the current effective settings (all ten documented fields).
+    """Return the current effective settings (all eleven documented fields).
 
     Requires a valid admin JWT (the router's shared
     :func:`~api.auth.require_admin` dependency — the ONE check; this
@@ -2254,7 +2286,9 @@ async def admin_run_missed_sweep(
     handler performs NO auth of its own).  Thin adapter over the SAME
     HA-free sweep policy the integration's rollover listener runs
     (:mod:`nestquest_core.sweep`): ONE timezone-aware clock read
-    (:func:`_local_now`) pins the API host's local ``today``, and ONE
+    (:func:`_local_now`, re-expressed in the configured household
+    ``timezone``; empty falls back to host local) pins the
+    household-local ``today``, and ONE
     :func:`nestquest_core.sweep.run_missed_sweep` call does everything
     else — the past-due open-instance query, the documented payload
     build and the watermark update (a same-day rerun is an empty
@@ -2281,7 +2315,7 @@ async def admin_run_missed_sweep(
     """
     state: DatabaseState = request.app.state.db
     database = state.database
-    today = _local_now().date()
+    today = await _household_today(state.database)
     try:
         events = await core_sweep.run_missed_sweep(database, today=today)
     except ValueError as error:
@@ -2310,8 +2344,9 @@ async def admin_snapshot(request: Request) -> AdminSnapshotResponse:
     :class:`AdminSnapshotResponse`.
     """
     state: DatabaseState = request.app.state.db
+    settings, now = await _household_clock(state.database)
     snapshot = await core_snapshot.build_snapshot(
-        state.database, core_settings.NestQuestSettings(), _local_now()
+        state.database, settings, now
     )
     return AdminSnapshotResponse(
         today_iso=snapshot.today_iso,

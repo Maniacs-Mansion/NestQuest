@@ -13,7 +13,7 @@ proven against the DATABASE the routes wrote, not a parallel copy.
 Proven per the done-condition, everything read back through the API:
 
 - ``GET /api/v1/admin/settings`` returns the current effective settings
-  — the ten documented fields at their defaults on a fresh database.
+  — the eleven documented fields at their defaults on a fresh database.
 - ``PATCH /api/v1/admin/settings`` PERSISTS the supplied fields and the
   NEXT read reflects them; a later partial update merges onto the
   current effective settings (omitted fields keep their stored value),
@@ -60,7 +60,7 @@ _dao_meta = importlib.import_module("nestquest_core.dao_meta")
 SETTINGS_META_KEY = "settings"
 
 #: The all-defaults effective settings a fresh database reports — the
-#: documented ten fields, asserted literally so the payload contract is
+#: documented eleven fields, asserted literally so the payload contract is
 #: pinned here, independent of the core constants.
 DEFAULT_SETTINGS = {
     "horizon_days": 14,
@@ -73,6 +73,7 @@ DEFAULT_SETTINGS = {
     "afternoon_reminder_enabled": True,
     "end_of_day_report_enabled": True,
     "celebration_enabled": True,
+    "timezone": "",
 }
 
 
@@ -103,7 +104,7 @@ async def settings_client(temp_db_path: str) -> SimpleNamespace:
 async def test_get_settings_returns_defaults_on_a_fresh_database(
     settings_client: SimpleNamespace,
 ) -> None:
-    """GET returns the ten documented fields at their defaults."""
+    """GET returns the eleven documented fields at their defaults."""
     response = await settings_client.client.get(
         "/api/v1/admin/settings", headers=_admin_headers()
     )
@@ -139,7 +140,7 @@ async def test_update_persists_and_the_next_read_reflects_it(
     assert reread.status_code == 200
     assert reread.json() == expected
 
-    # ...and the DATABASE holds the merged document: the complete ten
+    # ...and the DATABASE holds the merged document: the complete eleven
     # fields, keyed by field name, under the well-known meta_state key.
     raw = await _dao_meta.MetaStateDao(settings_client.database).get(
         SETTINGS_META_KEY
