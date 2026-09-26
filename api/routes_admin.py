@@ -208,8 +208,14 @@ retire/deactivate if there is"):
   :func:`nestquest_core.quest_definitions.delete_quest_definition`.  A
   definition with NO completion event on any instance is hard-deleted
   (instances, assignees, windows, the row and its unreferenced rule, in
-  one core transaction); one WITH history is retired by deactivation
-  and everything is preserved.  The response reports which happened
+  one core transaction); one WITH history is retired by deactivation.
+  Retirement preserves the definition row, schedule rule, assignees,
+  windows and ALL durable completion history; like any deactivation it
+  regenerates, so future UNCOMPLETED instances are cleared (rolling,
+  regenerable rows) and none are recreated while the definition is
+  inactive — the retired task stops generating and shows no open work.
+  Durable instance history lives only in the append-only
+  ``completion_events``.  The response reports which happened
   (``deleted`` / ``retired``) and carries the retired definition, or
   ``null`` when deleted.  An unknown id is 404.
 

@@ -525,10 +525,15 @@ async def set_quest_definition_active(
     completion history (Feature 06 guardrail; a history-free definition
     may instead be hard-deleted by :func:`delete_quest_definition`):
     a deactivated definition stops future instance generation but its
-    row, schedule rule, assignees and windows all survive, and existing
-    instances plus completion history are never touched.  Reactivation
-    re-enables future generation; generating or removing instances is
-    Feature 07 and does not happen here.
+    row, schedule rule, assignees and windows all survive, and its
+    durable completion history (the append-only ``completion_events``)
+    is never touched.  Like every Feature 06 config change, the flip is
+    followed by :func:`~.materialize.regenerate_for_definition`: the
+    definition's future (today onward) UNCOMPLETED instances are cleared
+    — they are rolling, regenerable rows — and, while the definition is
+    inactive, none are re-materialized.  Completed and past instances
+    are kept.  Reactivation re-enables generation, and the same
+    regeneration re-materializes the rolling horizon.
 
     ``definition_id`` must be a plain int (bools and floats rejected,
     since SQLite would bind ``True`` onto definition 1) and
@@ -598,9 +603,14 @@ async def delete_quest_definition(
     :meth:`~.dao_rules.QuestDefinitionsDao.delete_if_no_history` — the
     history check is inside that transaction, so a completion recorded
     concurrently can never be deleted (D-005).  When history exists,
-    nothing is deleted: the definition is retired through
-    :func:`set_quest_definition_active` (``False``), preserving the row,
-    rule, assignees, windows, instances and completion history.
+    the definition is retired through :func:`set_quest_definition_active`
+    (``False``).  Retirement preserves the definition row, schedule
+    rule, assignees, windows and ALL durable completion history.  Like
+    any deactivation it regenerates, so future UNCOMPLETED instances are
+    cleared (they are rolling, regenerable rows) and none are recreated
+    while the definition is inactive — the retired task stops generating
+    and no longer shows open work.  Durable instance history lives only
+    in the append-only ``completion_events``.
 
     ``definition_id`` must be a plain int (bools and floats rejected).
     Raises ValueError naming the field when the id is malformed or the

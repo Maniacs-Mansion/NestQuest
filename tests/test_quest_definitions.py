@@ -2212,9 +2212,10 @@ def test_delete_without_history_keeps_a_shared_rule(tmp_path) -> None:
 def test_delete_with_history_retires_and_preserves_everything(
     tmp_path,
 ) -> None:
-    """A completion event on ANY instance: nothing is deleted; the
-    definition is deactivated and its row, rule, assignees, windows,
-    instance and completion history all remain."""
+    """A completion event on ANY instance: the definition is retired
+    (deactivated) and its row, rule, assignees, windows and completion
+    history all remain.  The completed instance survives; only future
+    UNCOMPLETED instances are cleared by the deactivation's regeneration."""
     async def _body(database, children, rules, definitions, child):
         created = await create_quest_definition(
             database, "Brush teeth", _daily_rule(), [child.id], ["morning"]

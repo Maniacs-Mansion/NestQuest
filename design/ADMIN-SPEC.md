@@ -91,9 +91,14 @@ otherwise it is retired (deactivated) and its history is kept." — with `Go bac
 danger-filled `Delete task`. Confirming calls `DELETE /api/v1/admin/quest-definitions/{id}`
 (admin plane only; the kids' panel has no equivalent control). Hybrid outcome (D-017): no
 completion event on any instance → the definition, its instances, assignees, windows and
-unreferenced rule are hard-deleted and the row leaves the list; otherwise nothing is
-deleted, the definition is deactivated and the row stays, shown inactive. An error keeps
-the sheet open with the API's detail.
+unreferenced rule are hard-deleted and the row leaves the list; otherwise the definition
+is retired (deactivated) and the row stays, shown inactive. Retirement preserves the
+definition row, schedule rule, assignees, windows and all durable completion history. Like
+any deactivation it regenerates, so future uncompleted instances are cleared (they are
+rolling, regenerable rows) and none are recreated while the definition is inactive — the
+retired task stops generating and no longer shows open work. Durable instance history lives
+only in the append-only `completion_events`. An error keeps the sheet open with the API's
+detail.
 
 ### 3.3 Icon picker
 Each definition carries one optional icon, shown on both surfaces. The picker offers three
