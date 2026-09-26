@@ -462,6 +462,10 @@ function EditSheet({
   // assignee_child_ids, because the API replaces the whole set and inactive
   // children cannot be sent back.
   const [originalActiveIds] = useState(() => draft.assigneeIds);
+  // The icon as loaded: while it is unchanged, the PATCH omits `icon` (absent
+  // means unchanged), because a legacy value read back as `lucide:<old>` would
+  // fail the API's strict icon validation if sent back.
+  const [originalIcon] = useState(() => draft.icon);
   const inactiveAssignees =
     target === "new"
       ? []
@@ -544,6 +548,7 @@ function EditSheet({
       } else {
         const edit: DefinitionEditBody = { ...body };
         if (keepsAssignees) delete edit.assignee_child_ids;
+        if (draft.icon === originalIcon) delete edit.icon;
         await updateDefinition(target.id, edit);
       }
       onSaved();
