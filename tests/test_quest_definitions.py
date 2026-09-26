@@ -106,13 +106,13 @@ def test_create_one_child_one_window(tmp_path) -> None:
             [child.id],
             ["morning"],
             description="  Twice daily  ",
-            icon="  mdi:tooth  ",
+            icon="  lucide:tooth  ",
         )
         assert isinstance(result, CreatedQuestDefinition)
         definition = result.definition
         assert definition.title == "Brush teeth"
         assert definition.description == "Twice daily"
-        assert definition.icon == "mdi:tooth"
+        assert definition.icon == "lucide:tooth"
         assert definition.is_active is True
         # D-008: the definition-level due_time column is never set here.
         assert definition.due_time is None
@@ -230,6 +230,89 @@ def test_create_rejects_non_string_title(tmp_path) -> None:
         return None
 
     _with_db(tmp_path, "create-bad-title-type.db")(_body)
+
+
+@pytest.mark.parametrize(
+    ("icon", "stored"),
+    [
+        ("lucide:dog", "lucide:dog"),
+        ("fa:dog", "fa:dog"),
+        ("emoji:🐕", "emoji:🐕"),
+        ("dog", "lucide:dog"),  # legacy bare name: canonical lucide key
+    ],
+)
+def test_create_stores_canonical_icon(tmp_path, icon, stored) -> None:
+    async def _body(database, children, rules, definitions, child):
+        result = await create_quest_definition(
+            database, "Walk dog", _daily_rule(), [child.id], ["morning"],
+            icon=icon,
+        )
+        assert result.definition.icon == stored
+        row = await definitions.get(result.definition.id)
+        assert row is not None
+        assert row.icon == stored
+        return None
+
+    _with_db(tmp_path, "create-icon.db")(_body)
+
+
+_BAD_ICONS = [
+    "foo:dog",
+    "lucide:",
+    "lucide:Dog",
+    "lucide:has space",
+    "emoji:" + "🐕" * 9,
+    "emoji:a b",
+    "emoji:<b>",
+    "javascript:alert(1)",
+]
+
+
+@pytest.mark.parametrize("bad", _BAD_ICONS)
+def test_create_rejects_invalid_icon_and_persists_nothing(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(ValueError, match=r"^icon\b"):
+            await create_quest_definition(
+                database, "Walk dog", _daily_rule(), [child.id], ["morning"],
+                icon=bad,
+            )
+        assert await definitions.list_active() == []
+        return None
+
+    _with_db(tmp_path, "create-bad-icon.db")(_body)
+
+
+@pytest.mark.parametrize("bad", _BAD_ICONS)
+def test_edit_rejects_invalid_icon_and_changes_nothing(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Walk dog", _daily_rule(), [child.id], ["morning"],
+            icon="lucide:dog",
+        )
+        with pytest.raises(ValueError, match=r"^icon\b"):
+            await edit_quest_definition(
+                database, created.definition.id, icon=bad
+            )
+        row = await definitions.get(created.definition.id)
+        assert row is not None
+        assert row.icon == "lucide:dog"
+        return None
+
+    _with_db(tmp_path, "edit-bad-icon.db")(_body)
+
+
+def test_edit_normalizes_legacy_bare_icon(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Walk dog", _daily_rule(), [child.id], ["morning"],
+        )
+        result = await edit_quest_definition(
+            database, created.definition.id, icon="dog"
+        )
+        assert result.definition.icon == "lucide:dog"
+        return None
+
+    _with_db(tmp_path, "edit-legacy-icon.db")(_body)
 
 
 @pytest.mark.parametrize("bad", [None, "daily", 42, {"rule_type": "daily"}])
@@ -535,18 +618,18 @@ def test_edit_title_description_icon(tmp_path) -> None:
             [child.id],
             ["morning"],
             description="Old description",
-            icon="mdi:old",
+            icon="lucide:old",
         )
         result = await edit_quest_definition(
             database,
             created.definition.id,
             title="  Floss  ",
             description="  New description  ",
-            icon="  mdi:new  ",
+            icon="  fa:new  ",
         )
         assert result.definition.title == "Floss"
         assert result.definition.description == "New description"
-        assert result.definition.icon == "mdi:new"
+        assert result.definition.icon == "fa:new"
         # Untouched fields survive the edit unchanged.
         assert result.definition.id == created.definition.id
         assert result.definition.schedule_rule_id == created.definition.schedule_rule_id
@@ -561,7 +644,7 @@ def test_edit_title_description_icon(tmp_path) -> None:
         assert stored is not None
         assert stored.title == "Floss"
         assert stored.description == "New description"
-        assert stored.icon == "mdi:new"
+        assert stored.icon == "fa:new"
         return None
 
     _with_db(tmp_path, "edit-metadata.db")(_body)
@@ -597,7 +680,7 @@ def test_edit_clears_optional_metadata(tmp_path) -> None:
             [child.id],
             ["morning"],
             description="Old",
-            icon="mdi:old",
+            icon="lucide:old",
         )
         result = await edit_quest_definition(
             database,
