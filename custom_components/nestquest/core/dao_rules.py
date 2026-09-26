@@ -13,8 +13,12 @@ Guardrail mapping:
 - ``schedule_rules`` deletion is delete-if-unreferenced: a rule still
   referenced by any quest definition is rejected (the done-condition),
   not cascaded.
-- ``quest_definitions`` has no delete path at all: definitions are
-  deactivated, never hard-deleted, and history must survive.
+- ``quest_definitions`` has exactly one delete path,
+  :meth:`QuestDefinitionsDao.delete_if_no_history` (owner decision
+  2026-09-26): a definition with NO completion event on any of its
+  instances is hard-deleted with its instances, assignees, windows and
+  (if unreferenced) rule; a definition WITH history is never deleted —
+  it is retired by deactivation, so history always survives.
 - Assignment is multi-assignee (D-008): :meth:`add_assignee` and
   :meth:`remove_assignee` change future instances only — the DAO writes
   the assignee table and nothing else; assignment edits never rewrite
@@ -25,8 +29,8 @@ Guardrail mapping:
   :meth:`QuestDefinitionsDao.add_assignee` (active child); no
   permission checks here, that is the Feature 09 gate's job.
 
-Concurrency: ``delete_rule_if_unreferenced`` and the assignee
-mutations perform their checks and writes inside one transaction under
+Concurrency: ``delete_rule_if_unreferenced``,
+``delete_if_no_history`` and the assignee mutations perform their checks and writes inside one transaction under
 the connection-scoped lock shared with :mod:`.dao_children`, so a
 definition referencing the rule (or an assignee appearing) cannot slip
 in between check and write on this connection.
@@ -608,26 +612,42 @@ class ScheduleRulesDao:
         """
         async with _connection_lock(self._database):
             async with self._database.transaction():
-                row = await self._database.fetch_one(
-                    "SELECT 1 FROM quest_definitions "
-                    "WHERE schedule_rule_id = ? LIMIT 1",
-                    (rule_id,),
+                return await _delete_rule_if_unreferenced_in_transaction(
+                    self._database, rule_id
                 )
-                if row is not None:
-                    return False
-                result = await self._database.execute(
-                    "DELETE FROM schedule_rules WHERE id = ?",
-                    (rule_id,),
-                )
-                return result.rowcount > 0
+
+
+async def _delete_rule_if_unreferenced_in_transaction(
+    database: NestQuestDatabase, rule_id: int
+) -> bool:
+    """Delete-if-unreferenced body; the CALLER holds lock + transaction.
+
+    Shared by :meth:`ScheduleRulesDao.delete_if_unreferenced` and
+    :meth:`QuestDefinitionsDao.delete_if_no_history`, so the rule's
+    reference check runs in whichever transaction removed the last
+    definition that could reference it.
+    """
+    row = await database.fetch_one(
+        "SELECT 1 FROM quest_definitions "
+        "WHERE schedule_rule_id = ? LIMIT 1",
+        (rule_id,),
+    )
+    if row is not None:
+        return False
+    result = await database.execute(
+        "DELETE FROM schedule_rules WHERE id = ?",
+        (rule_id,),
+    )
+    return result.rowcount > 0
 
 
 class QuestDefinitionsDao:
     """Typed async access to ``quest_definitions`` and its assignees.
 
-    No delete method exists: definitions are deactivated via
-    :meth:`set_active`, never hard-deleted, so completion history keeps
-    its references (feature guardrail).  Assignment is multi-assignee
+    The only delete method is :meth:`delete_if_no_history`: a
+    definition with completion history is never hard-deleted (it is
+    deactivated via :meth:`set_active` instead), so completion history
+    always keeps its references (feature guardrail, D-005).  Assignment is multi-assignee
     (D-008): the definition row carries no child; assignees live in
     ``quest_definition_assignees`` and are managed explicitly so the
     operations stay separately loggable and permission-gateable.
@@ -1139,6 +1159,54 @@ class QuestDefinitionsDao:
             (int(is_active), definition_id),
         )
         return result.rowcount
+
+    async def delete_if_no_history(self, definition_id: int) -> bool | None:
+        """Hard-delete a definition that has NO completion history.
+
+        Returns None when the definition does not exist, False when any
+        of its instances has a completion event (nothing is touched —
+        the caller retires it by deactivation instead), and True when it
+        was deleted: its ``quest_instances``, assignee and window rows,
+        the definition row, and its schedule rule if no other definition
+        references it.
+
+        The history check and every DELETE run inside ONE transaction
+        under the connection lock, so a completion recorded concurrently
+        cannot land between the check and the delete (D-005: an instance
+        with a completion event is never deleted).
+        """
+        async with _connection_lock(self._database):
+            async with self._database.transaction():
+                row = await self._database.fetch_one(
+                    "SELECT schedule_rule_id FROM quest_definitions "
+                    "WHERE id = ?",
+                    (definition_id,),
+                )
+                if row is None:
+                    return None
+                schedule_rule_id = row[0]
+                history = await self._database.fetch_one(
+                    "SELECT 1 FROM completion_events "
+                    "JOIN quest_instances "
+                    "ON quest_instances.id = completion_events.instance_id "
+                    "WHERE quest_instances.definition_id = ? LIMIT 1",
+                    (definition_id,),
+                )
+                if history is not None:
+                    return False
+                for statement in (
+                    "DELETE FROM quest_instances WHERE definition_id = ?",
+                    "DELETE FROM quest_definition_assignees "
+                    "WHERE definition_id = ?",
+                    "DELETE FROM quest_definition_windows "
+                    "WHERE definition_id = ?",
+                    "DELETE FROM quest_definitions WHERE id = ?",
+                ):
+                    await self._database.execute(statement, (definition_id,))
+                await _delete_rule_if_unreferenced_in_transaction(
+                    self._database, schedule_rule_id
+                )
+                return True
 
     async def add_assignee(
         self, definition_id: int, child_id: int

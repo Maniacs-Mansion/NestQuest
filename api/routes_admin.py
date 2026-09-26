@@ -200,6 +200,25 @@ integration's rollover listener shares:
   and the read-only-over-the-domain-tables guarantee all live in the
   core; the response reports how many transitions were published.
 
+The quest-definition DELETE route (task 3efb07b4) is the hybrid admin
+delete (owner decision 2026-09-26: "delete if there's no history,
+retire/deactivate if there is"):
+
+- ``DELETE /quest-definitions/{definition_id}`` is a thin adapter over
+  :func:`nestquest_core.quest_definitions.delete_quest_definition`.  A
+  definition with NO completion event on any instance is hard-deleted
+  (instances, assignees, windows, the row and its unreferenced rule, in
+  one core transaction); one WITH history is retired by deactivation.
+  Retirement preserves the definition row, schedule rule, assignees,
+  windows and ALL durable completion history; like any deactivation it
+  regenerates, so future UNCOMPLETED instances are cleared (rolling,
+  regenerable rows) and none are recreated while the definition is
+  inactive — the retired task stops generating and shows no open work.
+  Durable instance history lives only in the append-only
+  ``completion_events``.  The response reports which happened
+  (``deleted`` / ``retired``) and carries the retired definition, or
+  ``null`` when deleted.  An unknown id is 404.
+
 The occurrence-preview route (task 5f843564) lets the admin PWA's
 Definitions edit sheet show the next dates a rule fires on WITHOUT
 reimplementing the recurrence rules client-side:
@@ -451,6 +470,19 @@ class AdminQuestDefinitionListResponse(BaseModel):
     """The definitions list: every definition, active AND inactive, by id."""
 
     definitions: list[AdminQuestDefinitionResponse]
+
+
+class AdminQuestDefinitionDeleteResponse(BaseModel):
+    """The body ``DELETE /api/v1/admin/quest-definitions/{id}`` answers.
+
+    Exactly one of ``deleted`` / ``retired`` is true.  ``definition`` is
+    the retired (now inactive) definition, or null when it was deleted.
+    """
+
+    definition_id: int
+    deleted: bool
+    retired: bool
+    definition: AdminQuestDefinitionResponse | None
 
 
 class AdminChildCreateRequest(BaseModel):
@@ -1611,16 +1643,16 @@ async def admin_set_quest_definition_active(
     body: AdminQuestDefinitionActiveRequest,
     request: Request,
 ) -> AdminQuestDefinitionResponse:
-    """Deactivate (or reactivate) a definition; it is NEVER deleted.
+    """Deactivate (or reactivate) a definition; it is never deleted here.
 
     Requires a valid admin JWT (the router's shared
     :func:`~api.auth.require_admin` dependency — the ONE check; this
     handler performs NO auth of its own).  Thin adapter: ``is_active``
     goes straight to
     :func:`nestquest_core.quest_definitions.set_quest_definition_active`
-    — deactivation is the only removal path (the row, rule, assignees
-    and windows all survive, so completion history keeps its
-    references).  An unknown definition id is mapped to 404
+    — the row, rule, assignees and windows all survive, so completion
+    history keeps its references (the hybrid DELETE route is the only
+    hard-delete path, and only for a definition without history).  An unknown definition id is mapped to 404
     (:func:`_raise_quest_definition_error`); the body model already
     makes the core's real-bool check unreachable from this route.
     """
@@ -1632,6 +1664,44 @@ async def admin_set_quest_definition_active(
     except ValueError as error:
         _raise_quest_definition_error(error)
     return _quest_definition_response(bundle)
+
+
+@router.delete(
+    "/quest-definitions/{definition_id}",
+    summary="Delete a quest definition, or retire it if it has history",
+    response_model=AdminQuestDefinitionDeleteResponse,
+)
+async def admin_delete_quest_definition(
+    definition_id: int, request: Request
+) -> AdminQuestDefinitionDeleteResponse:
+    """Hard-delete a history-free definition; retire one with history.
+
+    Requires a valid admin JWT (the router's shared
+    :func:`~api.auth.require_admin` dependency — the ONE check; this
+    handler performs NO auth of its own).  Thin adapter: the id goes
+    straight to
+    :func:`nestquest_core.quest_definitions.delete_quest_definition`,
+    which decides delete-vs-retire atomically in the core.  An unknown
+    definition id is mapped to 404
+    (:func:`_raise_quest_definition_error`).
+    """
+    state: DatabaseState = request.app.state.db
+    try:
+        result = await core_quest_definitions.delete_quest_definition(
+            state.database, definition_id
+        )
+    except ValueError as error:
+        _raise_quest_definition_error(error)
+    return AdminQuestDefinitionDeleteResponse(
+        definition_id=result.definition_id,
+        deleted=result.deleted,
+        retired=result.retired,
+        definition=(
+            None
+            if result.definition is None
+            else _quest_definition_response(result.definition)
+        ),
+    )
 
 
 @router.get(
