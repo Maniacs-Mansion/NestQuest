@@ -916,3 +916,71 @@ def test_quest_complete_screen_returns_to_the_board_after_the_countdown() -> Non
     assert result["probe"]["countdown"] == "Returning to The Party in 1 seconds"
     # …and at zero the card has returned to the party board.
     assert result["location"] == "/nestquest"
+
+
+def test_quest_log_crest_keeps_its_shield_classes() -> None:
+    """PANEL-SPEC §3 header crest: a present child's crest renders as the
+    styled shield, not a bare span. Lit removes an attribute outright when
+    any interpolated part of it is ``nothing``, so a class written as
+    ``crest${away ? " away" : nothing}`` lost ``crest`` for every present
+    child and the header showed an unstyled sliver. The rendered markup
+    must carry ``class="crest"`` (present) and ``class="crest away"``
+    (away), each wrapping the face and initial."""
+    generated = _generate_dashboard(
+        {}, _three_child_states(), url="http://homeassistant.local/nestquest"
+    )
+    log_config = generated["views"][1]["cards"][0]
+    for slug, crest_class in (("ada", "crest"), ("bo", "crest away")):
+        result = _render_quest_log(
+            log_config,
+            _three_child_states(),
+            url=f"http://homeassistant.local/nestquest/{slug}",
+        )
+        header = result["html"][result["html"].index('<header class="header">') :]
+        crest = re.match(
+            r'<header class="header">\s*(?:<!--[^>]*-->\s*)*<span ([^>]*)>\s*'
+            r'<span class="crest-face">\s*<span class="initial">',
+            header,
+        )
+        assert crest is not None, header[:600]
+        assert f'class="{crest_class}"' in crest.group(1), crest.group(1)
+
+
+def test_quest_log_crest_matches_the_spec_geometry() -> None:
+    """PANEL-SPEC §3 header crest: 96x110 shield, 4px ring of
+    rgba(255,255,255,.22) around the --nq-p-crest face, 44px/700 display
+    initial in full-opacity white; away swaps only the face gradient.
+    jsdom cannot lay out, so this pins the stylesheet the rendered test
+    above shows is applied."""
+    source = QUEST_LOG.read_text(encoding="utf-8")
+
+    def rule(selector: str) -> str:
+        found = re.search(
+            r"\n  " + re.escape(selector) + r" \{(.*?)\n  \}", source, re.DOTALL
+        )
+        assert found is not None, selector
+        return found.group(1)
+
+    crest = rule(".crest")
+    for decl in (
+        "width: 96px;",
+        "height: 110px;",
+        "padding: 4px;",
+        "clip-path: ${unsafeCSS(SHIELD_CLIP)};",
+        "background: rgba(255, 255, 255, 0.22);",
+    ):
+        assert decl in crest, decl
+    face = rule(".crest-face")
+    assert "background: var(--nq-p-crest);" in face
+    assert "clip-path: ${unsafeCSS(SHIELD_CLIP)};" in face
+    initial = rule(".crest .initial")
+    for decl in (
+        "font-family: var(--nq-p-font-display);",
+        "font-size: 44px;",
+        "font-weight: 700;",
+        "color: #ffffff;",
+    ):
+        assert decl in initial, decl
+    assert "opacity" not in initial
+    away = rule(".crest.away .crest-face")
+    assert away.strip() == "background: var(--nq-p-crest-away);"
