@@ -6,6 +6,9 @@ lets legacy bare Lucide names render without a data migration.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from custom_components.nestquest.core.icons import (
@@ -70,6 +73,8 @@ def test_validate_icon_clears(value: str | None) -> None:
         "emoji:a&b",  # entity start
         "emoji:🐕\x00",  # control character
         "emoji:🐕\x07🐕",  # control character between emoji
+        "emoji:\ufeff",  # U+FEFF BOM: JS \s matches it, so reject to agree
+        "emoji:🐕\ufeff",  # trailing U+FEFF
         # Edge whitespace/controls are part of the value, never trimmed away.
         "emoji:🐕 ",  # trailing space
         "emoji:🐕\n",  # trailing newline
@@ -109,3 +114,39 @@ def test_validate_icon_rejects_non_strings(value: object) -> None:
 )
 def test_normalize_icon_for_read(value: str | None, expected: str | None) -> None:
     assert normalize_icon_for_read(value) == expected
+
+
+# The emoji-payload rule is duplicated in the generated JS resolver
+# (``isEmojiPayload`` in tools/icons/generate.mjs).  Both suites assert
+# this one table — admin/src/icons/registry.test.ts runs it through
+# resolveIcon — so a divergence between the runtimes fails a test.
+_EMOJI_PARITY_CASES = json.loads(
+    (
+        Path(__file__).parent.parent / "tools" / "icons" / "emoji-payload-cases.json"
+    ).read_text(encoding="utf-8")
+)["cases"]
+
+
+@pytest.mark.parametrize(
+    "case", _EMOJI_PARITY_CASES, ids=[case["why"] for case in _EMOJI_PARITY_CASES]
+)
+def test_validate_icon_emoji_verdict_matches_shared_table(case: dict) -> None:
+    value = "emoji:" + case["payload"]
+    if case["valid"]:
+        assert validate_icon(value) == value
+    else:
+        with pytest.raises(ValueError, match=r"^icon\b"):
+            validate_icon(value)
+
+
+def test_emoji_parity_table_covers_the_contract_edges() -> None:
+    payloads = {case["payload"]: case["valid"] for case in _EMOJI_PARITY_CASES}
+    assert payloads["\ufeff"] is False
+    assert payloads["🐕 "] is False
+    assert payloads["🐕\x00"] is False
+    assert payloads["<b>"] is False and payloads["a>b"] is False
+    assert payloads["a&b"] is False
+    assert payloads["⭐" * EMOJI_MAX_CODE_POINTS] is True
+    assert payloads["⭐" * (EMOJI_MAX_CODE_POINTS + 1)] is False
+    family = "👨\u200d👩\u200d👧\u200d👦"
+    assert payloads[family] is True

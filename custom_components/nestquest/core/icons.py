@@ -6,8 +6,9 @@ namespace is one of :data:`ICON_NAMESPACES`:
 - ``lucide:<name>`` / ``fa:<name>`` — ``<name>`` is a lowercase kebab
   name (ASCII ``[a-z0-9-]``, not starting or ending with ``-``).
 - ``emoji:<payload>`` — a short emoji string of at most
-  :data:`EMOJI_MAX_CODE_POINTS` code points, with no whitespace, no
-  control characters and none of ``<``, ``>``, ``&``.
+  :data:`EMOJI_MAX_CODE_POINTS` code points, with no whitespace (JS
+  ``\\s``, so including U+FEFF), no control characters and none of
+  ``<``, ``>``, ``&``.
 
 Rows written before namespacing hold a bare Lucide name (``dog``).
 :func:`validate_icon` (writes) normalizes such a legacy value to
@@ -33,7 +34,12 @@ ICON_NAMESPACES = frozenset(
 EMOJI_MAX_CODE_POINTS = 8
 
 _KEBAB_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
-_EMOJI_FORBIDDEN = frozenset("<>&")
+# U+FEFF (BOM / zero-width no-break space) is neither str.isspace() nor
+# ``Cc`` in Python, but JS ``\s`` matches it, so it is listed here to keep
+# this rule identical to the frontends' isEmojiPayload (/[\s<>&]|\p{Cc}/u).
+# Other format characters, notably the ZWJ U+200D that emoji sequences
+# need, stay valid in both runtimes.
+_EMOJI_FORBIDDEN = frozenset("<>&\ufeff")
 
 
 def _is_kebab_name(value: str) -> bool:

@@ -3,11 +3,17 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 // The offline generator is the only writer of both registry artefacts.
 import { OUTPUT_PATHS, REPO_ROOT, SOURCE_PATH, renderRegistry } from "../../../tools/icons/generate.mjs";
-import { FALLBACK_ICON, FA_ICONS, LUCIDE_ICONS, resolveIcon } from "./registry.generated";
+import { EMOJI_MAX_CODE_POINTS, FALLBACK_ICON, FA_ICONS, LUCIDE_ICONS, resolveIcon } from "./registry.generated";
 
 type Curated = { lucide: { name: string; label: string }[]; fa: { name: string; label: string }[] };
 
 const curated = JSON.parse(readFileSync(SOURCE_PATH, "utf8")) as Curated;
+
+type EmojiPayloadCase = { payload: string; valid: boolean; why: string };
+
+const emojiPayloadCases = JSON.parse(
+  readFileSync(join(REPO_ROOT, "tools", "icons", "emoji-payload-cases.json"), "utf8"),
+) as { cases: EmojiPayloadCase[] };
 
 describe("shared icon registry — one source of truth", () => {
   it("both committed artefacts are byte-identical to a fresh generation", async () => {
@@ -85,6 +91,24 @@ describe("resolveIcon", () => {
       expect(resolveIcon(value), String(value)).toBe(FALLBACK_ICON);
     }
     expect(FALLBACK_ICON).toEqual({ kind: "fallback", key: null });
+  });
+
+  // tests/test_core_icons.py asserts the same table against the backend's
+  // validate_icon, so the two emoji rules cannot drift apart silently.
+  it.each(emojiPayloadCases.cases)("emoji verdict matches the shared table: $why", ({ payload, valid }) => {
+    const value = `emoji:${payload}`;
+    expect(resolveIcon(value)).toEqual(valid ? { kind: "emoji", key: value, text: payload } : FALLBACK_ICON);
+  });
+
+  it("the shared emoji table covers the contract edges", () => {
+    const verdicts = new Map(emojiPayloadCases.cases.map(({ payload, valid }) => [payload, valid]));
+    expect(verdicts.get("\ufeff")).toBe(false);
+    expect(verdicts.get("👨\u200d👩\u200d👧\u200d👦")).toBe(true);
+    expect(verdicts.get("🐕 ")).toBe(false);
+    expect(verdicts.get("🐕\u0000")).toBe(false);
+    for (const markup of ["<b>", "a>b", "a&b"]) expect(verdicts.get(markup)).toBe(false);
+    expect(verdicts.get("⭐".repeat(EMOJI_MAX_CODE_POINTS))).toBe(true);
+    expect(verdicts.get("⭐".repeat(EMOJI_MAX_CODE_POINTS + 1))).toBe(false);
   });
 });
 
