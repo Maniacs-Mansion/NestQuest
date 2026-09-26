@@ -1,5 +1,48 @@
 # NestQuest Release Notes
 
+## Version 0.9.0 — 2026-09-26
+
+### Scope
+
+Minor release carrying expanded, customisable task icons — Lucide, Font Awesome
+Free and emoji — onto `main`.
+
+- **Namespaced icon keys:** a quest definition's `icon` now accepts
+  `lucide:<kebab-name>`, `fa:<kebab-name>` and `emoji:<grapheme>`. A legacy bare
+  name (e.g. `dog`) is read as `lucide:dog`, so existing rows keep working with
+  no stored-data migration. The strict write validator rejects an unknown
+  namespace, a malformed name, an over-cap or markup-bearing emoji payload, and
+  `javascript:`. (PRs #241, #249.)
+- **Shared icon registry:** one canonical set — the curated Lucide set plus a
+  curated Font Awesome Free solid subset — generates identical,
+  framework-agnostic registry modules for the admin and panel bundles, guarded by
+  a drift test. There is no CDN and no runtime fetch, and only the curated Font
+  Awesome glyphs are shipped. (PR #242.)
+- **Admin PWA picker:** the definition edit sheet offers the Lucide set, the
+  Font Awesome subset and an emoji input; a selection stores the namespaced key
+  and an existing namespaced or legacy icon pre-fills correctly. The definition
+  list renders all three forms with a fallback glyph. Editing a definition whose
+  stored icon is a legacy value no longer resubmits the unchanged icon.
+  (PRs #243, #250.)
+- **Kids' panel:** open quest cards render the definition's icon (Lucide stroked,
+  Font Awesome filled, emoji as text) with the existing star fallback; the sealed
+  card keeps its star/seal glyph. (PR #245.)
+- **Docs and attribution:** ADMIN-SPEC and PANEL-SPEC describe the namespaced
+  model; `THIRD-PARTY-NOTICES.md` records Font Awesome Free (icons CC BY 4.0,
+  fonts SIL OFL 1.1, code MIT) and Lucide (ISC). (PR #246.)
+
+### Upgrade note
+
+The database schema is unchanged at version **9**; no migration or backup step
+is needed beyond the 0.8.0 note. This release adds no runtime dependency — the
+icon path data is embedded in the shipped bundles at build time.
+
+### Requirements
+
+Home Assistant 2024.6.0 or newer. Install through HACS from the
+`Maniacs-Mansion/NestQuest` GitHub mirror (kept current by the Gitea push
+mirror).
+
 ## Version 0.8.0 — 2026-09-25
 
 ### Scope
