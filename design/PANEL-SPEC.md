@@ -95,7 +95,14 @@ collapse the column, the three-column rhythm is the layout.
 `--nq-p-quest-min-height` 116px, radius 12px, `--nq-p-card-open`, 1px
 `--nq-p-card-border`, `--nq-p-card-shadow`, padding 22px, 22px gap, row layout:
 
-1. **Icon tile** 64×64, radius 10px, `--nq-p-icon-tile`, Lucide glyph 34px white.
+1. **Icon tile** 64×64, radius 10px, `--nq-p-icon-tile`, glyph 34px white — the
+   definition's icon, resolved from its namespaced key (`ADMIN-SPEC.md` §3.3):
+   `lucide:<name>` draws the curated Lucide glyph **stroked** (fill none, stroke-width 2,
+   round caps and joins); `fa:<name>` draws the curated Font Awesome glyph **filled**;
+   `emoji:<grapheme>` renders the emoji **as text**. A legacy bare name resolves as
+   `lucide:<name>`. No icon, or any key that does not resolve (unknown namespace or name,
+   malformed emoji), falls back to the **star** glyph. Glyph data is bundled from the
+   shared registry — nothing is fetched at runtime.
 2. **Text** title 30px/700 Cinzel `--nq-p-ink`; meta 22px/600 Nunito
    `--nq-p-ink-secondary` reading `Due by <h:mm A>`. If past due:
    `Overdue · due <h:mm A>` in 22px/700 Cinzel uppercase, tracking .10em,
@@ -110,7 +117,9 @@ Both the card body and the button open the confirm dialog (§4). Press feedback:
 ### 3.3 Quest card — sealed
 
 `--nq-p-card-done`, `opacity: .82`, no shadow, **not tappable**. Icon tile
-`--nq-p-icon-tile-done` with the glyph in `--nq-p-ink-secondary`. Title 30px/700 Cinzel
+`--nq-p-icon-tile-done` with the glyph in `--nq-p-ink-secondary`. The sealed tile keeps
+the static star glyph — it does **not** render the definition icon — alongside the wax
+seal below. Title 30px/700 Cinzel
 `--nq-p-ink-muted` with `text-decoration: line-through`. Meta reads
 `Claimed <h:mm A>` 22px/600 Nunito `--nq-p-ink-secondary`.
 

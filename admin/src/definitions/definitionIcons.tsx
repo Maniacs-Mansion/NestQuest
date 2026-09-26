@@ -1,103 +1,90 @@
 /**
- * The shipped Lucide subset a definition's `icon` may name (ADMIN-SPEC §3.3).
- * Only these named imports are bundled — no CDN, no runtime fetch. The stored
- * value is the Lucide kebab-case name, so it stays meaningful to any surface.
+ * The icons a definition's `icon` may name (ADMIN-SPEC §3.3): the curated
+ * Lucide set, the curated Font Awesome Free solid subset, or an emoji. The
+ * names, labels and path data come from the shared icon registry
+ * (`src/icons/registry.generated.ts`, generated from
+ * `tools/icons/curated-icons.json`) — no CDN, no runtime fetch. The stored
+ * value is namespaced — `lucide:<name>`, `fa:<name>` or `emoji:<grapheme>` —
+ * and a legacy bare `<kebab-name>` still names the same Lucide entry.
  */
-import {
-  Apple,
-  Backpack,
-  Bath,
-  Bed,
-  Bike,
-  BookOpen,
-  Brush,
-  BrushCleaning,
-  Calendar,
-  Cat,
-  Clock,
-  CookingPot,
-  Dog,
-  Droplets,
-  Fish,
-  Gamepad2,
-  Heart,
-  House,
-  ListChecks,
-  Moon,
-  Music,
-  Pencil,
-  Recycle,
-  Shirt,
-  ShowerHead,
-  Smile,
-  Sofa,
-  SprayCan,
-  Sprout,
-  Star,
-  Sun,
-  Toilet,
-  Trash2,
-  Utensils,
-  Volleyball,
-  WashingMachine,
-  type LucideIcon,
-} from "lucide-react";
+import { GlyphSvg } from "../icons/GlyphSvg";
+import { FA_ICONS, LUCIDE_ICONS, resolveIcon, type GlyphIcon } from "../icons/registry.generated";
 import { TaskGlyph } from "./glyphs";
 
-export interface DefinitionIconEntry {
-  name: string;
-  label: string;
-  Icon: LucideIcon;
+export type DefinitionIconEntry = GlyphIcon;
+
+export const DEFINITION_ICONS: readonly DefinitionIconEntry[] = LUCIDE_ICONS;
+
+export const FA_DEFINITION_ICONS: readonly DefinitionIconEntry[] = FA_ICONS;
+
+const LUCIDE_PREFIX = "lucide:";
+const FA_PREFIX = "fa:";
+const EMOJI_PREFIX = "emoji:";
+
+/** The canonical stored key for a Lucide choice, e.g. `lucide:dog`. */
+export function lucideIconKey(name: string): string {
+  return `${LUCIDE_PREFIX}${name}`;
 }
 
-export const DEFINITION_ICONS: readonly DefinitionIconEntry[] = [
-  { name: "bed", label: "Bed", Icon: Bed },
-  { name: "bath", label: "Bath", Icon: Bath },
-  { name: "shower-head", label: "Shower", Icon: ShowerHead },
-  { name: "toilet", label: "Toilet", Icon: Toilet },
-  { name: "brush", label: "Brush", Icon: Brush },
-  { name: "smile", label: "Smile", Icon: Smile },
-  { name: "shirt", label: "Clothes", Icon: Shirt },
-  { name: "washing-machine", label: "Laundry", Icon: WashingMachine },
-  { name: "utensils", label: "Meal", Icon: Utensils },
-  { name: "cooking-pot", label: "Cooking", Icon: CookingPot },
-  { name: "apple", label: "Snack", Icon: Apple },
-  { name: "brush-cleaning", label: "Sweep", Icon: BrushCleaning },
-  { name: "spray-can", label: "Clean", Icon: SprayCan },
-  { name: "trash-2", label: "Bins", Icon: Trash2 },
-  { name: "recycle", label: "Recycling", Icon: Recycle },
-  { name: "sofa", label: "Tidy", Icon: Sofa },
-  { name: "house", label: "Home", Icon: House },
-  { name: "backpack", label: "School bag", Icon: Backpack },
-  { name: "book-open", label: "Reading", Icon: BookOpen },
-  { name: "pencil", label: "Homework", Icon: Pencil },
-  { name: "music", label: "Music", Icon: Music },
-  { name: "dog", label: "Dog", Icon: Dog },
-  { name: "cat", label: "Cat", Icon: Cat },
-  { name: "fish", label: "Fish", Icon: Fish },
-  { name: "sprout", label: "Plants", Icon: Sprout },
-  { name: "droplets", label: "Water", Icon: Droplets },
-  { name: "bike", label: "Bike", Icon: Bike },
-  { name: "volleyball", label: "Sport", Icon: Volleyball },
-  { name: "gamepad-2", label: "Games", Icon: Gamepad2 },
-  { name: "star", label: "Star", Icon: Star },
-  { name: "heart", label: "Heart", Icon: Heart },
-  { name: "sun", label: "Morning", Icon: Sun },
-  { name: "moon", label: "Bedtime", Icon: Moon },
-  { name: "clock", label: "Clock", Icon: Clock },
-  { name: "calendar", label: "Calendar", Icon: Calendar },
-  { name: "list-checks", label: "Checklist", Icon: ListChecks },
-];
-
-const BY_NAME = new Map(DEFINITION_ICONS.map((entry) => [entry.name, entry]));
-
-export function findDefinitionIcon(name: string | null): DefinitionIconEntry | null {
-  return name === null ? null : (BY_NAME.get(name) ?? null);
+/** The canonical stored key for a Font Awesome choice, e.g. `fa:dog`. */
+export function faIconKey(name: string): string {
+  return `${FA_PREFIX}${name}`;
 }
 
-/** A definition's glyph; no icon, or one outside the subset, gets the generic task glyph. */
+/**
+ * The stored key for typed emoji text, e.g. `emoji:🐶`. The raw text — not
+ * trimmed, as the backend rejects any whitespace — must pass the registry's
+ * emoji check (1-8 code points, no whitespace, control characters or `<`,
+ * `>`, `&`), else null. Only an empty field means "no icon".
+ */
+export function emojiIconKey(text: string): string | null {
+  const key = `${EMOJI_PREFIX}${text}`;
+  return resolveIcon(key).kind === "emoji" ? key : null;
+}
+
+/**
+ * The Lucide name an icon value refers to: `lucide:dog` and a legacy bare
+ * `dog` both give `dog`. Any other namespace (`fa:`, `emoji:`, unknown) and
+ * null give null — the admin has no Lucide entry for them.
+ */
+export function normalizeDefinitionIconName(value: string | null): string | null {
+  if (value === null) return null;
+  if (value.startsWith(LUCIDE_PREFIX)) return value.slice(LUCIDE_PREFIX.length);
+  return value.includes(":") ? null : value;
+}
+
+/** The Font Awesome name an `fa:<name>` value refers to; anything else gives null. */
+export function faIconName(value: string | null): string | null {
+  return value?.startsWith(FA_PREFIX) ? value.slice(FA_PREFIX.length) : null;
+}
+
+/** The emoji text an `emoji:<grapheme>` value holds; anything else gives "". */
+export function emojiIconText(value: string | null): string {
+  return value?.startsWith(EMOJI_PREFIX) ? value.slice(EMOJI_PREFIX.length) : "";
+}
+
+/**
+ * The curated glyph (Lucide or Font Awesome) an icon value resolves to via
+ * the shared parser; emoji, unknown and null values give null.
+ */
+export function findDefinitionIcon(value: string | null): DefinitionIconEntry | null {
+  const icon = resolveIcon(value);
+  return icon.kind === "lucide" || icon.kind === "fa" ? icon : null;
+}
+
+/**
+ * A definition's icon: a Lucide or Font Awesome glyph, an emoji drawn as
+ * text, or — for no icon or an unknown value — the generic task glyph.
+ */
 export function DefinitionIcon({ name, size = 17 }: { name: string | null; size?: number }) {
-  const entry = findDefinitionIcon(name);
-  if (!entry) return <TaskGlyph size={size} />;
-  return <entry.Icon size={size} aria-hidden="true" focusable="false" data-icon={entry.name} />;
+  const icon = resolveIcon(name);
+  if (icon.kind === "fallback") return <TaskGlyph size={size} />;
+  if (icon.kind === "emoji") {
+    return (
+      <span className="defs-emoji" style={{ fontSize: size }} aria-hidden="true" data-emoji={icon.text}>
+        {icon.text}
+      </span>
+    );
+  }
+  return <GlyphSvg icon={icon} size={size} />;
 }

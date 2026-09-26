@@ -135,7 +135,7 @@ async def test_admin_lists_active_and_inactive_definitions_with_full_shape(
                 "id": active_id,
                 "title": "Tidy the den",
                 "description": "Put everything back where it belongs.",
-                "icon": "toy-box",
+                "icon": "lucide:toy-box",
                 "is_active": True,
                 "skip_on_away": True,
                 "rule": {

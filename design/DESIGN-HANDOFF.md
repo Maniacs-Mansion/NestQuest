@@ -78,5 +78,6 @@ The panel speaks tabletop; the admin speaks plainly. Both sit on the same `quest
   decide before shipping the card.
 - No gamification is in scope. XP, levels, streaks and rarity were explicitly deferred,
   but the append-only event log already supports computing them later.
-- Icon per quest definition is chosen by the parent from a Lucide subset; the subset is
-  not yet defined (`ADMIN-SPEC.md` §3.3).
+- Icon per quest definition is chosen by the parent from curated Lucide and Font Awesome
+  Free sets or as an emoji, stored as a namespaced key (`lucide:`/`fa:`/`emoji:`) —
+  resolved 2026-09-26, see `ADMIN-SPEC.md` §3.3.

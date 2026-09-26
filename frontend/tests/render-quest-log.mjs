@@ -7,13 +7,14 @@
  * the card is mounted at the given URL (it resolves its child from the
  * pathname's last segment), after the optional probe wait one snapshot of
  * the render is taken mid-wait, then after the optional idle wait stdout
- * receives one JSON object {location, headline, countdown, html, probe} —
- * the final window pathname, the rendered title, the complete-screen
- * countdown text, the rendered shadow DOM, and the probe snapshot when
- * probe_ms was given. With tap_complete: <instance id> the harness taps that
- * card's Complete button, records whether the confirm dialog opened, taps
- * the dialog's Complete, and reports every hass.callService call as
- * {dialog_opened, service_calls}. The Python panel tests drive this harness so the
+ * receives one JSON object {location, headline, countdown, html, tiles,
+ * probe, tap} — the final window pathname, the rendered title, the
+ * complete-screen countdown text, the rendered shadow DOM, each quest
+ * card's icon tile, and the probe snapshot when probe_ms was given. With
+ * tap_complete: <instance id> the harness taps that card's Complete button,
+ * records whether the confirm dialog opened, taps the dialog's Complete, and
+ * reports every hass.callService call as tap: {dialog_opened, service_calls}.
+ * The Python panel tests drive this harness so the
  * assertions run against the exact bundle HACS ships.
  */
 import { readFileSync } from "node:fs";
@@ -81,6 +82,22 @@ const snapshot = () => ({
     element.shadowRoot.querySelector(".complete-countdown")?.textContent?.trim() ??
     "",
   html: element.shadowRoot.innerHTML,
+  // Each quest card's icon tile: the registry glyph it rendered (its
+  // data-icon key and svg fill), its text (an emoji), and whether it shows
+  // the static star (the star's polygon).
+  tiles: [...element.shadowRoot.querySelectorAll(".quest")].map((quest) => {
+    const tile = quest.querySelector(".tile");
+    const glyph = tile?.querySelector("[data-icon]");
+    return {
+      id: Number(quest.dataset.instanceId),
+      sealed: quest.classList.contains("sealed"),
+      icon: glyph?.getAttribute("data-icon") ?? null,
+      fill: glyph?.getAttribute("fill") ?? null,
+      paths: tile?.querySelectorAll("path").length ?? 0,
+      text: tile?.textContent?.trim() ?? "",
+      star: Boolean(tile?.querySelector("polygon")),
+    };
+  }),
 });
 
 let probe = null;
