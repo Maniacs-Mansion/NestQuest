@@ -3225,7 +3225,7 @@ const Rt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", ln = "polygon(50% 
         <span class="tile" aria-hidden="true">${st}</span>
         <div class="body">
           <span class="quest-title">${t.title}</span>
-          <span class="meta ${r.late ? "late" : g}">${r.text}</span>
+          <span class="${r.late ? "meta late" : "meta"}">${r.text}</span>
         </div>
         <button
           class="complete"
