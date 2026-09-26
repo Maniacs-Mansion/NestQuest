@@ -44,19 +44,56 @@ LOGGER = logging.getLogger(__name__)
 _RETRY_BACKOFF_SECONDS = 60.0
 
 
-def _delay_seconds(target: datetime.time, now: datetime.datetime) -> float:
-    """Seconds from ``now`` until the next occurrence of ``target``.
+#: Upper bound on the minute-by-minute search past a nonexistent wall
+#: time; real DST gaps are an hour, the largest ever skipped a day.
+_MAX_GAP_MINUTES = 2 * 24 * 60
 
-    ``target`` is a plain ``HH:MM`` time of day: the next wall-clock
-    occurrence strictly AFTER ``now`` (an equal time schedules for
-    tomorrow, so the just-run sweep is never instantly re-run).
+
+def _resolve_wall_time(
+    day: datetime.date, target: datetime.time, zone: datetime.tzinfo
+) -> datetime.datetime:
+    """The aware instant ``target`` (``HH:MM``) names on ``day`` in ``zone``.
+
+    A nonexistent wall time (inside a spring-forward gap) resolves to
+    the first valid wall minute at/after it — the gap's end, e.g. 02:30
+    on a 02:00→03:00 day becomes 03:00.  An ambiguous wall time (the
+    repeated fall-back hour) resolves to its FIRST occurrence
+    (``fold=0``).
     """
-    scheduled = now.replace(
-        hour=target.hour, minute=target.minute, second=0, microsecond=0
+    wall = datetime.datetime.combine(
+        day, datetime.time(target.hour, target.minute)
     )
-    if scheduled <= now:
-        scheduled += datetime.timedelta(days=1)
-    return (scheduled - now).total_seconds()
+    for _ in range(_MAX_GAP_MINUTES):
+        candidate = wall.replace(tzinfo=zone)
+        round_trip = candidate.astimezone(datetime.timezone.utc).astimezone(
+            zone
+        )
+        if round_trip.replace(tzinfo=None) == wall:
+            return candidate
+        wall += datetime.timedelta(minutes=1)
+    raise ValueError(f"no valid wall time at/after {target} on {day}")
+
+
+def _delay_seconds(target: datetime.time, now: datetime.datetime) -> float:
+    """Real seconds from ``now`` until the next occurrence of ``target``.
+
+    ``target`` is a plain ``HH:MM`` household time of day, resolved in
+    ``now``'s zone by :func:`_resolve_wall_time` (nonexistent → first
+    valid instant after the gap; ambiguous → first occurrence).  The
+    result is the next such instant strictly AFTER ``now`` (an equal
+    time schedules for tomorrow, so the just-run sweep is never
+    instantly re-run).  Both instants are compared and subtracted in
+    UTC: same-``tzinfo`` aware arithmetic is wall-clock arithmetic and
+    would be an hour off across a DST transition.
+    """
+    now_utc = now.astimezone(datetime.timezone.utc)
+    day = now.date()
+    while True:
+        scheduled = _resolve_wall_time(day, target, now.tzinfo)
+        scheduled_utc = scheduled.astimezone(datetime.timezone.utc)
+        if scheduled_utc > now_utc:
+            return (scheduled_utc - now_utc).total_seconds()
+        day += datetime.timedelta(days=1)
 
 
 class MissedSweepScheduler:
