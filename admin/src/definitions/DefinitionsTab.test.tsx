@@ -121,6 +121,8 @@ function fakeApi(initial: QuestDefinition[]) {
   const calls: Call[] = [];
   let nextWrite: Response | null = null;
   let preview: PreviewHandler = async () => jsonResponse({ dates: [] });
+  // Definitions with completion history: the API retires these on DELETE.
+  const withHistory = new Set<number>();
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const path = new URL(String(input), "http://localhost").pathname;
     const method = init.method ?? "GET";
@@ -187,6 +189,16 @@ function fakeApi(initial: QuestDefinition[]) {
       );
       return jsonResponse(definitions.find((d) => d.id === id));
     }
+    if (method === "DELETE" && match) {
+      const id = Number(match[1]);
+      if (withHistory.has(id)) {
+        definitions = definitions.map((d) => (d.id === id ? { ...d, is_active: false } : d));
+        const retired = definitions.find((d) => d.id === id);
+        return jsonResponse({ definition_id: id, deleted: false, retired: true, definition: retired });
+      }
+      definitions = definitions.filter((d) => d.id !== id);
+      return jsonResponse({ definition_id: id, deleted: true, retired: false, definition: null });
+    }
     return jsonResponse({ detail: "unexpected" }, 500);
   });
   return {
@@ -202,6 +214,9 @@ function fakeApi(initial: QuestDefinition[]) {
         .length,
     failNextWrite: (response: Response) => {
       nextWrite = response;
+    },
+    markHistory: (id: number) => {
+      withHistory.add(id);
     },
   };
 }
@@ -578,14 +593,15 @@ describe("DefinitionsTab", () => {
     fireEvent.click(screen.getByTestId("definition-10"));
     const s = sheet();
     const title = within(s).getByRole("textbox", { name: "Title" });
-    const save = within(s).getByRole("button", { name: "Save changes" });
+    // The edit sheet's last focusable control is its Delete button.
+    const last = within(s).getByRole("button", { name: "Delete task" });
 
-    save.focus();
+    last.focus();
     fireEvent.keyDown(s, { key: "Tab" });
     expect(document.activeElement).toBe(title);
 
     fireEvent.keyDown(s, { key: "Tab", shiftKey: true });
-    expect(document.activeElement).toBe(save);
+    expect(document.activeElement).toBe(last);
   });
 
   it("Escape does not close the sheet while saving", async () => {
@@ -692,6 +708,73 @@ describe("DefinitionsTab", () => {
     expect((await screen.findByTestId("definitions-error")).textContent).toContain(
       "Your account is not in the nestquest-admins group.",
     );
+  });
+
+  it("the Delete control is only offered for an existing task", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    expect(within(sheet()).queryByRole("button", { name: "Delete task" })).toBeNull();
+    fireEvent.click(within(sheet()).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByTestId("definition-10"));
+    expect(within(sheet()).getByRole("button", { name: "Delete task" })).toBeTruthy();
+  });
+
+  it("Delete asks first, explaining delete-vs-retire; Go back writes nothing", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByTestId("definition-10"));
+    fireEvent.click(within(sheet()).getByRole("button", { name: "Delete task" }));
+    const confirm = screen.getByTestId("delete-confirm");
+    expect(confirm.textContent).toContain("If it has no completion history it is deleted");
+    expect(confirm.textContent).toContain("otherwise it is retired");
+    expect(api.writes()).toHaveLength(0);
+    fireEvent.click(within(confirm).getByRole("button", { name: "Go back" }));
+    expect(screen.queryByTestId("delete-confirm")).toBeNull();
+    expect(api.writes()).toHaveLength(0);
+  });
+
+  it("confirming Delete on a task without history removes its row", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByTestId("definition-10"));
+    fireEvent.click(within(sheet()).getByRole("button", { name: "Delete task" }));
+    fireEvent.click(
+      within(screen.getByTestId("delete-confirm")).getByRole("button", { name: "Delete task" }),
+    );
+    await waitFor(() => expect(screen.queryByTestId("definition-10")).toBeNull());
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(api.writes()).toEqual([
+      { method: "DELETE", path: "/api/v1/admin/quest-definitions/10", body: null },
+    ]);
+    expect(screen.getByTestId("definition-11")).toBeTruthy();
+  });
+
+  it("confirming Delete on a task with history shows it retired (inactive)", async () => {
+    await renderReady();
+    api.markHistory(10);
+    fireEvent.click(screen.getByTestId("definition-10"));
+    fireEvent.click(within(sheet()).getByRole("button", { name: "Delete task" }));
+    fireEvent.click(
+      within(screen.getByTestId("delete-confirm")).getByRole("button", { name: "Delete task" }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const row = screen.getByTestId("definition-10");
+    expect(row.className).toContain("defs-row--inactive");
+    expect(meta(row)).toContain("· inactive");
+    expect(api.writes().map((c) => c.method)).toEqual(["DELETE"]);
+  });
+
+  it("a failed Delete shows the API's detail and keeps the sheet open", async () => {
+    await renderReady();
+    api.failNextWrite(jsonResponse({ detail: "Quest definition not found" }, 404));
+    fireEvent.click(screen.getByTestId("definition-10"));
+    fireEvent.click(within(sheet()).getByRole("button", { name: "Delete task" }));
+    fireEvent.click(
+      within(screen.getByTestId("delete-confirm")).getByRole("button", { name: "Delete task" }),
+    );
+    expect((await screen.findByTestId("sheet-error")).textContent).toBe(
+      "Quest definition not found",
+    );
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByTestId("definition-10")).toBeTruthy();
   });
 
   it("scroll column carries the 92px bottom padding", async () => {

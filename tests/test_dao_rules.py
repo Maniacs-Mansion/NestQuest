@@ -996,8 +996,9 @@ def test_definition_set_active_missing_returns_zero(tmp_path) -> None:
     assert _with_db(tmp_path, "definition-set-active-missing.db")(_body) == 0
 
 
-def test_definition_no_delete_method_exists(tmp_path) -> None:
-    """Guardrail: definitions are deactivated, never hard-deleted."""
+def test_definition_only_delete_method_is_history_guarded(tmp_path) -> None:
+    """Guardrail: the ONLY definition delete path is the history-guarded
+    one (owner decision 2026-09-26); there is no unconditional delete."""
     async def _body(database, rules, definitions, children, child):
         import inspect
 
@@ -1008,7 +1009,9 @@ def test_definition_no_delete_method_exists(tmp_path) -> None:
             )
         }
         assert "delete" not in methods
-        assert not any(name.startswith("delete") for name in methods)
+        assert {
+            name for name in methods if name.startswith("delete")
+        } == {"delete_if_no_history"}
         return methods
 
     _with_db(tmp_path, "definition-no-delete.db")(_body)
