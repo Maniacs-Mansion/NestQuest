@@ -249,7 +249,7 @@ function buildBody(draft: Draft, keepsAssignees = false): DefinitionCreateBody |
   if (!title) return "Give the task a title.";
   if (draft.assigneeIds.length === 0 && !keepsAssignees) return "Assign at least one child.";
   if (draft.windows.length === 0) return "Pick at least one window.";
-  if (draft.emoji.trim() && draft.icon === null) {
+  if (draft.emoji && draft.icon === null) {
     return "Enter a single emoji (no spaces or < > &), or clear the emoji field.";
   }
   const rule = buildRule(draft);
@@ -590,10 +590,10 @@ function EditSheet({
               <button
                 type="button"
                 role="radio"
-                aria-checked={draft.icon === null && !draft.emoji.trim()}
+                aria-checked={draft.icon === null && !draft.emoji}
                 aria-label="No icon"
                 className={
-                  draft.icon === null && !draft.emoji.trim() ? "defs-icon defs-icon--on" : "defs-icon"
+                  draft.icon === null && !draft.emoji ? "defs-icon defs-icon--on" : "defs-icon"
                 }
                 onClick={() => update({ icon: null, emoji: "" })}
               >

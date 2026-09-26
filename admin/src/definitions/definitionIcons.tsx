@@ -32,12 +32,13 @@ export function faIconKey(name: string): string {
 }
 
 /**
- * The stored key for typed emoji text, e.g. `emoji:🐶`. Edge whitespace is
- * trimmed; the rest must pass the registry's emoji check (1-8 code points,
- * no whitespace, control characters or `<`, `>`, `&`), else null.
+ * The stored key for typed emoji text, e.g. `emoji:🐶`. The raw text — not
+ * trimmed, as the backend rejects any whitespace — must pass the registry's
+ * emoji check (1-8 code points, no whitespace, control characters or `<`,
+ * `>`, `&`), else null. Only an empty field means "no icon".
  */
 export function emojiIconKey(text: string): string | null {
-  const key = `${EMOJI_PREFIX}${text.trim()}`;
+  const key = `${EMOJI_PREFIX}${text}`;
   return resolveIcon(key).kind === "emoji" ? key : null;
 }
 

@@ -1282,10 +1282,9 @@ describe("DefinitionsTab Font Awesome and emoji icons", () => {
 
   it("builds and validates emoji keys like the registry", () => {
     expect(emojiIconKey("🐶")).toBe("emoji:🐶");
-    expect(emojiIconKey(" 🐶 ")).toBe("emoji:🐶");
     expect(emojiIconKey("👨‍👩‍👧‍👦")).toBe("emoji:👨‍👩‍👧‍👦");
     expect(emojiIconKey("⭐".repeat(8))).toBe(`emoji:${"⭐".repeat(8)}`);
-    for (const bad of ["", "   ", "⭐".repeat(9), "a b", "<b>", "a&b", "🐶\u0007"]) {
+    for (const bad of ["", "   ", " 🐶 ", "🐶 ", "\t🐶", "⭐".repeat(9), "a b", "<b>", "a&b", "🐶\u0007"]) {
       expect(emojiIconKey(bad), JSON.stringify(bad)).toBeNull();
     }
     expect(faIconName("fa:dog")).toBe("dog");
@@ -1335,7 +1334,7 @@ describe("DefinitionsTab Font Awesome and emoji icons", () => {
     fireEvent.click(screen.getByRole("button", { name: "New" }));
     const s = sheet();
     fillNewTask(s);
-    fireEvent.change(emojiInput(s), { target: { value: " 🐶 " } });
+    fireEvent.change(emojiInput(s), { target: { value: "🐶" } });
     expect(radio(s, "Icon", "No icon").getAttribute("aria-checked")).toBe("false");
 
     await save(s);
@@ -1358,7 +1357,7 @@ describe("DefinitionsTab Font Awesome and emoji icons", () => {
     expect(rowGlyph(await screen.findByTestId("definition-99"))).toBe("lucide:dog");
   });
 
-  for (const bad of ["a b", "<b>", "a&b", "⭐".repeat(9)]) {
+  for (const bad of [" 🐶 ", "🐶 ", "   ", "a b", "<b>", "a&b", "⭐".repeat(9)]) {
     it(`an invalid emoji entry ${JSON.stringify(bad)} is not saved`, async () => {
       await renderReady([{ ...BRUSH, id: 50, icon: "lucide:dog" }]);
       fireEvent.click(screen.getByTestId("definition-50"));
