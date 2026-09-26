@@ -1,5 +1,37 @@
 # NestQuest Release Notes
 
+## Version 0.9.4 — 2026-09-26
+
+### Scope
+
+Patch release fixing the admin timezone control that shipped in 0.9.3.
+
+- **Clearing the timezone now persists:** in 0.9.3 the Settings screen
+  re-detected the browser zone whenever the timezone field was empty, so an admin
+  could not leave it empty ("use the API host's local time") — closing and
+  reopening the screen set it again. A new persisted, API-only
+  `timezone_configured` marker (default `false`) now distinguishes "never set"
+  from "admin chose empty": the one-time auto-set runs only when the timezone is
+  empty AND the marker is false, and any saved timezone change — including
+  clearing it — sets the marker, so an explicit empty choice survives. (PRs #266,
+  #268.)
+- Nothing else changes: the `timezone` setting, its auto-set from the browser zone
+  on a fresh install, the Add/Save flow, and the rest of the Settings screen are
+  as in 0.9.3.
+
+### Upgrade note
+
+The database schema is unchanged at version **9**; no migration or backup step is
+needed. Settings stored before this release have no `timezone_configured` value
+and read it as `false`, so an install whose timezone is empty will auto-set the
+browser zone once on the next open — after which the choice persists.
+
+### Requirements
+
+Home Assistant 2024.6.0 or newer. Install through HACS from the
+`Maniacs-Mansion/NestQuest` GitHub mirror (kept current by the Gitea push
+mirror).
+
 ## Version 0.9.3 — 2026-09-26
 
 ### Scope

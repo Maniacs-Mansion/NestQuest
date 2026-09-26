@@ -236,6 +236,25 @@ def test_from_options_reads_and_resiliently_defaults_timezone() -> None:
     )
 
 
+def test_settings_timezone_configured_defaults_false_and_is_strict() -> None:
+    assert _settings.NestQuestSettings().timezone_configured is False
+    assert _settings.NestQuestSettings.from_options({}).timezone_configured is False
+    assert (
+        _settings.NestQuestSettings.from_options(
+            {"timezone_configured": True}
+        ).timezone_configured
+        is True
+    )
+    for value in ("true", 1, None):
+        with pytest.raises(ValueError, match="timezone_configured"):
+            _settings.NestQuestSettings(timezone_configured=value)
+        if value is not None:
+            with pytest.raises(ValueError):
+                _settings.NestQuestSettings.from_options(
+                    {"timezone_configured": value}
+                )
+
+
 # --- the missed-sweep scheduler ----------------------------------------------
 
 

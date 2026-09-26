@@ -19,6 +19,12 @@ export interface HouseholdSettings {
   celebration_enabled: boolean;
   /** IANA zone name (e.g. "America/New_York"); "" means the API host's local time. */
   timezone: string;
+  /**
+   * True once the admin explicitly chose `timezone` (even ""); false on a
+   * fresh install, where the screen auto-sets the browser's zone. API-only:
+   * never shown in the form.
+   */
+  timezone_configured: boolean;
 }
 
 /** Only the supplied fields are updated; the API answers with all of them. */

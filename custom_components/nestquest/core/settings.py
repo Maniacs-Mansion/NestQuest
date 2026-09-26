@@ -49,6 +49,7 @@ from .const import (
     CONF_MORNING_SUMMARY_TIME,
     CONF_NOTIFY_TARGET,
     CONF_TIMEZONE,
+    CONF_TIMEZONE_CONFIGURED,
     DEFAULT_AFTERNOON_REMINDER_TIME,
     DEFAULT_AUTOMATION_ENABLED,
     DEFAULT_DAY_ROLLOVER_TIME,
@@ -56,6 +57,7 @@ from .const import (
     DEFAULT_HORIZON_DAYS,
     DEFAULT_MORNING_SUMMARY_TIME,
     DEFAULT_TIMEZONE,
+    DEFAULT_TIMEZONE_CONFIGURED,
     LOGGER,
     TIME_PATTERN,
 )
@@ -241,6 +243,12 @@ _FIELDS: tuple[tuple[str, str, Any, Callable[[Any], Any]], ...] = (
         _resolve_bool,
     ),
     ("timezone", CONF_TIMEZONE, DEFAULT_TIMEZONE, _resolve_timezone),
+    (
+        "timezone_configured",
+        CONF_TIMEZONE_CONFIGURED,
+        DEFAULT_TIMEZONE_CONFIGURED,
+        _resolve_bool,
+    ),
 )
 
 
@@ -271,6 +279,10 @@ class NestQuestSettings:
     end_of_day_report_enabled: bool = DEFAULT_AUTOMATION_ENABLED
     celebration_enabled: bool = DEFAULT_AUTOMATION_ENABLED
     timezone: str = DEFAULT_TIMEZONE
+    #: ``True`` once the admin explicitly chose :attr:`timezone` (even
+    #: the empty host-local value); ``False`` on a fresh install, where
+    #: the admin UI may auto-set the browser's zone.
+    timezone_configured: bool = DEFAULT_TIMEZONE_CONFIGURED
 
     def __post_init__(self) -> None:
         # Validate STRICTLY at construction so a hand-built instance
@@ -303,6 +315,7 @@ class NestQuestSettings:
             "afternoon_reminder_enabled",
             "end_of_day_report_enabled",
             "celebration_enabled",
+            "timezone_configured",
         ):
             value = getattr(self, name)
             if not isinstance(value, bool):
