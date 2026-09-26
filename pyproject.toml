@@ -1,6 +1,6 @@
 [project]
 name = "nestquest"
-version = "0.9.2"
+version = "0.9.3"
 description = "NestQuest Home Assistant Integration"
 readme = "README.md"
 requires-python = ">=3.11"
