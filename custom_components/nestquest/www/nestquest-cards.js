@@ -1765,7 +1765,7 @@ const Nt = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ye = "polygon(50% 
     flex: none;
     width: 96px;
     height: 110px;
-    padding: 3px;
+    padding: 4px;
     clip-path: ${v(Nt)};
     background: rgba(255, 255, 255, 0.22);
   }
@@ -3091,7 +3091,7 @@ class un extends A {
     const e = this._childSlug(), n = t.kind === "away", i = n ? t.name : this._childName(e) ?? (e ? Y(e) : null), { due: r, completed: o } = this._childCounts(e), l = this._remaining(), a = this._partyCounts(), p = i ? `${i}'s Quest Log` : "Quest Log", u = (i?.charAt(0) || "?").toUpperCase();
     return d`
       <header class="header">
-        <span class="crest${n ? " away" : g}" aria-hidden="true">
+        <span class="crest${n ? " away" : ""}" aria-hidden="true">
           <span class="crest-face">
             <span class="initial">${u}</span>
           </span>
