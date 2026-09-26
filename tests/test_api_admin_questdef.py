@@ -35,6 +35,7 @@ for malformed bodies.
 """
 from __future__ import annotations
 
+import datetime
 import importlib
 from types import SimpleNamespace
 
@@ -223,7 +224,7 @@ async def test_create_persists_definition_with_assignees_and_windows(
     }
     assert payload["title"] == "Tidy the den"
     assert payload["description"] == "Put everything back where it belongs."
-    assert payload["icon"] == "toy-box"
+    assert payload["icon"] == "lucide:toy-box"
     assert payload["is_active"] is True
     assert payload["skip_on_away"] is True
     assert payload["rule"] == _weekly_rule_dict()
@@ -245,7 +246,7 @@ async def test_create_persists_definition_with_assignees_and_windows(
     assert stored.definition.description == (
         "Put everything back where it belongs."
     )
-    assert stored.definition.icon == "toy-box"
+    assert stored.definition.icon == "lucide:toy-box"
     assert stored.definition.is_active is True
     assert stored.rule.to_dict() == _weekly_rule_dict()
     assert sorted(child.id for child in stored.assignees) == [ada, bo]
@@ -396,7 +397,7 @@ async def test_edit_persists_supplied_fields_and_leaves_omitted_untouched(
     assert stored.definition.description == (
         "Put everything back where it belongs."
     )
-    assert stored.definition.icon == "toy-box"
+    assert stored.definition.icon == "lucide:toy-box"
     assert stored.rule.to_dict() == _weekly_rule_dict()
     # assignee_child_ids was omitted: the assignees are untouched.
     assert sorted(child.id for child in stored.assignees) == [ada, bo]
@@ -466,6 +467,89 @@ async def test_edit_can_clear_description_and_icon_explicitly(
     assert stored.definition.icon is None
     assert stored.definition.title == "Tidy the den"
     assert stored.rule.to_dict() == _weekly_rule_dict()
+
+
+async def test_legacy_bare_icon_reads_back_namespaced(
+    admin_questdefs: SimpleNamespace,
+) -> None:
+    """A row stored with a pre-namespacing bare icon reads as ``lucide:``.
+
+    The row is rewritten through the DAO (bypassing the write-side
+    validation, as a row from before namespacing would be) and then read
+    back through BOTH consumers: the admin definition response and the
+    kids' panel snapshot's per-instance ``icon``.
+    """
+    client = admin_questdefs.client
+    ada = (await _create_children(client, ("Ada",)))[0]
+    today = datetime.date.today().isoformat()
+    created = await client.post(
+        "/api/v1/admin/quest-definitions",
+        json={
+            "title": "Walk the dog",
+            "rule": {"rule_type": "daily", "start_date": today},
+            "assignee_child_ids": [ada],
+            "windows": ["evening"],
+            "icon": "fa:dog",
+        },
+        headers=_admin_headers(),
+    )
+    assert created.status_code == 201
+    definition_id = created.json()["id"]
+
+    await _dao_rules.QuestDefinitionsDao(
+        admin_questdefs.database
+    ).edit_definition(definition_id, icon="dog")
+    stored = (await _definitions_by_id(admin_questdefs.database))[
+        definition_id
+    ]
+    assert stored.definition.icon == "dog"
+
+    listed = await client.get(
+        "/api/v1/admin/quest-definitions", headers=_admin_headers()
+    )
+    assert listed.status_code == 200
+    [definition] = [
+        d for d in listed.json()["definitions"] if d["id"] == definition_id
+    ]
+    assert definition["icon"] == "lucide:dog"
+
+    panel = await client.get(
+        "/api/v1/panel/snapshot",
+        headers={"Authorization": "Bearer admin-test-panel-token"},
+    )
+    assert panel.status_code == 200
+    [child] = panel.json()["children"]
+    icons = {
+        instance["icon"]
+        for instance in child["instances"]
+        if instance["definition_id"] == definition_id
+    }
+    assert icons == {"lucide:dog"}
+
+
+@pytest.mark.parametrize(
+    "icon", ["foo:dog", "lucide:", "emoji:<b>", "javascript:alert(1)"]
+)
+async def test_create_invalid_icon_is_422_naming_icon(
+    admin_questdefs: SimpleNamespace, icon: str
+) -> None:
+    """An invalid icon key is a 422 whose detail names the icon field."""
+    client = admin_questdefs.client
+    ada = (await _create_children(client, ("Ada",)))[0]
+    response = await client.post(
+        "/api/v1/admin/quest-definitions",
+        json={
+            "title": "Walk the dog",
+            "rule": _weekly_rule_body(),
+            "assignee_child_ids": [ada],
+            "windows": ["morning"],
+            "icon": icon,
+        },
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 422
+    assert "icon" in str(response.json()["detail"])
+    assert await _definitions_by_id(admin_questdefs.database) == {}
 
 
 async def test_edit_unknown_definition_is_404(
