@@ -43,7 +43,12 @@ import {
   PlusGlyph,
   TaskGlyph,
 } from "./glyphs";
-import { DEFINITION_ICONS, DefinitionIcon } from "./definitionIcons";
+import {
+  DEFINITION_ICONS,
+  DefinitionIcon,
+  lucideIconKey,
+  normalizeDefinitionIconName,
+} from "./definitionIcons";
 import "./DefinitionsTab.css";
 
 /** ADMIN-SPEC §1: every scroll column ends with 92px so content clears the tab bar. */
@@ -576,20 +581,23 @@ function EditSheet({
               >
                 <TaskGlyph size={18} />
               </button>
-              {DEFINITION_ICONS.map(({ name, label, Icon }) => (
-                <button
-                  key={name}
-                  type="button"
-                  role="radio"
-                  aria-checked={draft.icon === name}
-                  aria-label={label}
-                  data-icon-option={name}
-                  className={draft.icon === name ? "defs-icon defs-icon--on" : "defs-icon"}
-                  onClick={() => update({ icon: name })}
-                >
-                  <Icon size={18} aria-hidden="true" focusable="false" />
-                </button>
-              ))}
+              {DEFINITION_ICONS.map(({ name, label, Icon }) => {
+                const on = normalizeDefinitionIconName(draft.icon) === name;
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    role="radio"
+                    aria-checked={on}
+                    aria-label={label}
+                    data-icon-option={name}
+                    className={on ? "defs-icon defs-icon--on" : "defs-icon"}
+                    onClick={() => update({ icon: lucideIconKey(name) })}
+                  >
+                    <Icon size={18} aria-hidden="true" focusable="false" />
+                  </button>
+                );
+              })}
             </div>
           </Field>
 

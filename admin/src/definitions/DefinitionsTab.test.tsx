@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import DefinitionsTab from "./DefinitionsTab";
-import { DEFINITION_ICONS, DefinitionIcon } from "./definitionIcons";
+import { DEFINITION_ICONS, DefinitionIcon, normalizeDefinitionIconName } from "./definitionIcons";
 import type { AdminChild, DefinitionRule, QuestDefinition } from "../api/definitions";
 import { storeTokens } from "../auth/oidc";
 
@@ -1052,7 +1052,7 @@ describe("DefinitionsTab icon picker", () => {
 
     expect(api.writes()).toHaveLength(1);
     expect(api.writes()[0].method).toBe("POST");
-    expect((api.writes()[0].body as { icon: string }).icon).toBe("bed");
+    expect((api.writes()[0].body as { icon: string }).icon).toBe("lucide:bed");
     expect(rowIcon(await screen.findByTestId("definition-99"))).toBe("bed");
   });
 
@@ -1073,7 +1073,7 @@ describe("DefinitionsTab icon picker", () => {
     const { method, path, body } = api.writes()[0];
     expect(method).toBe("PATCH");
     expect(path).toBe("/api/v1/admin/quest-definitions/11");
-    expect((body as { icon: string }).icon).toBe("trash-2");
+    expect((body as { icon: string }).icon).toBe("lucide:trash-2");
     // Inactive "Old" stays assigned: the unchanged selection is still omitted.
     expect(body).not.toHaveProperty("assignee_child_ids");
     await waitFor(() => expect(rowIcon(screen.getByTestId("definition-11"))).toBe("trash-2"));
@@ -1116,6 +1116,94 @@ describe("DefinitionsTab icon picker", () => {
     expect((api.writes()[0].body as { icon: string }).icon).toBe("rocket-ship-9000");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(rowIcon(screen.getByTestId("definition-20"))).toBeNull();
+  });
+});
+
+describe("DefinitionsTab namespaced icons", () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  function rowIcon(row: HTMLElement): string | null {
+    const svg = row.querySelector(".defs-row-glyph svg");
+    expect(svg).not.toBeNull();
+    return svg!.getAttribute("data-icon");
+  }
+
+  function iconRadio(s: HTMLElement, label: string): HTMLElement {
+    return within(within(s).getByRole("radiogroup", { name: "Icon" })).getByRole("radio", {
+      name: label,
+    });
+  }
+
+  it("normalizes lucide-namespaced and legacy bare values to one Lucide name", () => {
+    expect(normalizeDefinitionIconName("lucide:dog")).toBe("dog");
+    expect(normalizeDefinitionIconName("dog")).toBe("dog");
+    expect(normalizeDefinitionIconName("fa:dog")).toBeNull();
+    expect(normalizeDefinitionIconName("emoji:🐶")).toBeNull();
+    expect(normalizeDefinitionIconName("mystery:dog")).toBeNull();
+    expect(normalizeDefinitionIconName(null)).toBeNull();
+  });
+
+  for (const icon of ["lucide:dog", "dog"]) {
+    it(`renders and selects the Dog glyph for ${icon}`, async () => {
+      await renderReady([{ ...BRUSH, id: 30, icon }]);
+      const row = screen.getByTestId("definition-30");
+      expect(rowIcon(row)).toBe("dog");
+
+      fireEvent.click(row);
+      const s = sheet();
+      expect(iconRadio(s, "Dog").getAttribute("aria-checked")).toBe("true");
+      expect(iconRadio(s, "Dog").className).toContain("defs-icon--on");
+      expect(iconRadio(s, "No icon").getAttribute("aria-checked")).toBe("false");
+    });
+  }
+
+  for (const icon of ["fa:dog", "emoji:🐶", "mystery:dog"]) {
+    it(`renders the fallback tile and selects nothing for ${icon}`, async () => {
+      await renderReady([{ ...BRUSH, id: 31, icon }]);
+      const row = screen.getByTestId("definition-31");
+      expect(rowIcon(row)).toBeNull();
+
+      fireEvent.click(row);
+      const s = sheet();
+      const group = within(s).getByRole("radiogroup", { name: "Icon" });
+      for (const radio of within(group).getAllByRole("radio")) {
+        expect(radio.getAttribute("aria-checked")).toBe("false");
+      }
+    });
+  }
+
+  it("tapping a Lucide choice on a namespaced task PATCHes lucide:<name>, and No icon clears it", async () => {
+    await renderReady([{ ...BRUSH, id: 32, icon: "lucide:dog" }]);
+    fireEvent.click(screen.getByTestId("definition-32"));
+    let s = sheet();
+    fireEvent.click(iconRadio(s, "Cat"));
+    expect(iconRadio(s, "Cat").getAttribute("aria-checked")).toBe("true");
+    expect(iconRadio(s, "Dog").getAttribute("aria-checked")).toBe("false");
+
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+    expect((api.writes()[0].body as { icon: string }).icon).toBe("lucide:cat");
+    await waitFor(() => expect(rowIcon(screen.getByTestId("definition-32"))).toBe("cat"));
+
+    fireEvent.click(screen.getByTestId("definition-32"));
+    s = sheet();
+    expect(iconRadio(s, "Cat").getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(iconRadio(s, "No icon"));
+    expect(iconRadio(s, "No icon").getAttribute("aria-checked")).toBe("true");
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+    expect((api.writes()[1].body as { icon: string | null }).icon).toBeNull();
   });
 });
 

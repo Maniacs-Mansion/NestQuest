@@ -1,7 +1,8 @@
 /**
  * The shipped Lucide subset a definition's `icon` may name (ADMIN-SPEC §3.3).
  * Only these named imports are bundled — no CDN, no runtime fetch. The stored
- * value is the Lucide kebab-case name, so it stays meaningful to any surface.
+ * value is the namespaced `lucide:<kebab-name>`; a legacy bare `<kebab-name>`
+ * still names the same Lucide entry.
  */
 import {
   Apple,
@@ -91,7 +92,26 @@ export const DEFINITION_ICONS: readonly DefinitionIconEntry[] = [
 
 const BY_NAME = new Map(DEFINITION_ICONS.map((entry) => [entry.name, entry]));
 
-export function findDefinitionIcon(name: string | null): DefinitionIconEntry | null {
+const LUCIDE_PREFIX = "lucide:";
+
+/** The canonical stored key for a Lucide choice, e.g. `lucide:dog`. */
+export function lucideIconKey(name: string): string {
+  return `${LUCIDE_PREFIX}${name}`;
+}
+
+/**
+ * The Lucide name an icon value refers to: `lucide:dog` and a legacy bare
+ * `dog` both give `dog`. Any other namespace (`fa:`, `emoji:`, unknown) and
+ * null give null — the admin has no Lucide entry for them.
+ */
+export function normalizeDefinitionIconName(value: string | null): string | null {
+  if (value === null) return null;
+  if (value.startsWith(LUCIDE_PREFIX)) return value.slice(LUCIDE_PREFIX.length);
+  return value.includes(":") ? null : value;
+}
+
+export function findDefinitionIcon(value: string | null): DefinitionIconEntry | null {
+  const name = normalizeDefinitionIconName(value);
   return name === null ? null : (BY_NAME.get(name) ?? null);
 }
 
