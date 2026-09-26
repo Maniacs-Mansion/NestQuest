@@ -1,5 +1,50 @@
 # NestQuest Release Notes
 
+## Version 0.9.1 — 2026-09-26
+
+### Scope
+
+Patch release carrying the owner-reported UI-bug fixes for the kids' panel, plus a
+household-timezone correction, onto `main`.
+
+- **Household-local time:** a new `timezone` setting (an IANA name such as
+  `America/New_York`; empty keeps the API host's local time) is threaded into the
+  API's clock reads, so overdue and the daily rollover use the household's day
+  rather than a UTC host's. **Set it once after upgrading** (see the Upgrade
+  note); the admin UI has no field for it yet. (PR #254.)
+- **Overdue and rollover correctness:** quests are no longer marked overdue
+  before their due time, and the missed-sweep scheduler fires at the configured
+  rollover across DST transitions — its delay is now a true elapsed-time
+  difference, with documented handling of nonexistent/ambiguous local times.
+  (PRs #254, #257.)
+- **Complete works on the panel:** a TypeScript ES2022 `useDefineForClassFields`
+  default emitted native class fields that shadowed Lit's reactive accessors, so
+  the confirm dialog never re-rendered and a tap appeared to do nothing; the
+  panel now opens the confirm and completes. (PR #254.)
+- **Panel polish:** the party-board hint line no longer hides behind the dock
+  (#244); the Quest Log header crest renders with its shield classes (#252); the
+  party-board wordmark is the new compass-rose monogram plus Cinzel Decorative
+  text, replacing the d20 dice (#253); and the quest meta line keeps its `meta`
+  class when not late (#255).
+
+### Upgrade note
+
+The database schema is unchanged at version **9**. After upgrading, set the
+household timezone once so date, overdue and rollover behaviour match the house
+(otherwise it falls back to the API host's local time, which may be UTC):
+
+```
+PATCH /api/v1/admin/settings {"timezone": "America/New_York"}
+```
+
+No runtime dependency is added.
+
+### Requirements
+
+Home Assistant 2024.6.0 or newer. Install through HACS from the
+`Maniacs-Mansion/NestQuest` GitHub mirror (kept current by the Gitea push
+mirror).
+
 ## Version 0.9.0 — 2026-09-26
 
 ### Scope
