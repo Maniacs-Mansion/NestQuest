@@ -17,6 +17,8 @@ export interface HouseholdSettings {
   afternoon_reminder_enabled: boolean;
   end_of_day_report_enabled: boolean;
   celebration_enabled: boolean;
+  /** IANA zone name (e.g. "America/New_York"); "" means the API host's local time. */
+  timezone: string;
 }
 
 /** Only the supplied fields are updated; the API answers with all of them. */
