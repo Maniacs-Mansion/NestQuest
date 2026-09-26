@@ -158,7 +158,11 @@ export interface DefinitionDeleteResult {
 
 /**
  * Delete a task if it has no completion history; otherwise the API retires
- * (deactivates) it and everything is preserved.
+ * (deactivates) it. Retirement preserves the definition row, schedule rule,
+ * assignees, windows and ALL durable completion history. Like any
+ * deactivation it regenerates, so future UNCOMPLETED instances are cleared
+ * (rolling, regenerable rows) and not recreated while inactive; durable
+ * history lives only in the append-only `completion_events`.
  */
 export async function deleteDefinition(id: number): Promise<DefinitionDeleteResult> {
   return readJson<DefinitionDeleteResult>(
