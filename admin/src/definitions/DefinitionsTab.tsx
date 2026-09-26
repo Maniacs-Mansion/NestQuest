@@ -49,6 +49,7 @@ import {
   lucideIconKey,
   normalizeDefinitionIconName,
 } from "./definitionIcons";
+import { GlyphSvg } from "../icons/GlyphSvg";
 import "./DefinitionsTab.css";
 
 /** ADMIN-SPEC §1: every scroll column ends with 92px so content clears the tab bar. */
@@ -581,7 +582,8 @@ function EditSheet({
               >
                 <TaskGlyph size={18} />
               </button>
-              {DEFINITION_ICONS.map(({ name, label, Icon }) => {
+              {DEFINITION_ICONS.map((icon) => {
+                const { name, label } = icon;
                 const on = normalizeDefinitionIconName(draft.icon) === name;
                 return (
                   <button
@@ -594,7 +596,7 @@ function EditSheet({
                     className={on ? "defs-icon defs-icon--on" : "defs-icon"}
                     onClick={() => update({ icon: lucideIconKey(name) })}
                   >
-                    <Icon size={18} aria-hidden="true" focusable="false" />
+                    <GlyphSvg icon={icon} size={18} />
                   </button>
                 );
               })}
