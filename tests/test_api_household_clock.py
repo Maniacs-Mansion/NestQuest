@@ -32,7 +32,7 @@ import pytest
 
 from api import routes_admin, routes_panel
 from api.database import _executor
-from api.scheduler import MissedSweepScheduler
+from api.scheduler import MissedSweepScheduler, _delay_seconds
 from tests.admin_jwt_harness import (
     ADMIN_KEY,
     KID,
@@ -270,3 +270,40 @@ async def test_scheduler_waits_for_rollover_in_household_time(
         assert delays == [pytest.approx(65 * 60)]
     finally:
         await database.close()
+
+
+# --- the rollover delay across DST (America/New_York) ------------------------
+
+NEW_YORK = ZoneInfo("America/New_York")
+
+
+def _ny(*args: int, fold: int = 0) -> datetime.datetime:
+    return datetime.datetime(*args, tzinfo=NEW_YORK, fold=fold)
+
+
+@pytest.mark.parametrize(
+    ("now", "target", "expected"),
+    [
+        # Ordinary EDT day: 09:00 -> 10:05 is 65 minutes.
+        (_ny(2026, 6, 15, 9, 0), datetime.time(10, 5), 65 * 60),
+        # An equal time schedules for tomorrow (strictly after now).
+        (_ny(2026, 6, 15, 10, 5), datetime.time(10, 5), 86400),
+        # Spring-forward: 01:00 EST -> 03:00 EDT is one real hour.
+        (_ny(2026, 3, 8, 1, 0), datetime.time(3, 0), 3600),
+        # Fall-back: 00:30 EDT -> 02:00 EST is two and a half real hours.
+        (_ny(2026, 11, 1, 0, 30), datetime.time(2, 0), 9000),
+        # Nonexistent 02:30 on spring-forward day: the first valid instant
+        # at/after it is 03:00 EDT, one real hour after 01:00 EST.
+        (_ny(2026, 3, 8, 1, 0), datetime.time(2, 30), 3600),
+        # Ambiguous 01:30 on fall-back day resolves to the FIRST (EDT)
+        # occurrence: from 00:30 EDT that is one real hour.
+        (_ny(2026, 11, 1, 0, 30), datetime.time(1, 30), 3600),
+        # Already past the first 01:30 (now is 01:15 EST, the repeated
+        # hour): not the second occurrence, but tomorrow's 01:30 EST.
+        (_ny(2026, 11, 1, 1, 15, fold=1), datetime.time(1, 30), 87300),
+    ],
+)
+def test_delay_seconds_is_true_elapsed_time_across_dst(
+    now: datetime.datetime, target: datetime.time, expected: float
+) -> None:
+    assert _delay_seconds(target, now) == expected
