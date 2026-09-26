@@ -18,7 +18,7 @@ API client; the two are deliberately NOT unified here, and neither
 side reads the other's values.
 
 STORED SERIALIZATION — the document at ``SETTINGS_META_KEY`` is a JSON
-object holding exactly the ELEVEN settings fields, keyed by field name
+object holding exactly the TWELVE settings fields, keyed by field name
 (which equals the ``CONF_*`` option key for every field), complete
 after the first update:
 
@@ -33,7 +33,11 @@ after the first update:
   booleans,
 - ``timezone`` — ``""`` (the API host's local time) or an IANA time
   zone name such as ``America/New_York``.  A document stored before
-  this field existed simply lacks it and resolves to ``""``.
+  this field existed simply lacks it and resolves to ``""``,
+- ``timezone_configured`` — a real boolean: ``True`` once the admin
+  explicitly chose ``timezone`` (including the empty host-local value),
+  so the admin UI never auto-sets it again.  A document stored before
+  this field existed lacks it and resolves to ``False``.
 
 Only values whose core validators ACCEPTED are ever written, so a
 stored document always round-trips through the core's option builders.
@@ -175,7 +179,7 @@ async def update_settings(
     update can never leave a half-applied document behind.
 
     The validated changes are merged onto the current effective
-    settings and the merged (complete, eleven-field) document is persisted
+    settings and the merged (complete, twelve-field) document is persisted
     in one atomic upsert; the updated settings are returned.  The whole
     read → merge → write span runs inside the per-database settings
     lock, so concurrent updates queue instead of interleaving.

@@ -119,6 +119,12 @@ DEFAULT_AUTOMATION_ENABLED = True
 # Home Assistant's configured ``time_zone`` and ignores this field.
 CONF_TIMEZONE = "timezone"
 DEFAULT_TIMEZONE = ""
+# Whether the admin has made an explicit ``timezone`` choice.  ``False``
+# (a fresh install) lets the admin UI auto-set the browser's zone once;
+# ``True`` pins the stored value — including an explicitly-chosen empty
+# ``timezone`` (the API host's local time) — so it is never auto-set again.
+CONF_TIMEZONE_CONFIGURED = "timezone_configured"
+DEFAULT_TIMEZONE_CONFIGURED = False
 
 # Panel-plane API client (Feature 18): the integration reaches the
 # NestQuest API service (Feature 16) over HTTP instead of the database.

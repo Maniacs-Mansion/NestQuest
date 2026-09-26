@@ -165,12 +165,13 @@ integration's Home-Assistant config-entry options remain a temporary,
 SEPARATE source until Feature 18 wires the client to the API — the two
 are deliberately not unified here:
 
-- ``GET /settings`` returns the current effective settings: all eleven
+- ``GET /settings`` returns the current effective settings: all twelve
   documented fields (the rolling horizon, the day rollover time, the
   notify target, the three notification times, the four enable
-  toggles and the ``timezone`` — the IANA household zone the
-  household-local dates derive from, empty meaning host local) — the
-  defaults on a fresh database.
+  toggles, the ``timezone`` — the IANA household zone the
+  household-local dates derive from, empty meaning host local — and
+  ``timezone_configured``, whether the admin explicitly chose that
+  zone) — the defaults on a fresh database.
 - ``PATCH /settings`` updates ONLY the supplied fields: the body is a
   JSON object of settings field names to new values, passed STRAIGHT
   to :func:`nestquest_core.settings_store.update_settings` — the
@@ -905,7 +906,7 @@ class AdminSettingsResponse(BaseModel):
     """The effective settings as the admin plane serializes them.
 
     Mirrors the core :class:`~nestquest_core.settings.NestQuestSettings`
-    — all ELEVEN documented fields, resolved (every absent stored field
+    — all TWELVE documented fields, resolved (every absent stored field
     already fell back to its default in the core).  The same shape both
     the GET and the PATCH route answer with.
     """
@@ -923,6 +924,9 @@ class AdminSettingsResponse(BaseModel):
     #: The household IANA time zone the API reads its clock in; ``""``
     #: means the API host's local time.
     timezone: str
+    #: Whether the admin explicitly chose ``timezone`` (even ``""``);
+    #: ``False`` lets the admin UI auto-set the browser's zone once.
+    timezone_configured: bool
 
 
 class AdminMissedSweepResponse(BaseModel):
@@ -2179,7 +2183,7 @@ def _settings_response(
     """Serialize one core NestQuestSettings into the documented payload.
 
     Explicit field-by-field (not ``dataclasses.asdict``) so the payload
-    stays pinned to the eleven documented fields even if the core
+    stays pinned to the twelve documented fields even if the core
     dataclass later grows another one.
     """
     return AdminSettingsResponse(
@@ -2194,6 +2198,7 @@ def _settings_response(
         end_of_day_report_enabled=settings.end_of_day_report_enabled,
         celebration_enabled=settings.celebration_enabled,
         timezone=settings.timezone,
+        timezone_configured=settings.timezone_configured,
     )
 
 
@@ -2291,7 +2296,7 @@ async def admin_history_csv(
     response_model=AdminSettingsResponse,
 )
 async def admin_get_settings(request: Request) -> AdminSettingsResponse:
-    """Return the current effective settings (all eleven documented fields).
+    """Return the current effective settings (all twelve documented fields).
 
     Requires a valid admin JWT (the router's shared
     :func:`~api.auth.require_admin` dependency — the ONE check; this

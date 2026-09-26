@@ -23,6 +23,7 @@ const DEFAULT_SETTINGS: HouseholdSettings = {
   end_of_day_report_enabled: true,
   celebration_enabled: false,
   timezone: "America/Chicago",
+  timezone_configured: true,
 };
 
 function child(
@@ -506,7 +507,9 @@ describe("SettingsScreen — preferences", () => {
     fireEvent.change(input, { target: { value: " Europe/London " } });
     save(form);
     await screen.findByText("Preferences saved.");
-    expect(writes()).toEqual([{ method: "PATCH", path: SETTINGS_PATH, body: { timezone: "Europe/London" } }]);
+    expect(writes()).toEqual([
+      { method: "PATCH", path: SETTINGS_PATH, body: { timezone: "Europe/London", timezone_configured: true } },
+    ]);
     const reloaded = screen.getByRole("form", { name: "Preferences" });
     expect(field(reloaded, "Timezone").value).toBe("Europe/London");
   });
@@ -572,7 +575,8 @@ describe("SettingsScreen — timezone auto-set", () => {
     sessionStorage.clear();
     storeTokens({ access_token: "at-123", expires_in: 600 });
     children = [child(1, "Declan", 1)];
-    settings = { ...DEFAULT_SETTINGS, timezone: "" };
+    // A fresh install: no zone, and the admin never chose one.
+    settings = { ...DEFAULT_SETTINGS, timezone: "", timezone_configured: false };
     writeResponse = null;
     zoneSpy = null;
     fetchMock = vi.fn(async (url: string, init?: RequestInit) => routeFetch(url, init));
@@ -596,9 +600,10 @@ describe("SettingsScreen — timezone auto-set", () => {
     const form = await renderForm();
     expect(field(form, "Timezone").value).toBe("America/New_York");
     expect(writes()).toEqual([
-      { method: "PATCH", path: SETTINGS_PATH, body: { timezone: "America/New_York" } },
+      { method: "PATCH", path: SETTINGS_PATH, body: { timezone: "America/New_York", timezone_configured: true } },
     ]);
     expect(settings.timezone).toBe("America/New_York");
+    expect(settings.timezone_configured).toBe(true);
 
     // A later save of another field does not re-send the timezone.
     fireEvent.change(field(form, "Planning horizon (days)"), { target: { value: "21" } });
@@ -618,24 +623,41 @@ describe("SettingsScreen — timezone auto-set", () => {
     const form = await screen.findByRole("form", { name: "Preferences" });
     expect(field(form, "Timezone").value).toBe("America/New_York");
     expect(writes()).toEqual([
-      { method: "PATCH", path: SETTINGS_PATH, body: { timezone: "America/New_York" } },
+      { method: "PATCH", path: SETTINGS_PATH, body: { timezone: "America/New_York", timezone_configured: true } },
     ]);
   });
 
-  it("an admin clearing the timezone is not re-set by the browser zone", async () => {
+  it("an admin clearing the timezone is not re-set by the browser zone, even after a reopen", async () => {
     mockBrowserZone("America/New_York");
     const form = await renderForm();
     fireEvent.change(field(form, "Timezone"), { target: { value: "" } });
     fireEvent.click(within(form).getByRole("button", { name: "Save preferences" }));
     await screen.findByText("Preferences saved.");
-    expect(writes().map((w) => w.body)).toEqual([{ timezone: "America/New_York" }, { timezone: "" }]);
+    expect(writes().map((w) => w.body)).toEqual([
+      { timezone: "America/New_York", timezone_configured: true },
+      { timezone: "", timezone_configured: true },
+    ]);
     const reloaded = screen.getByRole("form", { name: "Preferences" });
     expect(field(reloaded, "Timezone").value).toBe("");
+
+    // Close and reopen: the screen re-fetches "" but the choice persisted.
+    cleanup();
+    const reopened = await renderForm();
+    expect(field(reopened, "Timezone").value).toBe("");
+    expect(writes()).toHaveLength(2);
+  });
+
+  it("an empty timezone the admin chose is never auto-set", async () => {
+    mockBrowserZone("America/New_York");
+    settings = { ...settings, timezone_configured: true };
+    const form = await renderForm();
+    expect(field(form, "Timezone").value).toBe("");
+    expect(writes()).toEqual([]);
   });
 
   it("a set timezone is shown and never overwritten by the browser zone", async () => {
     mockBrowserZone("America/New_York");
-    settings = { ...DEFAULT_SETTINGS, timezone: "Europe/Dublin" };
+    settings = { ...DEFAULT_SETTINGS, timezone: "Europe/Dublin", timezone_configured: false };
     const form = await renderForm();
     expect(field(form, "Timezone").value).toBe("Europe/Dublin");
     expect(writes()).toEqual([]);
