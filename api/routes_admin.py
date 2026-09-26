@@ -536,9 +536,10 @@ class AdminOccurrencesPreviewRequest(BaseModel):
 
     ``rule`` is the SAME object create/edit take.  ``start_date`` is an
     optional strict ``YYYY-MM-DD`` (validated by the core; default the
-    API host's today).  ``count`` is a strict JSON integer in
-    1..``_PREVIEW_MAX_COUNT`` — anything else is 422 before any handler
-    code runs.
+    household-local today in the configured ``timezone``, empty falling
+    back to the API host's local time).  ``count`` is a strict JSON
+    integer in 1..``_PREVIEW_MAX_COUNT`` — anything else is 422 before
+    any handler code runs.
     """
 
     rule: AdminRuleRequest
