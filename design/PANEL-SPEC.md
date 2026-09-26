@@ -22,10 +22,14 @@ Screens `1a`, `1b`, `1j`, `1c` of the mockups. Two cards:
 
 Default view on the wall. Layout top to bottom:
 
-1. **Wordmark row** at y=64. Rule · d20 hexagon · `NestQuest` (66px/900 display, brand
-   gradient via `background-clip: text`) · d20 · rule. d20 marks are 34px hexagons
-   (`clip-path: polygon(50% 0, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%)`) filled with
-   the brand gradient, numeral 15px/700 Cinzel.
+1. **Wordmark row** at y=64. Rule · monogram · `NestQuest` (66px/900 Cinzel Decorative
+   display, brand gradient via `background-clip: text`) · rule — the horizontal lockup of
+   `design/logos/NestQuest_Logo.png`. The monogram is an 80px inline SVG (no raster, no
+   remote asset): a compass rose — four long cardinal points, four short diagonal points,
+   a ring broken by the points — around a d20 hexagon with facet lines and a knocked-out
+   Cinzel Decorative "N", filled with the brand gradient (`--nq-brand-blue` →
+   `--nq-brand-purple`, 135°). Gaps are SVG masks, so the mark stays transparent over the
+   parchment.
 2. **Kicker** `The Party · <weekday>, <Month D>` — 21px/600 Cinzel, tracking .30em, uppercase.
 3. **Adventurer plates**, 3-up grid, 56px gap, page inset 110px, top y=262. One plate per
    child returned by the party sensor, in configured order.
