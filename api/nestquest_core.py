@@ -152,6 +152,10 @@ core_quest_definitions = importlib.import_module(
     f"{_CORE_MODULE_NAME}.quest_definitions"
 )
 
+#: The icon-key module (``core.icons.normalize_icon_for_read``) the
+#: admin plane's quest-definition responses normalize ``icon`` through.
+core_icons = importlib.import_module(f"{_CORE_MODULE_NAME}.icons")
+
 #: The recurrence model (``core.recurrence.ScheduleRule`` and
 #: ``RuleValidationError``) the quest-definition routes build request
 #: rules with — the model validates at construction, the routes never
@@ -215,6 +219,7 @@ __all__ = [
     "core_db",
     "core_events",
     "core_history",
+    "core_icons",
     "core_materialize",
     "core_migrations",
     "core_presence",

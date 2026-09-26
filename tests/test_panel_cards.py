@@ -886,3 +886,115 @@ def test_quest_complete_screen_returns_to_the_board_after_the_countdown() -> Non
     assert result["probe"]["countdown"] == "Returning to The Party in 1 seconds"
     # …and at zero the card has returned to the party board.
     assert result["location"] == "/nestquest"
+
+
+# --- Quest card icons (definition icon on the open tile) ---------------------
+
+
+def _quest_row(instance_id: int, icon: str | None, state: str = "open") -> dict:
+    """One ``instances`` attribute row for Ada's quests-due sensor."""
+    row = {
+        "id": instance_id,
+        "child_id": 1,
+        "title": f"Quest {instance_id}",
+        "icon": icon,
+        "window": "morning",
+        "due_time": "08:00",
+        "state": state,
+        "overdue": False,
+        "completed_at": None,
+        "on_time": None,
+    }
+    if state == "completed":
+        row["completed_at"] = "2026-09-26T07:30:00+00:00"
+        row["on_time"] = True
+    return row
+
+
+def _quest_log_tiles(rows: list[dict]) -> dict[int, dict]:
+    """Render Ada's quest log with ``rows`` and key its tiles by instance id."""
+    states = _three_child_states()
+    states["sensor.nestquest_ada_quests_due_today"] = _state(
+        str(len(rows)), child_name="Ada", present=True, instances=rows
+    )
+    result = _render_quest_log(
+        {"type": "custom:nestquest-quest-log-card"},
+        states,
+        url="http://homeassistant.local/nestquest/ada",
+    )
+    return {tile["id"]: tile for tile in result["tiles"]}
+
+
+def test_open_quest_tile_renders_the_definition_icon() -> None:
+    """The open card's tile shows the definition's namespaced icon, drawn
+    from the bundled registry: Lucide as a stroked svg, Font Awesome as a
+    filled svg, an emoji as its text, and a legacy bare name as Lucide."""
+    tiles = _quest_log_tiles(
+        [
+            _quest_row(1, "lucide:bed"),
+            _quest_row(2, "fa:broom"),
+            _quest_row(3, "emoji:🦊"),
+            _quest_row(4, "bath"),
+        ]
+    )
+    assert tiles[1]["icon"] == "lucide:bed"
+    assert tiles[1]["fill"] == "none"
+    assert tiles[1]["paths"] > 0
+    assert tiles[2]["icon"] == "fa:broom"
+    assert tiles[2]["fill"] == "currentColor"
+    assert tiles[2]["paths"] > 0
+    assert tiles[3]["icon"] == "emoji:🦊"
+    assert tiles[3]["text"] == "🦊"
+    assert tiles[4]["icon"] == "lucide:bath"
+    assert tiles[4]["fill"] == "none"
+    for tile in tiles.values():
+        assert not tile["sealed"]
+        assert not tile["star"]
+
+
+def test_open_quest_tile_falls_back_to_the_star() -> None:
+    """An unknown name, an unknown namespace, or no icon at all keeps the
+    open card's current star glyph."""
+    tiles = _quest_log_tiles(
+        [
+            _quest_row(1, "lucide:not-a-real-icon"),
+            _quest_row(2, "fa:not-a-real-icon"),
+            _quest_row(3, "mdi:bed"),
+            _quest_row(4, ""),
+            _quest_row(5, None),
+        ]
+    )
+    assert set(tiles) == {1, 2, 3, 4, 5}
+    for tile in tiles.values():
+        assert tile["star"]
+        assert tile["icon"] is None
+
+
+def test_sealed_quest_tile_keeps_the_star() -> None:
+    """A sealed card keeps its star tile (and its wax seal) whatever the
+    definition's icon; only the open card shows the quest's icon."""
+    tiles = _quest_log_tiles(
+        [
+            _quest_row(1, "lucide:bed", state="completed"),
+            _quest_row(2, "fa:broom", state="completed"),
+            _quest_row(3, "emoji:🦊", state="completed"),
+        ]
+    )
+    for tile in tiles.values():
+        assert tile["sealed"]
+        assert tile["star"]
+        assert tile["icon"] is None
+        assert tile["text"] == ""
+
+
+def test_only_the_open_tile_calls_the_icon_resolver() -> None:
+    source = _read(QUEST_LOG)
+    sealed_start = source.index('<div class="quest sealed"')
+    sealed_block = source[sealed_start : source.index("</div>", sealed_start)]
+    assert '<span class="tile" aria-hidden="true">${ICON_STAR}</span>' in sealed_block
+    assert "renderQuestIcon" not in sealed_block
+    assert (
+        source.count("renderQuestIcon(instance.icon, ICON_STAR)") == 1
+    ), "only the open card's tile resolves the definition icon"
+    open_start = source.index('class="quest tappable"')
+    assert "renderQuestIcon(instance.icon, ICON_STAR)" in source[open_start:]

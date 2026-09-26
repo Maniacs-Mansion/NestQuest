@@ -1,0 +1,26 @@
+{
+  "_comment": "Shared emoji-payload verdicts. tests/test_core_icons.py (validate_icon) and admin/src/icons/registry.test.ts (resolveIcon) both assert every row, so the Python and JS rules cannot diverge silently.",
+  "cases": [
+    { "payload": "🐕", "valid": true, "why": "plain emoji" },
+    { "payload": "👨‍👩‍👧‍👦", "valid": true, "why": "ZWJ family (U+200D allowed)" },
+    { "payload": "⭐⭐⭐⭐⭐⭐⭐⭐", "valid": true, "why": "exactly 8 code points" },
+    { "payload": "⭐⭐⭐⭐⭐⭐⭐⭐⭐", "valid": false, "why": "9 code points, over the cap" },
+    { "payload": "", "valid": false, "why": "empty" },
+    { "payload": "﻿", "valid": false, "why": "U+FEFF BOM alone" },
+    { "payload": "🐕﻿", "valid": false, "why": "trailing U+FEFF" },
+    { "payload": "🐕 ", "valid": false, "why": "trailing space" },
+    { "payload": "a b", "valid": false, "why": "inner space" },
+    { "payload": "🐕 ", "valid": false, "why": "no-break space" },
+    { "payload": "🐕　", "valid": false, "why": "ideographic space" },
+    { "payload": "🐕 ", "valid": false, "why": "line separator" },
+    { "payload": "🐕\n", "valid": false, "why": "newline" },
+    { "payload": "🐕\u0000", "valid": false, "why": "NUL control" },
+    { "payload": "🐕\u0007🐕", "valid": false, "why": "BEL control" },
+    { "payload": "🐕\u001c", "valid": false, "why": "file-separator control" },
+    { "payload": "🐕\u0085", "valid": false, "why": "NEL C1 control" },
+    { "payload": "🐕\u007f", "valid": false, "why": "DEL control" },
+    { "payload": "<b>", "valid": false, "why": "markup <" },
+    { "payload": "a>b", "valid": false, "why": "markup >" },
+    { "payload": "a&b", "valid": false, "why": "entity start &" }
+  ]
+}

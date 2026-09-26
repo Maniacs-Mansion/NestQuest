@@ -84,8 +84,33 @@ Footer: `Cancel` (flex 1, bordered) + `Save changes` (flex 2, gradient), both 13
 padding. Sheet enters over the dimmed list in `--nq-dur-modal`.
 
 ### 3.3 Icon picker
-Each definition carries a Lucide glyph, shown on both surfaces. **The allowed subset is not
-yet defined** — pick 24–40 household-relevant glyphs and ship them as a grid picker.
+Each definition carries one optional icon, shown on both surfaces. The picker offers three
+sources:
+
+- **Lucide** — a grid of the curated Lucide glyphs, drawn stroked.
+- **Font Awesome** — a grid of a curated subset of the Font Awesome Free *solid* set,
+  drawn filled.
+- **Emoji** — a text input; the typed emoji is stored as entered (not trimmed) and must be
+  1–8 code points with no whitespace, control characters, `<`, `>` or `&`.
+
+Both curated lists come from `tools/icons/curated-icons.json`; their glyph path data is
+generated into the admin and panel bundles by `tools/icons/generate.mjs` (no CDN, no
+runtime fetch). See `THIRD-PARTY-NOTICES.md` for licences.
+
+The stored value is a **namespaced key**:
+
+| Source | Stored key | Example |
+|---|---|---|
+| Lucide | `lucide:<name>` | `lucide:dog` |
+| Font Awesome | `fa:<name>` | `fa:paw` |
+| Emoji | `emoji:<grapheme>` | `emoji:🐶` |
+
+`<name>` is a lowercase kebab name (`[a-z0-9-]`, no leading or trailing `-`). A **legacy
+bare name** written before namespacing (`dog`) reads as `lucide:<name>` — the API returns it
+namespaced, and any write of a bare name is stored as `lucide:<name>`; no data migration. An
+empty value clears the icon. An empty, unknown, or unresolvable key renders the **fallback
+glyph** — in the admin, the generic task glyph (clipboard with a check); on the panel, the
+star (`PANEL-SPEC.md` §3.2).
 
 ## 4. Schedule (1f)
 

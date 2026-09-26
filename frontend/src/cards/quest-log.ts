@@ -2,6 +2,7 @@ import { LitElement, css, html, nothing, unsafeCSS, type TemplateResult } from "
 import { repeat } from "lit/directives/repeat.js";
 import panelTokens from "../../../custom_components/nestquest/www/nestquest-panel-tokens.css?inline";
 
+import { renderQuestIcon } from "../icons/render";
 import { registerCustomCard, type CardConfig, type HassLike } from "../types";
 
 type QuestLogCardConfig = CardConfig & {
@@ -612,6 +613,11 @@ const logStyles = css`
   .tile svg {
     width: 34px;
     height: 34px;
+  }
+
+  .tile .emoji {
+    font-size: 30px;
+    line-height: 1;
   }
 
   .sealed .tile {
@@ -2093,7 +2099,7 @@ export class NestQuestQuestLogCard extends LitElement {
           }
         }}
       >
-        <span class="tile" aria-hidden="true">${ICON_STAR}</span>
+        <span class="tile" aria-hidden="true">${renderQuestIcon(instance.icon, ICON_STAR)}</span>
         <div class="body">
           <span class="quest-title">${instance.title}</span>
           <span class="meta ${meta.late ? "late" : nothing}">${meta.text}</span>

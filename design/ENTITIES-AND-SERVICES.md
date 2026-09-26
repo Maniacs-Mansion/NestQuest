@@ -35,7 +35,7 @@ implementer's call), shaped:
 {
   "instances": [
     { "id": 4821, "definition_id": 12, "child_id": 3, "title": "Fill bird feeder",
-      "icon": "bird", "window": "afternoon", "due_time": "17:00",
+      "icon": "lucide:bird", "window": "afternoon", "due_time": "17:00",
       "state": "open", "overdue": true, "completed_at": null, "on_time": null }
   ]
 }

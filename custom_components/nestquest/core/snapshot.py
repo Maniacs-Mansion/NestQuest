@@ -42,6 +42,7 @@ from .dao_instances import CompletionEventsDao, QuestInstancesDao
 from .dao_presence import PresenceOverridesDao, PresencePatternsDao
 from .dao_rules import QuestDefinitionsDao
 from .db import NestQuestDatabase
+from .icons import normalize_icon_for_read
 from .presence import (
     MAX_PREVIEW_SCAN_DAYS,
     PresenceEngine,
@@ -262,7 +263,11 @@ async def build_snapshot(
                     definition_id=instance.definition_id,
                     child_id=instance.child_id,
                     title=definition.title if definition else "Quest",
-                    icon=definition.icon if definition else None,
+                    icon=(
+                        normalize_icon_for_read(definition.icon)
+                        if definition
+                        else None
+                    ),
                     window=instance.window,
                     due_date=instance.due_date,
                     due_time=instance.due_time,
