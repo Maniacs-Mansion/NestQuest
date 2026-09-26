@@ -34,8 +34,6 @@ def test_namespace_and_cap_constants() -> None:
         ("emoji:" + "⭐" * EMOJI_MAX_CODE_POINTS, "emoji:" + "⭐" * 8),
         # Legacy bare Lucide names normalize to the lucide namespace.
         ("dog", "lucide:dog"),
-        ("  toy-box  ", "lucide:toy-box"),
-        ("  fa:dog  ", "fa:dog"),
     ],
 )
 def test_validate_icon_accepts(value: str, expected: str) -> None:
@@ -72,6 +70,14 @@ def test_validate_icon_clears(value: str | None) -> None:
         "emoji:a&b",  # entity start
         "emoji:🐕\x00",  # control character
         "emoji:🐕\x07🐕",  # control character between emoji
+        # Edge whitespace/controls are part of the value, never trimmed away.
+        "emoji:🐕 ",  # trailing space
+        "emoji:🐕\n",  # trailing newline
+        "emoji:🐕\x1c",  # trailing control character (str.strip() eats it)
+        " emoji:🐕",  # leading space
+        "lucide:dog ",  # trailing space
+        "  fa:dog  ",  # padded namespaced key
+        "  toy-box  ",  # padded legacy bare name
     ],
 )
 def test_validate_icon_rejects_naming_the_field(value: str) -> None:

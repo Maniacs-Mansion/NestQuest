@@ -106,7 +106,7 @@ def test_create_one_child_one_window(tmp_path) -> None:
             [child.id],
             ["morning"],
             description="  Twice daily  ",
-            icon="  lucide:tooth  ",
+            icon="lucide:tooth",
         )
         assert isinstance(result, CreatedQuestDefinition)
         definition = result.definition
@@ -625,7 +625,7 @@ def test_edit_title_description_icon(tmp_path) -> None:
             created.definition.id,
             title="  Floss  ",
             description="  New description  ",
-            icon="  fa:new  ",
+            icon="fa:new",
         )
         assert result.definition.title == "Floss"
         assert result.definition.description == "New description"

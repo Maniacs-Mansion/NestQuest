@@ -55,7 +55,9 @@ def validate_icon(value: object) -> str | None:
     """Return the canonical namespaced icon key, or raise naming ``icon``.
 
     ``None`` or an empty/whitespace-only string returns ``None`` (the
-    icon is cleared).  A value with no ``:`` is a legacy bare Lucide
+    icon is cleared).  Otherwise the raw value is validated untrimmed, so
+    edge whitespace or control characters are rejected rather than
+    silently stripped.  A value with no ``:`` is a legacy bare Lucide
     name and is stored as ``lucide:<value>``.  An unknown namespace, an
     empty or malformed name, or an invalid emoji payload raises
     ValueError.
@@ -64,17 +66,16 @@ def validate_icon(value: object) -> str | None:
         return None
     if not isinstance(value, str):
         raise ValueError(f"icon must be a string, got {value!r}")
-    trimmed = value.strip()
-    if not trimmed:
+    if not value.strip():
         return None
 
-    namespace, separator, name = trimmed.partition(":")
+    namespace, separator, name = value.partition(":")
     if not separator:
-        if not _is_kebab_name(trimmed):
+        if not _is_kebab_name(value):
             raise ValueError(
                 f"icon must be a lowercase kebab name, got {value!r}"
             )
-        return f"{ICON_NAMESPACE_LUCIDE}:{trimmed}"
+        return f"{ICON_NAMESPACE_LUCIDE}:{value}"
 
     if namespace not in ICON_NAMESPACES:
         raise ValueError(
@@ -93,7 +94,7 @@ def validate_icon(value: object) -> str | None:
             f"icon {namespace} name must be a lowercase kebab name, "
             f"got {value!r}"
         )
-    return trimmed
+    return value
 
 
 def normalize_icon_for_read(value: str | None) -> str | None:
