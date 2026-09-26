@@ -828,6 +828,7 @@ def _render_quest_log(
     url: str,
     idle_ms: int | None = None,
     probe_ms: int | None = None,
+    tap_complete: int | None = None,
 ) -> dict:
     """Render the built bundle's quest log and report its location.
 
@@ -851,6 +852,8 @@ def _render_quest_log(
         spec["idle_ms"] = idle_ms
     if probe_ms is not None:
         spec["probe_ms"] = probe_ms
+    if tap_complete is not None:
+        spec["tap_complete"] = tap_complete
     completed = subprocess.run(
         ["node", str(QUEST_LOG_HARNESS)],
         input=json.dumps(spec),
@@ -950,6 +953,66 @@ def test_quest_complete_screen_returns_to_the_board_after_the_countdown() -> Non
     assert result["probe"]["countdown"] == "Returning to The Party in 1 seconds"
     # …and at zero the card has returned to the party board.
     assert result["location"] == "/nestquest"
+
+
+def test_tapping_complete_confirms_and_calls_the_service() -> None:
+    """Tapping an open quest's Complete opens the confirm dialog, and the
+    dialog's Complete calls nestquest.complete_quest with the panel actor.
+    With ``useDefineForClassFields`` on (the ES2022 default) the card's
+    reactive fields were emitted as native class fields that shadowed
+    Lit's accessors: ``_confirm`` changed but no re-render was scheduled,
+    so the dialog never opened and the tap did nothing."""
+    generated = _generate_dashboard(
+        {}, _three_child_states(), url="http://homeassistant.local/nestquest"
+    )
+    open_quest = {
+        "id": 42,
+        "definition_id": 7,
+        "child_id": 1,
+        "title": "Brush Teeth",
+        "icon": None,
+        "window": "morning",
+        "due_time": "08:15",
+        "state": "open",
+        "overdue": True,
+        "completed_at": None,
+        "on_time": None,
+    }
+    states = {
+        **_three_child_states(),
+        "sensor.nestquest_ada_quests_due_today": _state(
+            "1",
+            child_name="Ada",
+            child_id=1,
+            present=True,
+            instances=[open_quest],
+        ),
+    }
+    result = _render_quest_log(
+        generated["views"][1]["cards"][0],
+        states,
+        url="http://homeassistant.local/nestquest/ada",
+        tap_complete=open_quest["id"],
+    )
+    assert result["tap"]["dialog_opened"] is True
+    assert result["tap"]["service_calls"] == [
+        {
+            "domain": "nestquest",
+            "service": "complete_quest",
+            "data": {
+                "instance_id": open_quest["id"],
+                "actor": "panel",
+                "actor_child_id": open_quest["child_id"],
+            },
+        }
+    ]
+
+
+def test_card_build_keeps_lit_reactive_accessors() -> None:
+    """The frontend build must not emit class fields that shadow Lit's
+    reactive property accessors (Lit's documented TypeScript setting)."""
+    tsconfig = json.loads((FRONTEND_DIR / "tsconfig.json").read_text())
+    assert tsconfig["compilerOptions"]["useDefineForClassFields"] is False
 
 
 def test_quest_log_crest_keeps_its_shield_classes() -> None:
