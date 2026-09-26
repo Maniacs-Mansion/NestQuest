@@ -1,5 +1,34 @@
 # NestQuest Release Notes
 
+## Version 0.9.3 — 2026-09-26
+
+### Scope
+
+Patch release carrying the admin timezone control onto `main`.
+
+- **Admins set the system timezone from the PWA:** the Preferences screen gains a
+  Timezone field (a text input with a local datalist of common IANA zones;
+  `UTC` or `Area/Location`). On a fresh install the value is set AUTOMATICALLY
+  from the browser's IANA zone when the setting is empty on first load — no
+  geolocation prompt and no network lookup — and an admin can change or clear it
+  at any time. Only a changed value is sent, and the API's 422 for an unknown zone
+  is shown by the form. (PR #266.)
+- This makes the household-local clock (overdue, daily rollover) configurable
+  from the UI, replacing the manual
+  `PATCH /api/v1/admin/settings {"timezone": ...}` step noted in 0.9.1. The
+  setting still defaults to the API host's local time when left empty.
+
+### Upgrade note
+
+The database schema is unchanged at version **9**; no migration or backup step is
+needed. No runtime dependency is added.
+
+### Requirements
+
+Home Assistant 2024.6.0 or newer. Install through HACS from the
+`Maniacs-Mansion/NestQuest` GitHub mirror (kept current by the Gitea push
+mirror).
+
 ## Version 0.9.2 — 2026-09-26
 
 ### Scope
