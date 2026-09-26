@@ -161,6 +161,10 @@ function fakeApi(initial: QuestDefinition[]) {
     }
     const match = /^\/api\/v1\/admin\/quest-definitions\/(\d+)$/.exec(path);
     if (method === "PATCH" && match) {
+      // Like the API's strict validate_icon: a Lucide name never has a colon.
+      if (typeof body.icon === "string" && /^lucide:.*:/.test(body.icon)) {
+        return jsonResponse({ detail: "icon is not a valid icon key" }, 422);
+      }
       const id = Number(match[1]);
       definitions = definitions.map((d) =>
         d.id === id
@@ -463,7 +467,6 @@ describe("DefinitionsTab", () => {
         path: "/api/v1/admin/quest-definitions/11",
         body: {
           title: "Take out the bins",
-          icon: null,
           rule: {
             rule_type: "monthly_day",
             interval: 1,
@@ -1087,7 +1090,7 @@ describe("DefinitionsTab icon picker", () => {
     await waitFor(() => expect(rowIcon(screen.getByTestId("definition-11"))).toBe("trash-2"));
   });
 
-  it("an unchanged icon is still sent on edit and shows as selected", async () => {
+  it("an unchanged icon is omitted on edit and shows as selected", async () => {
     await renderReady();
     expect(rowIcon(screen.getByTestId("definition-10"))).toBe("smile");
     fireEvent.click(screen.getByTestId("definition-10"));
@@ -1101,7 +1104,7 @@ describe("DefinitionsTab icon picker", () => {
       fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
     });
 
-    expect((api.writes()[0].body as { icon: string }).icon).toBe("smile");
+    expect(api.writes()[0].body).not.toHaveProperty("icon");
   });
 
   it("an unknown legacy icon falls back to the generic glyph and is kept on save", async () => {
@@ -1121,7 +1124,7 @@ describe("DefinitionsTab icon picker", () => {
       fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
     });
 
-    expect((api.writes()[0].body as { icon: string }).icon).toBe("rocket-ship-9000");
+    expect(api.writes()[0].body).not.toHaveProperty("icon");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(rowIcon(screen.getByTestId("definition-20"))).toBeNull();
   });
@@ -1408,7 +1411,7 @@ describe("DefinitionsTab Font Awesome and emoji icons", () => {
     await waitFor(() => expect(rowGlyph(screen.getByTestId("definition-52"))).toBe("fa:paw"));
   });
 
-  it("an unchanged emoji is sent as-is on edit", async () => {
+  it("an unchanged emoji is omitted on edit", async () => {
     await renderReady([{ ...BRUSH, id: 53, icon: "emoji:🐶" }]);
     fireEvent.click(screen.getByTestId("definition-53"));
     const s = sheet();
@@ -1416,7 +1419,7 @@ describe("DefinitionsTab Font Awesome and emoji icons", () => {
       target: { value: "Feed the dog" },
     });
     await save(s);
-    expect((api.writes()[0].body as { icon: string }).icon).toBe("emoji:🐶");
+    expect(api.writes()[0].body).not.toHaveProperty("icon");
   });
 
   it("No icon and an emptied emoji field both clear the icon to null", async () => {
@@ -1439,6 +1442,110 @@ describe("DefinitionsTab Font Awesome and emoji icons", () => {
     await save(s);
     expect((api.writes()[1].body as { icon: string | null }).icon).toBeNull();
     await waitFor(() => expect(rowGlyph(screen.getByTestId("definition-55"))).toBe("fallback"));
+  });
+});
+
+/* ── Legacy icons ───────────────────────────────────────────────────── */
+
+describe("DefinitionsTab legacy icon edits", () => {
+  // The API reads a stored legacy `mdi:tooth` back as `lucide:mdi:tooth`,
+  // which its strict write validation rejects if sent back.
+  const LEGACY: QuestDefinition = { ...BRUSH, id: 60, icon: "lucide:mdi:tooth" };
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  function radio(s: HTMLElement, group: "Icon" | "Font Awesome", label: string): HTMLElement {
+    return within(within(s).getByRole("radiogroup", { name: group })).getByRole("radio", {
+      name: label,
+    });
+  }
+
+  async function save(s: HTMLElement) {
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+  }
+
+  it("editing only the title omits the legacy icon and saves", async () => {
+    await renderReady([LEGACY]);
+    fireEvent.click(screen.getByTestId("definition-60"));
+    const s = sheet();
+    fireEvent.change(within(s).getByRole("textbox", { name: "Title" }), {
+      target: { value: "Brush teeth well" },
+    });
+    await save(s);
+
+    expect(api.writes()).toHaveLength(1);
+    expect(api.writes()[0].method).toBe("PATCH");
+    expect(api.writes()[0].body).not.toHaveProperty("icon");
+    expect((api.writes()[0].body as { title: string }).title).toBe("Brush teeth well");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(await screen.findByText("Brush teeth well")).toBeTruthy();
+  });
+
+  for (const [label, choose, sent] of [
+    ["a Lucide", (s: HTMLElement) => fireEvent.click(radio(s, "Icon", "Dog")), "lucide:dog"],
+    ["a Font Awesome", (s: HTMLElement) => fireEvent.click(radio(s, "Font Awesome", "Dog")), "fa:dog"],
+    [
+      "an emoji",
+      (s: HTMLElement) =>
+        fireEvent.change(within(s).getByRole("textbox", { name: "Emoji" }), {
+          target: { value: "🦷" },
+        }),
+      "emoji:🦷",
+    ],
+    ["No icon", (s: HTMLElement) => fireEvent.click(radio(s, "Icon", "No icon")), null],
+  ] as const) {
+    it(`choosing ${label} replacement for the legacy icon sends ${JSON.stringify(sent)}`, async () => {
+      await renderReady([LEGACY]);
+      fireEvent.click(screen.getByTestId("definition-60"));
+      const s = sheet();
+      choose(s);
+      await save(s);
+
+      expect(api.writes()).toHaveLength(1);
+      expect(api.writes()[0].body).toHaveProperty("icon", sent);
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    });
+  }
+
+  it("an invalid emoji replacing the legacy icon is still rejected before the request", async () => {
+    await renderReady([LEGACY]);
+    fireEvent.click(screen.getByTestId("definition-60"));
+    const s = sheet();
+    fireEvent.change(within(s).getByRole("textbox", { name: "Emoji" }), {
+      target: { value: "a b" },
+    });
+    await save(s);
+
+    expect(api.writes()).toHaveLength(0);
+    expect(within(s).getByText(/Enter a single emoji/)).toBeTruthy();
+  });
+
+  it("creating a task still sends icon, even when none is chosen", async () => {
+    await renderReady([LEGACY]);
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    const s = sheet();
+    fireEvent.change(within(s).getByRole("textbox", { name: "Title" }), {
+      target: { value: "Floss" },
+    });
+    fireEvent.click(within(s).getByRole("button", { name: /Assigned children/ }));
+    fireEvent.click(within(s).getByRole("checkbox", { name: "Declan" }));
+    fireEvent.click(within(s).getByRole("button", { name: "Morning" }));
+    await save(s);
+
+    expect(api.writes()).toHaveLength(1);
+    expect(api.writes()[0].method).toBe("POST");
+    expect(api.writes()[0].body).toHaveProperty("icon", null);
   });
 });
 
