@@ -379,7 +379,7 @@ const logStyles = css`
     flex: none;
     width: 96px;
     height: 110px;
-    padding: 3px;
+    padding: 4px;
     clip-path: ${unsafeCSS(SHIELD_CLIP)};
     background: rgba(255, 255, 255, 0.22);
   }
@@ -1944,7 +1944,7 @@ export class NestQuestQuestLogCard extends LitElement {
     const initial = (name?.charAt(0) || "?").toUpperCase();
     return html`
       <header class="header">
-        <span class="crest${away ? " away" : nothing}" aria-hidden="true">
+        <span class="crest${away ? " away" : ""}" aria-hidden="true">
           <span class="crest-face">
             <span class="initial">${initial}</span>
           </span>
@@ -2102,7 +2102,7 @@ export class NestQuestQuestLogCard extends LitElement {
         <span class="tile" aria-hidden="true">${renderQuestIcon(instance.icon, ICON_STAR)}</span>
         <div class="body">
           <span class="quest-title">${instance.title}</span>
-          <span class="meta ${meta.late ? "late" : nothing}">${meta.text}</span>
+          <span class="${meta.late ? "meta late" : "meta"}">${meta.text}</span>
         </div>
         <button
           class="complete"

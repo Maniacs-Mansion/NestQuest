@@ -35,6 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .const import (
     CONF_AFTERNOON_REMINDER_ENABLED,
@@ -47,12 +48,14 @@ from .const import (
     CONF_MORNING_SUMMARY_ENABLED,
     CONF_MORNING_SUMMARY_TIME,
     CONF_NOTIFY_TARGET,
+    CONF_TIMEZONE,
     DEFAULT_AFTERNOON_REMINDER_TIME,
     DEFAULT_AUTOMATION_ENABLED,
     DEFAULT_DAY_ROLLOVER_TIME,
     DEFAULT_END_OF_DAY_REPORT_TIME,
     DEFAULT_HORIZON_DAYS,
     DEFAULT_MORNING_SUMMARY_TIME,
+    DEFAULT_TIMEZONE,
     LOGGER,
     TIME_PATTERN,
 )
@@ -153,6 +156,29 @@ def _resolve_optional_str(value: Any) -> str:
     return value.strip()
 
 
+def _resolve_timezone(value: Any) -> str:
+    """Validate a household time zone and return it.
+
+    The empty string means "the API host's local time" (the historical
+    behaviour); anything else must be an IANA key :class:`ZoneInfo`
+    resolves (e.g. ``America/New_York``).  A non-str (including
+    ``None``) is rejected; the ``None``-as-absent mapping lives ONLY in
+    :meth:`NestQuestSettings.from_options` (via :func:`_option_value`).
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"timezone must be a string, got {value!r}")
+    if value == "":
+        return value
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError) as error:
+        raise ValueError(
+            f"timezone must be an IANA time zone name such as "
+            f"'America/New_York', got {value!r}"
+        ) from error
+    return value
+
+
 #: The single field table the two builders share.  Each row is
 #: ``(field_name, CONF_* key, default, validator)``.  ``from_options``
 #: applies every validator (raising on the first invalid value) while
@@ -214,6 +240,7 @@ _FIELDS: tuple[tuple[str, str, Any, Callable[[Any], Any]], ...] = (
         DEFAULT_AUTOMATION_ENABLED,
         _resolve_bool,
     ),
+    ("timezone", CONF_TIMEZONE, DEFAULT_TIMEZONE, _resolve_timezone),
 )
 
 
@@ -243,6 +270,7 @@ class NestQuestSettings:
     afternoon_reminder_enabled: bool = DEFAULT_AUTOMATION_ENABLED
     end_of_day_report_enabled: bool = DEFAULT_AUTOMATION_ENABLED
     celebration_enabled: bool = DEFAULT_AUTOMATION_ENABLED
+    timezone: str = DEFAULT_TIMEZONE
 
     def __post_init__(self) -> None:
         # Validate STRICTLY at construction so a hand-built instance
@@ -281,6 +309,21 @@ class NestQuestSettings:
                 raise ValueError(
                     f"{name} must be a boolean, got {value!r}"
                 )
+        _resolve_timezone(self.timezone)
+
+    def household_now(self, instant: datetime.datetime) -> datetime.datetime:
+        """Return the aware ``instant`` expressed in the household's zone.
+
+        The API service has no Home Assistant ``time_zone``, so its one
+        clock read (an aware host-local ``now``) is converted here: with
+        :attr:`timezone` set the SAME instant is re-expressed in that
+        zone, so ``.date()`` and ``.time()`` are the household's wall
+        clock even when the host runs UTC.  With :attr:`timezone` empty
+        the instant is returned unchanged (the host's local time).
+        """
+        if not self.timezone:
+            return instant
+        return instant.astimezone(ZoneInfo(self.timezone))
 
     @property
     def day_rollover_hour_minute(self) -> tuple[int, int]:

@@ -411,6 +411,36 @@ def test_panel_hard_rules_hold_in_the_card_sources() -> None:
     assert "@click" not in sealed_template
 
 
+def test_party_board_hint_clears_the_dock() -> None:
+    """PANEL-SPEC §2/§2.3: the hint line reads fully above the dock at
+    1920x1080. The hint's line box (top + font-size x line-height) must
+    end above the dock's top edge (1080 - bottom inset - dock height)
+    with a visible gap, at the 27px/600 design size. The hint is a <p>,
+    so its user-agent 1em top margin must be reset or it shifts the box
+    down by a whole font-size."""
+    style = _style_literal(_read(PARTY_BOARD), STYLE_CONSTANTS[PARTY_BOARD])
+    rules = {selector.strip(): body for selector, body in _css_rules(style)}
+    sizes = _size_tokens(_read(REWARD_TOKENS))
+
+    def px(body: str, prop: str) -> float:
+        declared = re.search(rf"(?<![-\w]){prop}:\s*([^;]+);", body)
+        assert declared is not None, prop
+        value = _font_size_px(declared.group(1), sizes)
+        assert value is not None, f"{prop}: {declared.group(1)}"
+        return value
+
+    board, hint, dock = rules[".board"], rules[".hint"], rules[".dock"]
+    assert "margin: 0;" in hint
+    line_height = float(re.search(r"line-height:\s*([\d.]+);", hint).group(1))
+    hint_bottom = px(hint, "top") + px(hint, "font-size") * line_height
+    dock_top = px(board, "height") - px(dock, "bottom") - px(dock, "height")
+    assert px(dock, "height") == 84
+    assert px(dock, "bottom") == 46
+    assert hint_bottom + 12 <= dock_top, (hint_bottom, dock_top)
+    assert px(hint, "font-size") == 27
+    assert "font-weight: 600;" in hint
+
+
 def test_panel_text_sizes_respect_the_22px_floor() -> None:
     """PANEL-SPEC §1: no body text below 22px. Every font-size in the
     panel styles resolves against the panel size tokens or an explicit
@@ -568,6 +598,40 @@ def _render_party_board(
         f"render harness failed: {completed.stderr}"
     )
     return json.loads(completed.stdout)
+
+
+def test_party_board_wordmark_row_is_the_monogram_lockup() -> None:
+    """PANEL-SPEC §2 item 1: the wordmark row is rule · compass-rose
+    monogram · NestQuest · rule. The monogram is an inline SVG filled
+    with the brand gradient — the old d20 hexagon pair and its "20"
+    numerals are gone, and nothing is fetched from a remote URL or
+    embedded as a raster logo."""
+    source = _read(PARTY_BOARD)
+    assert "d20" not in _style_literal(source, STYLE_CONSTANTS[PARTY_BOARD])
+    assert 'class="d20' not in source
+    assert "HEXAGON_CLIP" not in source
+
+    html = _render_party_board(
+        {"type": "custom:nestquest-party-board-card"},
+        _three_child_states(),
+    )["html"]
+    row = re.search(r'<div class="wordmark-row">(.*?)</div>', html, re.DOTALL)
+    assert row is not None
+    row_html = row.group(1)
+    classes = re.findall(r'<(?:span|svg) class="([^"]+)"', row_html)
+    assert classes == ["rule", "monogram", "wordmark", "rule"]
+    assert '<svg class="monogram" viewBox="0 0 100 100" aria-hidden="true"' in row_html
+    assert "var(--nq-brand-blue)" in row_html
+    assert "var(--nq-brand-purple)" in row_html
+    assert ">N</text>" in row_html
+    assert ">NestQuest</span>" in row_html
+    assert "d20" not in row_html
+    assert "<img" not in row_html
+
+    bundle = _read(BUNDLE_PATH)
+    assert "d20-numeral\">20<" not in bundle
+    assert "data:image/png" not in bundle
+    assert not re.search(r"https?://", bundle)
 
 
 def test_party_board_renders_discovered_children_in_sort_order() -> None:
@@ -764,6 +828,7 @@ def _render_quest_log(
     url: str,
     idle_ms: int | None = None,
     probe_ms: int | None = None,
+    tap_complete: int | None = None,
 ) -> dict:
     """Render the built bundle's quest log and report its location.
 
@@ -787,6 +852,8 @@ def _render_quest_log(
         spec["idle_ms"] = idle_ms
     if probe_ms is not None:
         spec["probe_ms"] = probe_ms
+    if tap_complete is not None:
+        spec["tap_complete"] = tap_complete
     completed = subprocess.run(
         ["node", str(QUEST_LOG_HARNESS)],
         input=json.dumps(spec),
@@ -886,6 +953,193 @@ def test_quest_complete_screen_returns_to_the_board_after_the_countdown() -> Non
     assert result["probe"]["countdown"] == "Returning to The Party in 1 seconds"
     # …and at zero the card has returned to the party board.
     assert result["location"] == "/nestquest"
+
+
+def test_tapping_complete_confirms_and_calls_the_service() -> None:
+    """Tapping an open quest's Complete opens the confirm dialog, and the
+    dialog's Complete calls nestquest.complete_quest with the panel actor.
+    With ``useDefineForClassFields`` on (the ES2022 default) the card's
+    reactive fields were emitted as native class fields that shadowed
+    Lit's accessors: ``_confirm`` changed but no re-render was scheduled,
+    so the dialog never opened and the tap did nothing."""
+    generated = _generate_dashboard(
+        {}, _three_child_states(), url="http://homeassistant.local/nestquest"
+    )
+    open_quest = {
+        "id": 42,
+        "definition_id": 7,
+        "child_id": 1,
+        "title": "Brush Teeth",
+        "icon": None,
+        "window": "morning",
+        "due_time": "08:15",
+        "state": "open",
+        "overdue": True,
+        "completed_at": None,
+        "on_time": None,
+    }
+    states = {
+        **_three_child_states(),
+        "sensor.nestquest_ada_quests_due_today": _state(
+            "1",
+            child_name="Ada",
+            child_id=1,
+            present=True,
+            instances=[open_quest],
+        ),
+    }
+    result = _render_quest_log(
+        generated["views"][1]["cards"][0],
+        states,
+        url="http://homeassistant.local/nestquest/ada",
+        tap_complete=open_quest["id"],
+    )
+    assert result["tap"]["dialog_opened"] is True
+    assert result["tap"]["service_calls"] == [
+        {
+            "domain": "nestquest",
+            "service": "complete_quest",
+            "data": {
+                "instance_id": open_quest["id"],
+                "actor": "panel",
+                "actor_child_id": open_quest["child_id"],
+            },
+        }
+    ]
+
+
+def test_card_build_keeps_lit_reactive_accessors() -> None:
+    """The frontend build must not emit class fields that shadow Lit's
+    reactive property accessors (Lit's documented TypeScript setting)."""
+    tsconfig = json.loads((FRONTEND_DIR / "tsconfig.json").read_text())
+    assert tsconfig["compilerOptions"]["useDefineForClassFields"] is False
+
+
+def test_quest_log_crest_keeps_its_shield_classes() -> None:
+    """PANEL-SPEC §3 header crest: a present child's crest renders as the
+    styled shield, not a bare span. Lit removes an attribute outright when
+    any interpolated part of it is ``nothing``, so a class written as
+    ``crest${away ? " away" : nothing}`` lost ``crest`` for every present
+    child and the header showed an unstyled sliver. The rendered markup
+    must carry ``class="crest"`` (present) and ``class="crest away"``
+    (away), each wrapping the face and initial."""
+    generated = _generate_dashboard(
+        {}, _three_child_states(), url="http://homeassistant.local/nestquest"
+    )
+    log_config = generated["views"][1]["cards"][0]
+    for slug, crest_class in (("ada", "crest"), ("bo", "crest away")):
+        result = _render_quest_log(
+            log_config,
+            _three_child_states(),
+            url=f"http://homeassistant.local/nestquest/{slug}",
+        )
+        header = result["html"][result["html"].index('<header class="header">') :]
+        crest = re.match(
+            r'<header class="header">\s*(?:<!--[^>]*-->\s*)*<span ([^>]*)>\s*'
+            r'<span class="crest-face">\s*<span class="initial">',
+            header,
+        )
+        assert crest is not None, header[:600]
+        assert f'class="{crest_class}"' in crest.group(1), crest.group(1)
+
+
+def test_quest_log_meta_line_keeps_its_meta_class() -> None:
+    """An open quest's meta line is styled by ``.quest .meta`` (and
+    ``.quest .meta.late`` when overdue). Written as
+    ``meta ${late ? "late" : nothing}``, Lit dropped the whole class
+    attribute for every quest that was not late, leaving the due line
+    unstyled. The rendered markup must carry ``class="meta"`` on time and
+    ``class="meta late"`` overdue."""
+    generated = _generate_dashboard(
+        {}, _three_child_states(), url="http://homeassistant.local/nestquest"
+    )
+
+    def quest(instance_id: int, title: str, overdue: bool) -> dict:
+        return {
+            "id": instance_id,
+            "definition_id": instance_id,
+            "child_id": 1,
+            "title": title,
+            "icon": None,
+            "window": "morning",
+            "due_time": "08:15",
+            "state": "open",
+            "overdue": overdue,
+            "completed_at": None,
+            "on_time": None,
+        }
+
+    states = {
+        **_three_child_states(),
+        "sensor.nestquest_ada_quests_due_today": _state(
+            "2",
+            child_name="Ada",
+            child_id=1,
+            present=True,
+            instances=[
+                quest(41, "Make Bed", overdue=False),
+                quest(42, "Brush Teeth", overdue=True),
+            ],
+        ),
+    }
+    result = _render_quest_log(
+        generated["views"][1]["cards"][0],
+        states,
+        url="http://homeassistant.local/nestquest/ada",
+    )
+    metas = {}
+    for card in result["html"].split('data-instance-id="')[1:]:
+        meta = re.search(
+            r'<span class="quest-title">.*?</span>'
+            r"\s*(?:<!--[^>]*-->\s*)*<span([^>]*)>",
+            card,
+            re.S,
+        )
+        assert meta is not None, card[:800]
+        metas[card[: card.index('"')]] = meta.group(1)
+    assert set(metas) == {"41", "42"}, metas
+    assert metas["41"].strip() == 'class="meta"', metas["41"]
+    assert metas["42"].strip() == 'class="meta late"', metas["42"]
+
+
+def test_quest_log_crest_matches_the_spec_geometry() -> None:
+    """PANEL-SPEC §3 header crest: 96x110 shield, 4px ring of
+    rgba(255,255,255,.22) around the --nq-p-crest face, 44px/700 display
+    initial in full-opacity white; away swaps only the face gradient.
+    jsdom cannot lay out, so this pins the stylesheet the rendered test
+    above shows is applied."""
+    source = QUEST_LOG.read_text(encoding="utf-8")
+
+    def rule(selector: str) -> str:
+        found = re.search(
+            r"\n  " + re.escape(selector) + r" \{(.*?)\n  \}", source, re.DOTALL
+        )
+        assert found is not None, selector
+        return found.group(1)
+
+    crest = rule(".crest")
+    for decl in (
+        "width: 96px;",
+        "height: 110px;",
+        "padding: 4px;",
+        "clip-path: ${unsafeCSS(SHIELD_CLIP)};",
+        "background: rgba(255, 255, 255, 0.22);",
+    ):
+        assert decl in crest, decl
+    face = rule(".crest-face")
+    assert "background: var(--nq-p-crest);" in face
+    assert "clip-path: ${unsafeCSS(SHIELD_CLIP)};" in face
+    initial = rule(".crest .initial")
+    for decl in (
+        "font-family: var(--nq-p-font-display);",
+        "font-size: 44px;",
+        "font-weight: 700;",
+        "color: #ffffff;",
+    ):
+        assert decl in initial, decl
+    assert "opacity" not in initial
+    away = rule(".crest.away .crest-face")
+    assert away.strip() == "background: var(--nq-p-crest-away);"
 
 
 # --- Quest card icons (definition icon on the open tile) ---------------------

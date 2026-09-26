@@ -8,9 +8,13 @@
  * pathname's last segment), after the optional probe wait one snapshot of
  * the render is taken mid-wait, then after the optional idle wait stdout
  * receives one JSON object {location, headline, countdown, html, tiles,
- * probe} — the final window pathname, the rendered title, the
+ * probe, tap} — the final window pathname, the rendered title, the
  * complete-screen countdown text, the rendered shadow DOM, each quest
- * card's icon tile, and the probe snapshot when probe_ms was given. The Python panel tests drive this harness so the
+ * card's icon tile, and the probe snapshot when probe_ms was given. With
+ * tap_complete: <instance id> the harness taps that card's Complete button,
+ * records whether the confirm dialog opened, taps the dialog's Complete, and
+ * reports every hass.callService call as tap: {dialog_opened, service_calls}.
+ * The Python panel tests drive this harness so the
  * assertions run against the exact bundle HACS ships.
  */
 import { readFileSync } from "node:fs";
@@ -43,11 +47,33 @@ globalThis.Event = dom.window.Event;
 
 await import(pathToFileURL(spec.bundle).href);
 
+const serviceCalls = [];
+const hass = {
+  ...spec.hass,
+  callService(domain, service, data) {
+    serviceCalls.push({ domain, service, data });
+    return Promise.resolve();
+  },
+};
+
 const element = document.createElement("nestquest-quest-log-card");
 element.setConfig(spec.config);
-element.hass = spec.hass;
+element.hass = hass;
 document.body.appendChild(element);
 await element.updateComplete;
+
+let tap = null;
+if (spec.tap_complete !== undefined) {
+  element.shadowRoot
+    .querySelector(`.quest[data-instance-id="${spec.tap_complete}"] button.complete`)
+    .click();
+  await element.updateComplete;
+  const confirm = element.shadowRoot.querySelector("button.do-complete");
+  confirm?.click();
+  await element.updateComplete;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  tap = { dialog_opened: confirm !== null, service_calls: serviceCalls };
+}
 
 const snapshot = () => ({
   location: window.location.pathname,
@@ -84,6 +110,6 @@ if (spec.idle_ms !== undefined) {
   await new Promise((resolve) => setTimeout(resolve, spec.idle_ms));
 }
 
-const payload = JSON.stringify({ ...snapshot(), probe });
+const payload = JSON.stringify({ ...snapshot(), probe, tap });
 await new Promise((resolve) => process.stdout.write(payload, () => resolve()));
 process.exit(0);
