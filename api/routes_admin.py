@@ -165,10 +165,12 @@ integration's Home-Assistant config-entry options remain a temporary,
 SEPARATE source until Feature 18 wires the client to the API — the two
 are deliberately not unified here:
 
-- ``GET /settings`` returns the current effective settings: all ten
+- ``GET /settings`` returns the current effective settings: all eleven
   documented fields (the rolling horizon, the day rollover time, the
-  notify target, the three notification times and the four enable
-  toggles) — the defaults on a fresh database.
+  notify target, the three notification times, the four enable
+  toggles and the ``timezone`` — the IANA household zone the
+  household-local dates derive from, empty meaning host local) — the
+  defaults on a fresh database.
 - ``PATCH /settings`` updates ONLY the supplied fields: the body is a
   JSON object of settings field names to new values, passed STRAIGHT
   to :func:`nestquest_core.settings_store.update_settings` — the
@@ -184,18 +186,19 @@ The missed-sweep trigger (task 058c7b69) follows the same pattern over
 :mod:`nestquest_core.sweep` — the HA-free sweep policy the
 integration's rollover listener shares:
 
-- ``POST /missed-sweep`` runs the sweep for the API host's local
-  ``today`` (ONE :func:`_local_now` clock read threaded into the core
-  call) and publishes each returned ``(event_type, payload)`` pair
-  DIRECTLY on the app's ONE transition publisher — the sweep-built
-  payload, never re-fetched (the core commits its watermark before
-  returning, so a failed re-fetch after it would lose the missed event
-  forever), the same publish-what-the-core-built shape
-  api/scheduler.py uses.  The watermark rule
-  (a same-day rerun announces nothing, a post-downtime run sweeps the
-  accumulated window once), the no-completion-event rule and the
-  read-only-over-the-domain-tables guarantee all live in the core; the
-  response reports how many transitions were published.
+- ``POST /missed-sweep`` runs the sweep for the household-local
+  ``today`` (ONE :func:`_local_now` clock read re-expressed in the
+  configured household ``timezone`` — empty falls back to host local —
+  threaded into the core call) and publishes each returned
+  ``(event_type, payload)`` pair DIRECTLY on the app's ONE transition
+  publisher — the sweep-built payload, never re-fetched (the core
+  commits its watermark before returning, so a failed re-fetch after it
+  would lose the missed event forever), the same
+  publish-what-the-core-built shape api/scheduler.py uses.  The
+  watermark rule (a same-day rerun announces nothing, a post-downtime
+  run sweeps the accumulated window once), the no-completion-event rule
+  and the read-only-over-the-domain-tables guarantee all live in the
+  core; the response reports how many transitions were published.
 
 The occurrence-preview route (task 5f843564) lets the admin PWA's
 Definitions edit sheet show the next dates a rule fires on WITHOUT
@@ -205,9 +208,10 @@ reimplementing the recurrence rules client-side:
   ``rule`` object create/edit take (:class:`AdminRuleRequest`, built
   through the SAME :func:`_rule_from_request` / core ``from_dict``
   validation, so a rejected rule is 422 exactly as on create), an
-  optional ``start_date`` (default: the API host's local ``today``,
-  ONE :func:`_local_now` clock read) and an optional ``count`` (1..50,
-  default 10).  The dates come from ONE
+  optional ``start_date`` (default: the household-local ``today`` —
+  ONE :func:`_local_now` clock read re-expressed in the configured
+  household ``timezone``, empty falling back to host local) and an
+  optional ``count`` (1..50, default 10).  The dates come from ONE
   :func:`nestquest_core.recurrence.occurrences_between` call — the
   same engine the materializer walks — so the preview can only agree
   with what would be generated.  The scan is BOUNDED server-side: the
@@ -2281,7 +2285,9 @@ async def admin_run_missed_sweep(
     handler performs NO auth of its own).  Thin adapter over the SAME
     HA-free sweep policy the integration's rollover listener runs
     (:mod:`nestquest_core.sweep`): ONE timezone-aware clock read
-    (:func:`_local_now`) pins the API host's local ``today``, and ONE
+    (:func:`_local_now`, re-expressed in the configured household
+    ``timezone``; empty falls back to host local) pins the
+    household-local ``today``, and ONE
     :func:`nestquest_core.sweep.run_missed_sweep` call does everything
     else — the past-due open-instance query, the documented payload
     build and the watermark update (a same-day rerun is an empty
