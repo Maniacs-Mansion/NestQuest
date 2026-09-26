@@ -583,3 +583,14 @@
   color: var(--nq-a-ink-secondary);
   font-style: italic;
 }
+
+.defs-sublabel {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--nq-a-ink-secondary);
+}
+
+.defs-emoji {
+  line-height: 1;
+}

@@ -46,6 +46,11 @@ import {
 import {
   DEFINITION_ICONS,
   DefinitionIcon,
+  FA_DEFINITION_ICONS,
+  emojiIconKey,
+  emojiIconText,
+  faIconKey,
+  faIconName,
   lucideIconKey,
   normalizeDefinitionIconName,
 } from "./definitionIcons";
@@ -84,8 +89,13 @@ const WEEKDAY_LONG = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "S
 
 interface Draft {
   title: string;
-  /** A Lucide name; a legacy value outside the subset is kept until replaced. */
+  /**
+   * The stored icon key (`lucide:`, `fa:` or `emoji:`); a legacy value
+   * outside the curated sets is kept until replaced.
+   */
   icon: string | null;
+  /** The emoji field's text; typing in it sets `icon` to `emoji:<text>`. */
+  emoji: string;
   assigneeIds: number[];
   repeats: Repeats;
   interval: string;
@@ -126,6 +136,7 @@ function newDraft(activeChildren: AdminChild[]): Draft {
   return {
     title: "",
     icon: null,
+    emoji: "",
     assigneeIds: activeChildren.length === 1 ? [activeChildren[0].id] : [],
     repeats: "daily",
     interval: "1",
@@ -151,6 +162,7 @@ function draftFrom(definition: QuestDefinition, activeChildren: AdminChild[]): D
   return {
     title: definition.title,
     icon: definition.icon,
+    emoji: emojiIconText(definition.icon),
     // Inactive children cannot be submitted (the API rejects them with 422).
     assigneeIds: definition.assignees.map((a) => a.id).filter((id) => active.has(id)),
     repeats: REPEATS_BY_RULE[rule.rule_type],
@@ -237,6 +249,9 @@ function buildBody(draft: Draft, keepsAssignees = false): DefinitionCreateBody |
   if (!title) return "Give the task a title.";
   if (draft.assigneeIds.length === 0 && !keepsAssignees) return "Assign at least one child.";
   if (draft.windows.length === 0) return "Pick at least one window.";
+  if (draft.emoji.trim() && draft.icon === null) {
+    return "Enter a single emoji (no spaces or < > &), or clear the emoji field.";
+  }
   const rule = buildRule(draft);
   if (typeof rule === "string") return rule;
   const windows: WindowEntry[] = WINDOW_ORDER.filter((w) => draft.windows.includes(w)).map(
@@ -575,10 +590,12 @@ function EditSheet({
               <button
                 type="button"
                 role="radio"
-                aria-checked={draft.icon === null}
+                aria-checked={draft.icon === null && !draft.emoji.trim()}
                 aria-label="No icon"
-                className={draft.icon === null ? "defs-icon defs-icon--on" : "defs-icon"}
-                onClick={() => update({ icon: null })}
+                className={
+                  draft.icon === null && !draft.emoji.trim() ? "defs-icon defs-icon--on" : "defs-icon"
+                }
+                onClick={() => update({ icon: null, emoji: "" })}
               >
                 <TaskGlyph size={18} />
               </button>
@@ -594,13 +611,46 @@ function EditSheet({
                     aria-label={label}
                     data-icon-option={name}
                     className={on ? "defs-icon defs-icon--on" : "defs-icon"}
-                    onClick={() => update({ icon: lucideIconKey(name) })}
+                    onClick={() => update({ icon: lucideIconKey(name), emoji: "" })}
                   >
                     <GlyphSvg icon={icon} size={18} />
                   </button>
                 );
               })}
             </div>
+            <span className="defs-sublabel" id="defs-label-icon-fa">
+              Font Awesome
+            </span>
+            <div className="defs-icon-grid" role="radiogroup" aria-labelledby="defs-label-icon-fa">
+              {FA_DEFINITION_ICONS.map((icon) => {
+                const { name, label } = icon;
+                const on = faIconName(draft.icon) === name;
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    role="radio"
+                    aria-checked={on}
+                    aria-label={label}
+                    data-icon-option={faIconKey(name)}
+                    className={on ? "defs-icon defs-icon--on" : "defs-icon"}
+                    onClick={() => update({ icon: faIconKey(name), emoji: "" })}
+                  >
+                    <GlyphSvg icon={icon} size={18} />
+                  </button>
+                );
+              })}
+            </div>
+            <label className="defs-due">
+              <span>Emoji</span>
+              <input
+                className="defs-input"
+                aria-label="Emoji"
+                placeholder="e.g. 🐶"
+                value={draft.emoji}
+                onChange={(e) => update({ emoji: e.target.value, icon: emojiIconKey(e.target.value) })}
+              />
+            </label>
           </Field>
 
           <Field label="Assigned children" id="defs-label-children">

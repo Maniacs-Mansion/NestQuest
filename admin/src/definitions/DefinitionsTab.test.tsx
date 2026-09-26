@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import DefinitionsTab from "./DefinitionsTab";
-import { DEFINITION_ICONS, DefinitionIcon, normalizeDefinitionIconName } from "./definitionIcons";
+import {
+  DEFINITION_ICONS,
+  DefinitionIcon,
+  FA_DEFINITION_ICONS,
+  emojiIconKey,
+  faIconName,
+  findDefinitionIcon,
+  normalizeDefinitionIconName,
+} from "./definitionIcons";
 import type { AdminChild, DefinitionRule, QuestDefinition } from "../api/definitions";
 import { storeTokens } from "../auth/oidc";
 
@@ -1166,7 +1174,7 @@ describe("DefinitionsTab namespaced icons", () => {
     });
   }
 
-  for (const icon of ["fa:dog", "emoji:🐶", "mystery:dog"]) {
+  for (const icon of ["mystery:dog", "lucide:not-an-icon", "fa:not-an-icon", "emoji:a b"]) {
     it(`renders the fallback tile and selects nothing for ${icon}`, async () => {
       await renderReady([{ ...BRUSH, id: 31, icon }]);
       const row = screen.getByTestId("definition-31");
@@ -1174,9 +1182,11 @@ describe("DefinitionsTab namespaced icons", () => {
 
       fireEvent.click(row);
       const s = sheet();
-      const group = within(s).getByRole("radiogroup", { name: "Icon" });
-      for (const radio of within(group).getAllByRole("radio")) {
-        expect(radio.getAttribute("aria-checked")).toBe("false");
+      for (const name of ["Icon", "Font Awesome"]) {
+        const group = within(s).getByRole("radiogroup", { name });
+        for (const radio of within(group).getAllByRole("radio")) {
+          expect(radio.getAttribute("aria-checked")).toBe("false");
+        }
       }
     });
   }
@@ -1204,6 +1214,232 @@ describe("DefinitionsTab namespaced icons", () => {
       fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
     });
     expect((api.writes()[1].body as { icon: string | null }).icon).toBeNull();
+  });
+});
+
+describe("DefinitionsTab Font Awesome and emoji icons", () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  /** What a row draws: `svg:<data-icon>`, `emoji:<text>`, or `fallback`. */
+  function rowGlyph(row: HTMLElement): string {
+    const glyph = row.querySelector(".defs-row-glyph");
+    const emoji = glyph!.querySelector("[data-emoji]");
+    if (emoji) return `emoji:${emoji.textContent}`;
+    const svg = glyph!.querySelector("svg");
+    expect(svg).not.toBeNull();
+    const name = svg!.getAttribute("data-icon");
+    if (name === null) return "fallback";
+    return `${svg!.getAttribute("fill") === "none" ? "lucide" : "fa"}:${name}`;
+  }
+
+  function radio(s: HTMLElement, group: "Icon" | "Font Awesome", label: string): HTMLElement {
+    return within(within(s).getByRole("radiogroup", { name: group })).getByRole("radio", {
+      name: label,
+    });
+  }
+
+  function emojiInput(s: HTMLElement): HTMLInputElement {
+    return within(s).getByRole("textbox", { name: "Emoji" }) as HTMLInputElement;
+  }
+
+  async function save(s: HTMLElement) {
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+  }
+
+  function fillNewTask(s: HTMLElement) {
+    fireEvent.change(within(s).getByRole("textbox", { name: "Title" }), {
+      target: { value: "Walk the dog" },
+    });
+    fireEvent.click(within(s).getByRole("button", { name: /Assigned children/ }));
+    fireEvent.click(within(s).getByRole("checkbox", { name: "Declan" }));
+    fireEvent.click(within(s).getByRole("button", { name: "Morning" }));
+  }
+
+  it("ships the curated Font Awesome subset, each drawn as a filled glyph", () => {
+    expect(FA_DEFINITION_ICONS.length).toBeGreaterThan(0);
+    for (const entry of FA_DEFINITION_ICONS) {
+      expect(entry.kind).toBe("fa");
+      expect(findDefinitionIcon(`fa:${entry.name}`)).toBe(entry);
+      const { container, unmount } = render(<DefinitionIcon name={`fa:${entry.name}`} />);
+      const svg = container.querySelector("svg");
+      expect(svg, entry.name).not.toBeNull();
+      expect(svg!.getAttribute("data-icon")).toBe(entry.name);
+      expect(svg!.getAttribute("fill")).toBe("currentColor");
+      unmount();
+    }
+  });
+
+  it("builds and validates emoji keys like the registry", () => {
+    expect(emojiIconKey("🐶")).toBe("emoji:🐶");
+    expect(emojiIconKey(" 🐶 ")).toBe("emoji:🐶");
+    expect(emojiIconKey("👨‍👩‍👧‍👦")).toBe("emoji:👨‍👩‍👧‍👦");
+    expect(emojiIconKey("⭐".repeat(8))).toBe(`emoji:${"⭐".repeat(8)}`);
+    for (const bad of ["", "   ", "⭐".repeat(9), "a b", "<b>", "a&b", "🐶\u0007"]) {
+      expect(emojiIconKey(bad), JSON.stringify(bad)).toBeNull();
+    }
+    expect(faIconName("fa:dog")).toBe("dog");
+    expect(faIconName("lucide:dog")).toBeNull();
+    expect(faIconName(null)).toBeNull();
+  });
+
+  it("renders lucide, legacy, fa and emoji rows, and the fallback for none or unknown", async () => {
+    await renderReady([
+      { ...BRUSH, id: 40, icon: "lucide:dog" },
+      { ...BRUSH, id: 41, title: "Task 41", icon: "dog" },
+      { ...BRUSH, id: 42, title: "Task 42", icon: "fa:dog" },
+      { ...BRUSH, id: 43, title: "Task 43", icon: "emoji:🐶" },
+      { ...BRUSH, id: 44, title: "Task 44", icon: null },
+      { ...BRUSH, id: 45, title: "Task 45", icon: "" },
+      { ...BRUSH, id: 46, title: "Task 46", icon: "mystery:dog" },
+    ]);
+    expect(rowGlyph(screen.getByTestId("definition-40"))).toBe("lucide:dog");
+    expect(rowGlyph(screen.getByTestId("definition-41"))).toBe("lucide:dog");
+    expect(rowGlyph(screen.getByTestId("definition-42"))).toBe("fa:dog");
+    expect(rowGlyph(screen.getByTestId("definition-43"))).toBe("emoji:🐶");
+    expect(rowGlyph(screen.getByTestId("definition-44"))).toBe("fallback");
+    expect(rowGlyph(screen.getByTestId("definition-45"))).toBe("fallback");
+    expect(rowGlyph(screen.getByTestId("definition-46"))).toBe("fallback");
+  });
+
+  it("a Font Awesome choice is POSTed as fa:<name> and renders on its row", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    const s = sheet();
+    fillNewTask(s);
+    fireEvent.click(radio(s, "Font Awesome", "Dog"));
+    expect(radio(s, "Font Awesome", "Dog").getAttribute("aria-checked")).toBe("true");
+    expect(radio(s, "Font Awesome", "Dog").className).toContain("defs-icon--on");
+    expect(radio(s, "Icon", "Dog").getAttribute("aria-checked")).toBe("false");
+    expect(radio(s, "Icon", "No icon").getAttribute("aria-checked")).toBe("false");
+
+    await save(s);
+    expect(api.writes()).toHaveLength(1);
+    expect(api.writes()[0].method).toBe("POST");
+    expect((api.writes()[0].body as { icon: string }).icon).toBe("fa:dog");
+    expect(rowGlyph(await screen.findByTestId("definition-99"))).toBe("fa:dog");
+  });
+
+  it("a typed emoji is POSTed as emoji:<grapheme> and renders on its row", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    const s = sheet();
+    fillNewTask(s);
+    fireEvent.change(emojiInput(s), { target: { value: " 🐶 " } });
+    expect(radio(s, "Icon", "No icon").getAttribute("aria-checked")).toBe("false");
+
+    await save(s);
+    expect(api.writes()).toHaveLength(1);
+    expect((api.writes()[0].body as { icon: string }).icon).toBe("emoji:🐶");
+    expect(rowGlyph(await screen.findByTestId("definition-99"))).toBe("emoji:🐶");
+  });
+
+  it("a Lucide choice is POSTed as lucide:<name> after an emoji was typed", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    const s = sheet();
+    fillNewTask(s);
+    fireEvent.change(emojiInput(s), { target: { value: "🐶" } });
+    fireEvent.click(radio(s, "Icon", "Dog"));
+    expect(emojiInput(s).value).toBe("");
+
+    await save(s);
+    expect((api.writes()[0].body as { icon: string }).icon).toBe("lucide:dog");
+    expect(rowGlyph(await screen.findByTestId("definition-99"))).toBe("lucide:dog");
+  });
+
+  for (const bad of ["a b", "<b>", "a&b", "⭐".repeat(9)]) {
+    it(`an invalid emoji entry ${JSON.stringify(bad)} is not saved`, async () => {
+      await renderReady([{ ...BRUSH, id: 50, icon: "lucide:dog" }]);
+      fireEvent.click(screen.getByTestId("definition-50"));
+      const s = sheet();
+      fireEvent.change(emojiInput(s), { target: { value: bad } });
+
+      await save(s);
+      expect(api.writes()).toHaveLength(0);
+      expect(within(s).getByText(/Enter a single emoji/)).toBeTruthy();
+      expect(screen.getByRole("dialog")).toBe(s);
+    });
+  }
+
+  it("prefills a fa:<name> task and PATCHes an emoji replacement", async () => {
+    await renderReady([{ ...BRUSH, id: 51, icon: "fa:dog" }]);
+    fireEvent.click(screen.getByTestId("definition-51"));
+    const s = sheet();
+    expect(radio(s, "Font Awesome", "Dog").getAttribute("aria-checked")).toBe("true");
+    expect(radio(s, "Icon", "Dog").getAttribute("aria-checked")).toBe("false");
+    expect(radio(s, "Icon", "No icon").getAttribute("aria-checked")).toBe("false");
+    expect(emojiInput(s).value).toBe("");
+
+    fireEvent.change(emojiInput(s), { target: { value: "🐱" } });
+    expect(radio(s, "Font Awesome", "Dog").getAttribute("aria-checked")).toBe("false");
+    await save(s);
+    const { method, path, body } = api.writes()[0];
+    expect(method).toBe("PATCH");
+    expect(path).toBe("/api/v1/admin/quest-definitions/51");
+    expect((body as { icon: string }).icon).toBe("emoji:🐱");
+    await waitFor(() => expect(rowGlyph(screen.getByTestId("definition-51"))).toBe("emoji:🐱"));
+  });
+
+  it("prefills an emoji:<grapheme> task and PATCHes a Font Awesome replacement", async () => {
+    await renderReady([{ ...BRUSH, id: 52, icon: "emoji:🐶" }]);
+    fireEvent.click(screen.getByTestId("definition-52"));
+    const s = sheet();
+    expect(emojiInput(s).value).toBe("🐶");
+    expect(radio(s, "Icon", "No icon").getAttribute("aria-checked")).toBe("false");
+    for (const name of ["Icon", "Font Awesome"]) {
+      const group = within(s).getByRole("radiogroup", { name });
+      expect(within(group).queryAllByRole("radio", { checked: true })).toHaveLength(0);
+    }
+
+    fireEvent.click(radio(s, "Font Awesome", "Pets"));
+    expect(emojiInput(s).value).toBe("");
+    await save(s);
+    expect((api.writes()[0].body as { icon: string }).icon).toBe("fa:paw");
+    await waitFor(() => expect(rowGlyph(screen.getByTestId("definition-52"))).toBe("fa:paw"));
+  });
+
+  it("an unchanged emoji is sent as-is on edit", async () => {
+    await renderReady([{ ...BRUSH, id: 53, icon: "emoji:🐶" }]);
+    fireEvent.click(screen.getByTestId("definition-53"));
+    const s = sheet();
+    fireEvent.change(within(s).getByRole("textbox", { name: "Title" }), {
+      target: { value: "Feed the dog" },
+    });
+    await save(s);
+    expect((api.writes()[0].body as { icon: string }).icon).toBe("emoji:🐶");
+  });
+
+  it("No icon and an emptied emoji field both clear the icon to null", async () => {
+    await renderReady([
+      { ...BRUSH, id: 54, icon: "emoji:🐶" },
+      { ...BRUSH, id: 55, title: "Task 55", icon: "fa:dog" },
+    ]);
+    fireEvent.click(screen.getByTestId("definition-54"));
+    let s = sheet();
+    fireEvent.change(emojiInput(s), { target: { value: "" } });
+    expect(radio(s, "Icon", "No icon").getAttribute("aria-checked")).toBe("true");
+    await save(s);
+    expect((api.writes()[0].body as { icon: string | null }).icon).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    fireEvent.click(screen.getByTestId("definition-55"));
+    s = sheet();
+    fireEvent.click(radio(s, "Icon", "No icon"));
+    expect(radio(s, "Font Awesome", "Dog").getAttribute("aria-checked")).toBe("false");
+    await save(s);
+    expect((api.writes()[1].body as { icon: string | null }).icon).toBeNull();
+    await waitFor(() => expect(rowGlyph(screen.getByTestId("definition-55"))).toBe("fallback"));
   });
 });
 
