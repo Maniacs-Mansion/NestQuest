@@ -1,5 +1,38 @@
 # NestQuest Release Notes
 
+## Version 0.9.2 — 2026-09-26
+
+### Scope
+
+Patch release carrying the admin "Delete task" capability onto `main`.
+
+- **Delete a task in the admin PWA:** the definition edit sheet gains an
+  admin-only Delete action with hybrid semantics (D-017, owner decision "delete
+  if there's no history, retire/deactivate if there is"). If the definition has
+  **no completion history**, it is hard-deleted together with its instances,
+  assignees, windows and its schedule rule (when unreferenced), all in one
+  transaction under the connection lock. If it has **any completion history** (a
+  completion or an un-completion), nothing is deleted: it is retired by
+  deactivation instead, preserving the definition, rule, assignees, windows and
+  all history, with future uncompleted instances cleared as with any
+  deactivation. (PR #262.)
+- **API:** `DELETE /api/v1/admin/quest-definitions/{id}` lives on the admin plane
+  (`require_admin`; a non-admin is refused and an unknown id is 404). The response
+  reports `deleted`/`retired` and carries the retired definition (`null` when
+  deleted). The kids' panel gains no control, and `QuestDefinitionsDao` now has
+  exactly one, history-guarded, delete method.
+
+### Upgrade note
+
+The database schema is unchanged at version **9**; no migration or backup step is
+needed beyond the 0.8.0 note. No runtime dependency is added.
+
+### Requirements
+
+Home Assistant 2024.6.0 or newer. Install through HACS from the
+`Maniacs-Mansion/NestQuest` GitHub mirror (kept current by the Gitea push
+mirror).
+
 ## Version 0.9.1 — 2026-09-26
 
 ### Scope
