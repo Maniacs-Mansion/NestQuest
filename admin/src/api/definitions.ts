@@ -150,7 +150,10 @@ export async function updateDefinition(
 export const OCCURRENCES_PREVIEW_PATH = `${DEFINITIONS_PATH}/occurrences-preview`;
 
 export interface OccurrencesPreviewOptions {
-  /** "YYYY-MM-DD"; the API defaults to its host's today. */
+  /**
+   * "YYYY-MM-DD"; the API defaults to the household-local today in the
+   * configured `timezone` (the API host's local time when that is empty).
+   */
   startDate?: string;
   /** 1..50; the API defaults to 10. */
   count?: number;
