@@ -8,7 +8,8 @@ configured ``day_rollover_time`` — read fresh from the settings store
 at the top of EVERY cycle, so an admin's settings change applies on
 the next scheduling decision without a restart — then runs the
 HA-free core's :func:`nestquest_core.sweep.run_missed_sweep` for the
-API host's local date and publishes each returned
+household-local date (the stored ``timezone`` setting; the API host's
+local date when unset) and publishes each returned
 ``nestquest_quest_missed`` event on the app's ONE transition publisher
 (the same SSE stream every route publishes through).
 
@@ -130,7 +131,11 @@ class MissedSweepScheduler:
                 )
                 await self._sleep(_RETRY_BACKOFF_SECONDS)
                 continue
-            delay = _delay_seconds(rollover, self._clock())
+            # The host may run UTC: the rollover is a household wall-clock
+            # time, so the clock read is re-expressed in the stored zone.
+            delay = _delay_seconds(
+                rollover, settings.household_now(self._clock())
+            )
             LOGGER.info(
                 "NestQuest missed sweep scheduled for %s (%.0fs from now)",
                 settings.day_rollover_time,
@@ -138,7 +143,9 @@ class MissedSweepScheduler:
             )
             await self._sleep(delay)
             try:
-                await self._run_once(self._clock().date())
+                await self._run_once(
+                    settings.household_now(self._clock()).date()
+                )
             except Exception:
                 # Not silent either: the sweep error is logged and the
                 # loop backs off before the next cycle, whose watermark

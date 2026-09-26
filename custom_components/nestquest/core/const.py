@@ -112,6 +112,13 @@ CONF_AFTERNOON_REMINDER_ENABLED = "afternoon_reminder_enabled"
 CONF_END_OF_DAY_REPORT_ENABLED = "end_of_day_report_enabled"
 CONF_CELEBRATION_ENABLED = "celebration_enabled"
 DEFAULT_AUTOMATION_ENABLED = True
+# The household's IANA time zone (e.g. ``America/New_York``) the API
+# service reads its clock in.  The empty string keeps the historical
+# behaviour — the API host's own local time — so an existing install is
+# unchanged until the owner sets it.  The integration itself always uses
+# Home Assistant's configured ``time_zone`` and ignores this field.
+CONF_TIMEZONE = "timezone"
+DEFAULT_TIMEZONE = ""
 
 # Panel-plane API client (Feature 18): the integration reaches the
 # NestQuest API service (Feature 16) over HTTP instead of the database.

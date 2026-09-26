@@ -867,7 +867,7 @@ class AdminSettingsResponse(BaseModel):
     """The effective settings as the admin plane serializes them.
 
     Mirrors the core :class:`~nestquest_core.settings.NestQuestSettings`
-    — all TEN documented fields, resolved (every absent stored field
+    — all ELEVEN documented fields, resolved (every absent stored field
     already fell back to its default in the core).  The same shape both
     the GET and the PATCH route answer with.
     """
@@ -882,6 +882,9 @@ class AdminSettingsResponse(BaseModel):
     afternoon_reminder_enabled: bool
     end_of_day_report_enabled: bool
     celebration_enabled: bool
+    #: The household IANA time zone the API reads its clock in; ``""``
+    #: means the API host's local time.
+    timezone: str
 
 
 class AdminMissedSweepResponse(BaseModel):
@@ -1176,6 +1179,26 @@ def _local_now() -> datetime.datetime:
     route's ``_local_now`` is pinned.
     """
     return datetime.datetime.now().astimezone()
+
+
+async def _household_clock(
+    database: object,
+) -> tuple[object, datetime.datetime]:
+    """Return the stored settings and ONE household-local clock read.
+
+    The API host may run UTC while the household does not, so the one
+    :func:`_local_now` read is re-expressed in the stored settings'
+    ``timezone`` (:meth:`NestQuestSettings.household_now`); an unset
+    zone keeps the host's local time.
+    """
+    settings = await core_settings_store.load_settings(database)
+    return settings, settings.household_now(_local_now())
+
+
+async def _household_today(database: object) -> datetime.date:
+    """Return the household-local date of ONE :func:`_household_clock` read."""
+    _settings, now = await _household_clock(database)
+    return now.date()
 
 
 def _rule_from_request(rule: AdminRuleRequest) -> core_recurrence.ScheduleRule:
@@ -1496,7 +1519,7 @@ async def admin_create_quest_definition(
     response_model=AdminOccurrencesPreviewResponse,
 )
 async def admin_preview_occurrences(
-    body: AdminOccurrencesPreviewRequest,
+    body: AdminOccurrencesPreviewRequest, request: Request
 ) -> AdminOccurrencesPreviewResponse:
     """Return the first ``count`` dates the supplied rule fires on.
 
@@ -1509,12 +1532,15 @@ async def admin_preview_occurrences(
     call over the bounded window ``[start_date, start_date + 366
     days]`` — ``start_date`` defaulting to ONE :func:`_local_now` clock
     read — truncated to ``count``.  Every core ``ValueError`` is 422
-    (:func:`_raise_preview_error`).  No database access.
+    (:func:`_raise_preview_error`).  The only database access is the
+    settings read behind the household clock.
     """
     start_date = (
         body.start_date
         if body.start_date is not None
-        else _local_now().date().isoformat()
+        else (
+            await _household_today(request.app.state.db.database)
+        ).isoformat()
     )
     try:
         rule = _rule_from_request(body.rule)
@@ -1839,7 +1865,7 @@ async def admin_presence_override_consequence(
                 body.start_date,
                 body.end_date,
                 body.is_present,
-                today=_local_now().date(),
+                today=await _household_today(state.database),
             )
         )
     except ValueError as error:
@@ -1926,7 +1952,7 @@ async def admin_uncomplete_instance(
     """
     state: DatabaseState = request.app.state.db
     database = state.database
-    now = _local_now()
+    _settings, now = await _household_clock(database)
     sub = claims.get("sub")
     try:
         result = await core_completion.uncomplete_instance(
@@ -1992,7 +2018,7 @@ async def admin_regenerate(
     """
     state: DatabaseState = request.app.state.db
     database = state.database
-    today = _local_now().date()
+    today = await _household_today(state.database)
 
     if body.scope == "household":
         end_date = today + datetime.timedelta(
@@ -2077,7 +2103,7 @@ def _settings_response(
     """Serialize one core NestQuestSettings into the documented payload.
 
     Explicit field-by-field (not ``dataclasses.asdict``) so the payload
-    stays pinned to the ten documented fields even if the core
+    stays pinned to the eleven documented fields even if the core
     dataclass later grows another one.
     """
     return AdminSettingsResponse(
@@ -2091,6 +2117,7 @@ def _settings_response(
         afternoon_reminder_enabled=settings.afternoon_reminder_enabled,
         end_of_day_report_enabled=settings.end_of_day_report_enabled,
         celebration_enabled=settings.celebration_enabled,
+        timezone=settings.timezone,
     )
 
 
@@ -2122,7 +2149,7 @@ async def admin_history_query(
     ``ValueError`` is 422 (:func:`_raise_history_error`).
     """
     state: DatabaseState = request.app.state.db
-    today = _local_now().date()
+    today = await _household_today(state.database)
     try:
         rows = await core_history.query_history(
             state.database, filter, start, end, today=today
@@ -2165,7 +2192,7 @@ async def admin_history_csv(
     JSON route's (:func:`_raise_history_error`).
     """
     state: DatabaseState = request.app.state.db
-    today = _local_now().date()
+    today = await _household_today(state.database)
     try:
         csv_text = await core_history.export_history_csv(
             state.database, filter, start, end, today=today
@@ -2188,7 +2215,7 @@ async def admin_history_csv(
     response_model=AdminSettingsResponse,
 )
 async def admin_get_settings(request: Request) -> AdminSettingsResponse:
-    """Return the current effective settings (all ten documented fields).
+    """Return the current effective settings (all eleven documented fields).
 
     Requires a valid admin JWT (the router's shared
     :func:`~api.auth.require_admin` dependency — the ONE check; this
@@ -2280,7 +2307,7 @@ async def admin_run_missed_sweep(
     """
     state: DatabaseState = request.app.state.db
     database = state.database
-    today = _local_now().date()
+    today = await _household_today(state.database)
     try:
         events = await core_sweep.run_missed_sweep(database, today=today)
     except ValueError as error:
@@ -2309,8 +2336,9 @@ async def admin_snapshot(request: Request) -> AdminSnapshotResponse:
     :class:`AdminSnapshotResponse`.
     """
     state: DatabaseState = request.app.state.db
+    settings, now = await _household_clock(state.database)
     snapshot = await core_snapshot.build_snapshot(
-        state.database, core_settings.NestQuestSettings(), _local_now()
+        state.database, settings, now
     )
     return AdminSnapshotResponse(
         today_iso=snapshot.today_iso,

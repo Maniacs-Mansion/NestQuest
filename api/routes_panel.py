@@ -8,9 +8,9 @@ this router inherits the check).
 
 The snapshot route is a thin adapter over the bundled core: it performs
 NO business logic.  It reads the live database off ``app.state.db``,
-resolves ONE timezone-aware ``now`` (the API host's local time — the
-API is the household's "local" host now that the domain no longer lives
-inside Home Assistant), calls the pure
+resolves ONE timezone-aware ``now`` (the host clock re-expressed in the
+stored household ``timezone`` setting — the API host may run UTC while
+the household does not), calls the pure
 :func:`nestquest_core.snapshot.build_snapshot`, shapes each child's
 instances through :func:`nestquest_core.snapshot.instance_payload` with
 ``include_missed=False`` (D-009: missed instances are OMITTED from the
@@ -63,7 +63,7 @@ from api.dependencies import require_panel_token
 from api.nestquest_core import (
     core_completion,
     core_events,
-    core_settings,
+    core_settings_store,
     core_snapshot,
 )
 from api import transitions as api_transitions
@@ -178,6 +178,20 @@ def _local_now() -> datetime.datetime:
     return datetime.datetime.now().astimezone()
 
 
+async def _household_clock(
+    database: object,
+) -> tuple[object, datetime.datetime]:
+    """Return the stored settings and ONE household-local clock read.
+
+    The API host may run UTC while the household does not, so the one
+    :func:`_local_now` read is re-expressed in the stored settings'
+    ``timezone`` (:meth:`NestQuestSettings.household_now`); an unset
+    zone keeps the host's local time.
+    """
+    settings = await core_settings_store.load_settings(database)
+    return settings, settings.household_now(_local_now())
+
+
 @router.get(
     "/snapshot",
     summary="Today's household snapshot",
@@ -196,8 +210,9 @@ async def panel_snapshot(request: Request) -> PanelSnapshotResponse:
     :class:`PanelSnapshotResponse`.
     """
     state: DatabaseState = request.app.state.db
+    settings, now = await _household_clock(state.database)
     snapshot = await core_snapshot.build_snapshot(
-        state.database, core_settings.NestQuestSettings(), _local_now()
+        state.database, settings, now
     )
     return PanelSnapshotResponse(
         today_iso=snapshot.today_iso,
@@ -282,7 +297,7 @@ async def panel_complete_instance(
             detail="Quest instance not found for this child",
         )
 
-    now = _local_now()
+    _settings, now = await _household_clock(database)
     try:
         result = await core_completion.complete_instance(
             database,
