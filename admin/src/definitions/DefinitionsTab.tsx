@@ -13,12 +13,14 @@ import { ApiForbiddenError } from "../api/client";
 import {
   ApiRequestError,
   createDefinition,
+  deleteDefinition,
   fetchChildren,
   fetchDefinitions,
   previewOccurrences,
   updateDefinition,
   type AdminChild,
   type DefinitionCreateBody,
+  type DefinitionDeleteResult,
   type DefinitionEditBody,
   type DefinitionRule,
   type QuestDefinition,
@@ -273,6 +275,12 @@ function saveErrorMessage(error: unknown): string {
   return "The task could not be saved. Check your connection and try again.";
 }
 
+function deleteErrorMessage(error: unknown): string {
+  if (error instanceof ApiForbiddenError) return error.message;
+  if (error instanceof ApiRequestError && error.detail) return error.detail;
+  return "The task could not be deleted. Check your connection and try again.";
+}
+
 function toggle<T>(list: T[], value: T): T[] {
   return list.includes(value) ? list.filter((item) => item !== value) : [...list, value];
 }
@@ -449,11 +457,13 @@ function EditSheet({
   activeChildren,
   onCancel,
   onSaved,
+  onDeleted,
 }: {
   target: "new" | QuestDefinition;
   activeChildren: AdminChild[];
   onCancel: () => void;
   onSaved: () => void;
+  onDeleted: (result: DefinitionDeleteResult) => void;
 }) {
   const [draft, setDraft] = useState<Draft>(() =>
     target === "new" ? newDraft(activeChildren) : draftFrom(target, activeChildren),
@@ -473,6 +483,7 @@ function EditSheet({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // A ref, not state: two taps in one frame must not both see `saving === false`.
   const inFlight = useRef(false);
@@ -490,8 +501,8 @@ function EditSheet({
   }, []);
 
   useEffect(() => {
-    if (confirming) confirmRef.current?.focus();
-  }, [confirming]);
+    if (confirming || confirmingDelete) confirmRef.current?.focus();
+  }, [confirming, confirmingDelete]);
 
   function onKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
     if (event.key === "Escape") {
@@ -554,6 +565,21 @@ function EditSheet({
       onSaved();
     } catch (err) {
       setError(saveErrorMessage(err));
+      inFlight.current = false;
+      setSaving(false);
+    }
+  }
+
+  async function remove() {
+    if (target === "new" || inFlight.current) return;
+    setConfirmingDelete(false);
+    inFlight.current = true;
+    setSaving(true);
+    setError(null);
+    try {
+      onDeleted(await deleteDefinition(target.id));
+    } catch (err) {
+      setError(deleteErrorMessage(err));
       inFlight.current = false;
       setSaving(false);
     }
@@ -906,15 +932,56 @@ function EditSheet({
               </button>
             </div>
           </div>
-        ) : (
-          <div className="defs-sheet-footer">
-            <button type="button" className="defs-cancel" onClick={onCancel} disabled={saving}>
-              Cancel
-            </button>
-            <button type="button" className="defs-save" onClick={() => save()} disabled={saving}>
-              {saving ? "Saving…" : "Save changes"}
-            </button>
+        ) : confirmingDelete ? (
+          <div
+            className="defs-confirm"
+            role="group"
+            aria-labelledby="defs-delete-confirm-text"
+            data-testid="delete-confirm"
+            ref={confirmRef}
+            tabIndex={-1}
+          >
+            <p id="defs-delete-confirm-text">
+              Delete this task? If it has no completion history it is deleted; otherwise it is
+              retired (deactivated) and its history is kept.
+            </p>
+            <div className="defs-sheet-footer">
+              <button
+                type="button"
+                className="defs-cancel"
+                onClick={() => setConfirmingDelete(false)}
+              >
+                Go back
+              </button>
+              <button type="button" className="defs-save defs-save--danger" onClick={remove}>
+                Delete task
+              </button>
+            </div>
           </div>
+        ) : (
+          <>
+            <div className="defs-sheet-footer">
+              <button type="button" className="defs-cancel" onClick={onCancel} disabled={saving}>
+                Cancel
+              </button>
+              <button type="button" className="defs-save" onClick={() => save()} disabled={saving}>
+                {saving ? "Saving…" : "Save changes"}
+              </button>
+            </div>
+            {target !== "new" ? (
+              <button
+                type="button"
+                className="defs-delete"
+                disabled={saving}
+                onClick={() => {
+                  setError(null);
+                  setConfirmingDelete(true);
+                }}
+              >
+                Delete task
+              </button>
+            ) : null}
+          </>
         )}
       </div>
     </div>
@@ -1037,6 +1104,21 @@ export default function DefinitionsTab() {
           onSaved={() => {
             setSheet(null);
             setAttempt((n) => n + 1);
+          }}
+          onDeleted={(result) => {
+            setSheet(null);
+            setState((current) =>
+              current.kind !== "ready"
+                ? current
+                : {
+                    ...current,
+                    definitions: result.definition
+                      ? current.definitions.map((d) =>
+                          d.id === result.definition_id ? result.definition! : d,
+                        )
+                      : current.definitions.filter((d) => d.id !== result.definition_id),
+                  },
+            );
           }}
         />
       ) : null}

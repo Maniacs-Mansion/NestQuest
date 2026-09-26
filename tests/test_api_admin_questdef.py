@@ -817,3 +817,141 @@ async def test_set_active_malformed_body_is_422(
         headers=_admin_headers(),
     )
     assert response.status_code == 422
+
+
+# --- delete: hybrid (delete if no history, retire if there is) --------------
+
+_dao_instances = importlib.import_module("nestquest_core.dao_instances")
+
+
+def test_delete_route_lives_on_the_admin_router() -> None:
+    """The DELETE route is on the admin router, which carries the ONE
+    require_admin dependency — no second auth check is added."""
+    from api.auth import require_admin
+    from api.routes_admin import router as admin_router
+
+    assert require_admin in [d.dependency for d in admin_router.dependencies]
+    matches = [
+        route
+        for route in admin_router.routes
+        if route.path == "/api/v1/admin/quest-definitions/{definition_id}"
+        and "DELETE" in route.methods
+    ]
+    assert len(matches) == 1
+
+
+async def test_delete_refuses_non_admin_and_absent(
+    admin_questdefs: SimpleNamespace,
+) -> None:
+    """A non-admin JWT is 403 and an absent credential 401: nothing is
+    deleted or retired."""
+    client = admin_questdefs.client
+    ada = (await _create_children(client, ("Ada",)))[0]
+    definition_id = (await _create_definition(client, [ada])).json()["id"]
+    non_admin = make_token(groups=("some-other-group",))
+
+    forbidden = await client.delete(
+        f"/api/v1/admin/quest-definitions/{definition_id}",
+        headers={"Authorization": f"Bearer {non_admin}"},
+    )
+    assert forbidden.status_code == 403
+    unauthenticated = await client.delete(
+        f"/api/v1/admin/quest-definitions/{definition_id}"
+    )
+    assert unauthenticated.status_code == 401
+
+    record = await _dao_rules.QuestDefinitionsDao(
+        admin_questdefs.database
+    ).get(definition_id)
+    assert record is not None
+    assert record.is_active is True
+
+
+async def test_delete_without_history_hard_deletes(
+    admin_questdefs: SimpleNamespace,
+) -> None:
+    """No completion history: 200 ``deleted`` and the row and its
+    unreferenced rule are gone."""
+    client = admin_questdefs.client
+    ada = (await _create_children(client, ("Ada",)))[0]
+    definition_id = (await _create_definition(client, [ada])).json()["id"]
+    dao = _dao_rules.QuestDefinitionsDao(admin_questdefs.database)
+    rule_id = (await dao.get(definition_id)).schedule_rule_id
+
+    response = await client.delete(
+        f"/api/v1/admin/quest-definitions/{definition_id}",
+        headers=_admin_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "definition_id": definition_id,
+        "deleted": True,
+        "retired": False,
+        "definition": None,
+    }
+    assert await dao.get(definition_id) is None
+    assert await _dao_rules.ScheduleRulesDao(
+        admin_questdefs.database
+    ).get(rule_id) is None
+
+
+async def test_delete_with_history_retires(
+    admin_questdefs: SimpleNamespace,
+) -> None:
+    """Completion history present: 200 ``retired`` with the now-inactive
+    definition; the row, instance and history all remain."""
+    client = admin_questdefs.client
+    database = admin_questdefs.database
+    ada = (await _create_children(client, ("Ada",)))[0]
+    definition_id = (await _create_definition(client, [ada])).json()["id"]
+    instance = await _dao_instances.QuestInstancesDao(database).upsert(
+        definition_id,
+        ada,
+        datetime.date.today().isoformat(),
+        "2026-09-14T12:00:00+00:00",
+        window="morning",
+    )
+    events = _dao_instances.CompletionEventsDao(database)
+    event = await events.append(
+        instance.id,
+        ada,
+        "completed",
+        "user",
+        "2026-09-14T12:00:00+00:00",
+        True,
+        actor_user_id="admin-1",
+    )
+
+    response = await client.delete(
+        f"/api/v1/admin/quest-definitions/{definition_id}",
+        headers=_admin_headers(),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["definition_id"] == definition_id
+    assert payload["deleted"] is False
+    assert payload["retired"] is True
+    assert payload["definition"]["id"] == definition_id
+    assert payload["definition"]["is_active"] is False
+    assert payload["definition"]["title"] == "Tidy the den"
+    record = await _dao_rules.QuestDefinitionsDao(database).get(definition_id)
+    assert record is not None
+    assert record.is_active is False
+    assert await _dao_instances.QuestInstancesDao(database).get_by_id(
+        instance.id
+    ) == instance
+    assert await events.list_by_instance(instance.id) == [event]
+
+
+async def test_delete_unknown_definition_is_404(
+    admin_questdefs: SimpleNamespace,
+) -> None:
+    """A DELETE naming a definition that does not exist is 404."""
+    response = await admin_questdefs.client.delete(
+        "/api/v1/admin/quest-definitions/999",
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Quest definition not found"

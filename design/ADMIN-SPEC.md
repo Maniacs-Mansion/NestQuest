@@ -64,7 +64,8 @@ Header `Tasks` / `7 definitions · 3 children` + gradient `New` button. Filter c
 (All / one per child): active `#18181D` fill white text, inactive white with border.
 Rows: glyph 17px · title 13.5px/700 · meta 11px/600 `<assignees> · <recurrence> · <windows>`
 · `chevron-right`. An inactive definition renders the whole row at
-`--nq-a-ink-tertiary` with `· inactive` in the meta — never hard-deleted (glossary).
+`--nq-a-ink-tertiary` with `· inactive` in the meta. A definition with completion
+history is never hard-deleted (glossary, D-017): Delete retires it to this inactive state.
 The row being edited takes `--nq-a-selected` with brand-blue glyph, `Editing` meta and
 `chevron-down`.
 
@@ -82,6 +83,22 @@ Bottom sheet, `--nq-a-radius-sheet`, `--nq-a-sheet-shadow`, 38×4px grabber, pad
 
 Footer: `Cancel` (flex 1, bordered) + `Save changes` (flex 2, gradient), both 13px vertical
 padding. Sheet enters over the dimmed list in `--nq-dur-modal`.
+
+Delete (editing an existing definition only, never on `New`): a full-width bordered
+`Delete task` button below the footer, danger-ink text. Tapping it swaps the footer for a
+danger-tinted confirm — "Delete this task? If it has no completion history it is deleted;
+otherwise it is retired (deactivated) and its history is kept." — with `Go back` and a
+danger-filled `Delete task`. Confirming calls `DELETE /api/v1/admin/quest-definitions/{id}`
+(admin plane only; the kids' panel has no equivalent control). Hybrid outcome (D-017): no
+completion event on any instance → the definition, its instances, assignees, windows and
+unreferenced rule are hard-deleted and the row leaves the list; otherwise the definition
+is retired (deactivated) and the row stays, shown inactive. Retirement preserves the
+definition row, schedule rule, assignees, windows and all durable completion history. Like
+any deactivation it regenerates, so future uncompleted instances are cleared (they are
+rolling, regenerable rows) and none are recreated while the definition is inactive — the
+retired task stops generating and no longer shows open work. Durable instance history lives
+only in the append-only `completion_events`. An error keeps the sheet open with the API's
+detail.
 
 ### 3.3 Icon picker
 Each definition carries one optional icon, shown on both surfaces. The picker offers three

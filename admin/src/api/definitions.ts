@@ -147,6 +147,29 @@ export async function updateDefinition(
   return readJson<QuestDefinition>(await sendJson(`${DEFINITIONS_PATH}/${id}`, "PATCH", body));
 }
 
+/** `DELETE /quest-definitions/{id}`: exactly one of `deleted` / `retired` is true. */
+export interface DefinitionDeleteResult {
+  definition_id: number;
+  deleted: boolean;
+  retired: boolean;
+  /** The retired (now inactive) definition; null when it was deleted. */
+  definition: QuestDefinition | null;
+}
+
+/**
+ * Delete a task if it has no completion history; otherwise the API retires
+ * (deactivates) it. Retirement preserves the definition row, schedule rule,
+ * assignees, windows and ALL durable completion history. Like any
+ * deactivation it regenerates, so future UNCOMPLETED instances are cleared
+ * (rolling, regenerable rows) and not recreated while inactive; durable
+ * history lives only in the append-only `completion_events`.
+ */
+export async function deleteDefinition(id: number): Promise<DefinitionDeleteResult> {
+  return readJson<DefinitionDeleteResult>(
+    await apiFetch(`${DEFINITIONS_PATH}/${id}`, { method: "DELETE" }),
+  );
+}
+
 export const OCCURRENCES_PREVIEW_PATH = `${DEFINITIONS_PATH}/occurrences-preview`;
 
 export interface OccurrencesPreviewOptions {

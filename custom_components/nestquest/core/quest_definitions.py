@@ -7,7 +7,9 @@ all-or-nothing create/edit here, and never touch the DAO SQL directly.
 :func:`edit_quest_definition` the edit path (which may also replace the
 whole assignee set), :func:`assign_child` and
 :func:`unassign_child` the single-child assignment paths, and
-:func:`set_quest_definition_active` the deactivate/reactivate path.
+:func:`set_quest_definition_active` the deactivate/reactivate path,
+and :func:`delete_quest_definition` the hybrid admin delete (hard-delete
+when there is no completion history, retire by deactivation otherwise).
 There is no permission check here (that is Feature 09).
 
 Validation policy mirrors :mod:`.children`:
@@ -78,6 +80,21 @@ class CreatedQuestDefinition:
     rule: ScheduleRule
     assignees: list[ChildRecord]
     windows: list[QuestDefinitionWindowRecord]
+
+
+@dataclass(frozen=True)
+class DeletedQuestDefinition:
+    """What :func:`delete_quest_definition` actually did.
+
+    Exactly one of ``deleted`` / ``retired`` is True.  ``definition`` is
+    the retired (deactivated) definition's updated view, or None when
+    the definition was hard-deleted and no longer exists.
+    """
+
+    definition_id: int
+    deleted: bool
+    retired: bool
+    definition: CreatedQuestDefinition | None
 
 
 def _now_stamp() -> str:
@@ -504,12 +521,19 @@ async def set_quest_definition_active(
 ) -> CreatedQuestDefinition:
     """Deactivate or reactivate a definition; returns the updated view.
 
-    Flipping the flag is the only removal path (Feature 06 guardrail):
+    Flipping the flag is the only removal path for a definition with
+    completion history (Feature 06 guardrail; a history-free definition
+    may instead be hard-deleted by :func:`delete_quest_definition`):
     a deactivated definition stops future instance generation but its
-    row, schedule rule, assignees and windows all survive, and existing
-    instances plus completion history are never touched.  Reactivation
-    re-enables future generation; generating or removing instances is
-    Feature 07 and does not happen here.
+    row, schedule rule, assignees and windows all survive, and its
+    durable completion history (the append-only ``completion_events``)
+    is never touched.  Like every Feature 06 config change, the flip is
+    followed by :func:`~.materialize.regenerate_for_definition`: the
+    definition's future (today onward) UNCOMPLETED instances are cleared
+    — they are rolling, regenerable rows — and, while the definition is
+    inactive, none are re-materialized.  Completed and past instances
+    are kept.  Reactivation re-enables generation, and the same
+    regeneration re-materializes the rolling horizon.
 
     ``definition_id`` must be a plain int (bools and floats rejected,
     since SQLite would bind ``True`` onto definition 1) and
@@ -559,6 +583,68 @@ async def set_quest_definition_active(
         rule=rule,
         assignees=assignees,
         windows=windows,
+    )
+
+
+async def delete_quest_definition(
+    database: NestQuestDatabase,
+    definition_id: int,
+    *,
+    today: datetime.date | None = None,
+    horizon_days: int | None = None,
+) -> DeletedQuestDefinition:
+    """Delete a definition if it has no history; otherwise retire it.
+
+    Owner decision (2026-09-26): "delete if there's no history,
+    retire/deactivate if there is".  When NO instance of the definition
+    has a completion event, the definition, its instances, assignees,
+    windows and (if no other definition references it) its schedule
+    rule are hard-deleted in ONE transaction by
+    :meth:`~.dao_rules.QuestDefinitionsDao.delete_if_no_history` — the
+    history check is inside that transaction, so a completion recorded
+    concurrently can never be deleted (D-005).  When history exists,
+    the definition is retired through :func:`set_quest_definition_active`
+    (``False``).  Retirement preserves the definition row, schedule
+    rule, assignees, windows and ALL durable completion history.  Like
+    any deactivation it regenerates, so future UNCOMPLETED instances are
+    cleared (they are rolling, regenerable rows) and none are recreated
+    while the definition is inactive — the retired task stops generating
+    and no longer shows open work.  Durable instance history lives only
+    in the append-only ``completion_events``.
+
+    ``definition_id`` must be a plain int (bools and floats rejected).
+    Raises ValueError naming the field when the id is malformed or the
+    definition does not exist.  ``today`` / ``horizon_days`` are threaded
+    into the retire path's regeneration, as in
+    :func:`set_quest_definition_active`.
+    """
+    _validate_definition_id(definition_id)
+    deleted = await QuestDefinitionsDao(database).delete_if_no_history(
+        definition_id
+    )
+    if deleted is None:
+        raise ValueError(
+            f"definition_id: quest definition {definition_id} does not exist"
+        )
+    if deleted:
+        return DeletedQuestDefinition(
+            definition_id=definition_id,
+            deleted=True,
+            retired=False,
+            definition=None,
+        )
+    retired = await set_quest_definition_active(
+        database,
+        definition_id,
+        False,
+        today=today,
+        horizon_days=horizon_days,
+    )
+    return DeletedQuestDefinition(
+        definition_id=definition_id,
+        deleted=False,
+        retired=True,
+        definition=retired,
     )
 
 

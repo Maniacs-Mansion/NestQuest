@@ -569,6 +569,26 @@
   color: #fff;
 }
 
+.defs-save--danger {
+  background: var(--nq-a-danger);
+}
+
+.defs-delete {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 11px 0;
+  border: 1px solid var(--nq-a-danger-bg);
+  border-radius: var(--nq-a-density-radius);
+  background: var(--nq-a-surface);
+  color: var(--nq-a-danger-strong);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.defs-delete:disabled,
 .defs-cancel:disabled,
 .defs-save:disabled {
   opacity: 0.6;

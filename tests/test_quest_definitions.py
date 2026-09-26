@@ -22,8 +22,10 @@ from custom_components.nestquest.core.db import NestQuestDatabase
 from custom_components.nestquest.core.migrations import apply_migrations
 from custom_components.nestquest.core.quest_definitions import (
     CreatedQuestDefinition,
+    DeletedQuestDefinition,
     assign_child,
     create_quest_definition,
+    delete_quest_definition,
     edit_quest_definition,
     list_active_definitions,
     list_definitions_firing_on,
@@ -2126,3 +2128,188 @@ def test_wrappers_forward_horizon_days(tmp_path, mode) -> None:
         return None
 
     _with_db(tmp_path, f"wrapper-horizon-{mode}.db")(_body)
+
+
+# ---------------------------------------------------------------------------
+# delete_quest_definition: hybrid delete (owner decision 2026-09-26)
+# ---------------------------------------------------------------------------
+
+
+async def _count(database, sql, definition_id) -> int:
+    row = await database.fetch_one(sql, (definition_id,))
+    return row[0]
+
+
+def test_delete_without_history_hard_deletes_everything(tmp_path) -> None:
+    """No completion event on any instance: the definition, its
+    instances, assignees, windows and unreferenced rule are all gone."""
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database,
+            "Brush teeth",
+            _daily_rule(),
+            [child.id],
+            ["morning", "evening"],
+        )
+        definition_id = created.definition.id
+        rule_id = created.definition.schedule_rule_id
+        instances_sql = (
+            "SELECT COUNT(*) FROM quest_instances WHERE definition_id = ?"
+        )
+        # Create materialized future instances, so the delete has
+        # instance rows to remove (not just an empty table).
+        assert await _count(database, instances_sql, definition_id) > 0
+
+        result = await delete_quest_definition(database, definition_id)
+
+        assert result == DeletedQuestDefinition(
+            definition_id=definition_id,
+            deleted=True,
+            retired=False,
+            definition=None,
+        )
+        assert await definitions.get(definition_id) is None
+        assert await rules.get(rule_id) is None
+        assert await _count(database, instances_sql, definition_id) == 0
+        for table in (
+            "quest_definition_assignees",
+            "quest_definition_windows",
+        ):
+            assert await _count(
+                database,
+                f"SELECT COUNT(*) FROM {table} WHERE definition_id = ?",
+                definition_id,
+            ) == 0
+        # The child itself is untouched.
+        assert (await children.get(child.id)) is not None
+        return None
+
+    _with_db(tmp_path, "delete-no-history.db")(_body)
+
+
+def test_delete_without_history_keeps_a_shared_rule(tmp_path) -> None:
+    """The rule is deleted only when no other definition references it."""
+    async def _body(database, children, rules, definitions, child):
+        rule = await rules.create("daily", "2026-09-14")
+        first = await definitions.create(
+            "First", rule.id, NOW, assignee_child_ids=[child.id]
+        )
+        second = await definitions.create(
+            "Second", rule.id, NOW, assignee_child_ids=[child.id]
+        )
+
+        result = await delete_quest_definition(database, first.id)
+
+        assert result.deleted is True
+        assert await definitions.get(first.id) is None
+        assert await definitions.get(second.id) is not None
+        assert await rules.get(rule.id) is not None
+        return None
+
+    _with_db(tmp_path, "delete-shared-rule.db")(_body)
+
+
+def test_delete_with_history_retires_and_preserves_everything(
+    tmp_path,
+) -> None:
+    """A completion event on ANY instance: the definition is retired
+    (deactivated) and its row, rule, assignees, windows and completion
+    history all remain.  The completed instance survives; only future
+    UNCOMPLETED instances are cleared by the deactivation's regeneration."""
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        definition_id = created.definition.id
+        rule_id = created.definition.schedule_rule_id
+        instances = QuestInstancesDao(database)
+        events = CompletionEventsDao(database)
+        instance = await instances.upsert(
+            definition_id, child.id, _today_iso(), NOW, window="morning"
+        )
+        event = await events.append(
+            instance.id,
+            child.id,
+            "completed",
+            "user",
+            NOW,
+            True,
+            actor_user_id="admin-1",
+        )
+
+        result = await delete_quest_definition(database, definition_id)
+
+        assert result.deleted is False
+        assert result.retired is True
+        assert result.definition_id == definition_id
+        assert isinstance(result.definition, CreatedQuestDefinition)
+        assert result.definition.definition.is_active is False
+        stored = await definitions.get(definition_id)
+        assert stored is not None
+        assert stored.is_active is False
+        assert await rules.get(rule_id) is not None
+        assert [c.id for c in await definitions.list_assignees(
+            definition_id
+        )] == [child.id]
+        assert [w.window for w in await definitions.list_windows(
+            definition_id
+        )] == ["morning"]
+        assert await instances.get_by_id(instance.id) == instance
+        assert await events.list_by_instance(instance.id) == [event]
+        return None
+
+    _with_db(tmp_path, "delete-with-history.db")(_body)
+
+
+def test_delete_with_uncompleted_history_still_retires(tmp_path) -> None:
+    """ANY completion event counts as history — even when the latest
+    event is an un-completion, the definition is retired, not deleted."""
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        definition_id = created.definition.id
+        instances = QuestInstancesDao(database)
+        events = CompletionEventsDao(database)
+        instance = await instances.upsert(
+            definition_id, child.id, _today_iso(), NOW, window="morning"
+        )
+        await events.append(
+            instance.id, child.id, "completed", "user", NOW, True,
+            actor_user_id="admin-1",
+        )
+        await events.append(
+            instance.id, child.id, "uncompleted", "user", NOW, None,
+            actor_user_id="admin-1",
+        )
+
+        result = await delete_quest_definition(database, definition_id)
+
+        assert result.retired is True
+        assert await instances.get_by_id(instance.id) == instance
+        return None
+
+    _with_db(tmp_path, "delete-uncompleted-history.db")(_body)
+
+
+def test_delete_nonexistent_definition_names_field(tmp_path) -> None:
+    async def _body(database, children, rules, definitions, child):
+        with pytest.raises(ValueError, match=r"^definition_id:"):
+            await delete_quest_definition(database, 999)
+        return None
+
+    _with_db(tmp_path, "delete-missing.db")(_body)
+
+
+@pytest.mark.parametrize("bad", [True, 1.0, "1", None])
+def test_delete_rejects_non_int_definition_id(tmp_path, bad) -> None:
+    async def _body(database, children, rules, definitions, child):
+        created = await create_quest_definition(
+            database, "Brush teeth", _daily_rule(), [child.id], ["morning"]
+        )
+        with pytest.raises(ValueError, match="definition_id"):
+            await delete_quest_definition(database, bad)
+        assert await definitions.get(created.definition.id) is not None
+        return None
+
+    _with_db(tmp_path, "delete-bad-id.db")(_body)
