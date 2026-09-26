@@ -231,8 +231,76 @@ function conditionPhrase(condition: string, label: string): string {
 }
 
 const SHIELD_CLIP = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)";
-const HEXAGON_CLIP =
-  "polygon(50% 0, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%)";
+// The brand monogram (design/logos/NestQuest_Logo.png): a compass rose —
+// four long cardinal points, four short diagonal points, a ring broken by
+// the points — around a d20 hexagon carrying a knocked-out "N". Drawn on
+// a 100-unit grid and filled with the brand gradient; the masks cut the
+// parchment gaps so the mark stays transparent on any backdrop.
+const MONOGRAM_POINTS =
+  "M50 3 44.5 24.1 50 26 55.5 24.1Z M100 50 75.9 44.5 74 50 75.9 55.5Z " +
+  "M50 97 55.5 75.9 50 74 44.5 75.9Z M0 50 24.1 55.5 26 50 24.1 44.5Z " +
+  "M29.1 29.1 29.7 36.3 36.3 29.7Z M70.9 29.1 63.7 29.7 70.3 36.3Z " +
+  "M70.9 70.9 70.3 63.7 63.7 70.3Z M29.1 70.9 36.3 70.3 29.7 63.7Z";
+const MONOGRAM_HEX = "M50 26.5 70.4 38.2 70.4 61.8 50 73.5 29.6 61.8 29.6 38.2Z";
+const MONOGRAM_FACETS =
+  "M29.6 38.2H70.4M29.6 61.8H70.4M50 26.5 36.5 38.2M50 26.5 63.5 38.2" +
+  "M50 73.5 36.5 61.8M50 73.5 63.5 61.8M36.5 38.2V61.8M63.5 38.2V61.8" +
+  "M29.6 38.2 36.5 61.8M36.5 38.2 29.6 61.8" +
+  "M70.4 38.2 63.5 61.8M63.5 38.2 70.4 61.8";
+const MONOGRAM = html`<svg
+  class="monogram"
+  viewBox="0 0 100 100"
+  aria-hidden="true"
+  focusable="false"
+>
+  <defs>
+    <linearGradient
+      id="nq-monogram-fill"
+      gradientUnits="userSpaceOnUse"
+      x1="0"
+      y1="0"
+      x2="100"
+      y2="100"
+    >
+      <stop offset="0" style="stop-color: var(--nq-brand-blue)" />
+      <stop offset="1" style="stop-color: var(--nq-brand-purple)" />
+    </linearGradient>
+    <mask id="nq-monogram-points-gap" maskUnits="userSpaceOnUse">
+      <rect width="100" height="100" fill="#fff" />
+      <path d=${MONOGRAM_POINTS} stroke="#000" stroke-width="3.5" />
+    </mask>
+    <mask id="nq-monogram-facets" maskUnits="userSpaceOnUse">
+      <rect width="100" height="100" fill="#fff" />
+      <path d=${MONOGRAM_FACETS} stroke="#000" stroke-width="1.6" />
+      <text
+        x="50"
+        y="59.4"
+        text-anchor="middle"
+        font-family="'Cinzel Decorative', Cinzel, serif"
+        font-weight="900"
+        font-size="25"
+        fill="#fff"
+        stroke="#000"
+        stroke-width="2"
+        paint-order="stroke"
+      >N</text>
+    </mask>
+  </defs>
+  <g fill="url(#nq-monogram-fill)">
+    <path d=${MONOGRAM_POINTS} />
+    <g mask="url(#nq-monogram-points-gap)">
+      <circle
+        cx="50"
+        cy="50"
+        r="34.25"
+        fill="none"
+        stroke="url(#nq-monogram-fill)"
+        stroke-width="6.5"
+      />
+      <path mask="url(#nq-monogram-facets)" d=${MONOGRAM_HEX} />
+    </g>
+  </g>
+</svg>`;
 
 const boardStyles = css`
   * {
@@ -299,23 +367,11 @@ const boardStyles = css`
     background: rgba(92, 62, 26, 0.35);
   }
 
-  .d20 {
+  .monogram {
     flex: none;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 34px;
-    height: 34px;
-    clip-path: ${unsafeCSS(HEXAGON_CLIP)};
-    background: var(--nq-brand-gradient);
-  }
-
-  .d20-numeral {
-    font-family: var(--nq-p-font-heading);
-    font-size: 15px;
-    font-weight: 700;
-    line-height: 1;
-    color: #ffffff;
+    display: block;
+    width: 80px;
+    height: 80px;
   }
 
   .wordmark {
@@ -862,13 +918,8 @@ export class NestQuestPartyBoardCard extends LitElement {
         <div class="frame frame-inner"></div>
         <div class="wordmark-row">
           <span class="rule"></span>
-          <span class="d20" aria-hidden="true">
-            <span class="d20-numeral">20</span>
-          </span>
+          ${MONOGRAM}
           <span class="wordmark">NestQuest</span>
-          <span class="d20" aria-hidden="true">
-            <span class="d20-numeral">20</span>
-          </span>
           <span class="rule"></span>
         </div>
         <p class="kicker">The Party · ${formatDay(this._now, this._timeZone())}</p>

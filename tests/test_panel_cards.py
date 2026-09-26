@@ -600,6 +600,40 @@ def _render_party_board(
     return json.loads(completed.stdout)
 
 
+def test_party_board_wordmark_row_is_the_monogram_lockup() -> None:
+    """PANEL-SPEC §2 item 1: the wordmark row is rule · compass-rose
+    monogram · NestQuest · rule. The monogram is an inline SVG filled
+    with the brand gradient — the old d20 hexagon pair and its "20"
+    numerals are gone, and nothing is fetched from a remote URL or
+    embedded as a raster logo."""
+    source = _read(PARTY_BOARD)
+    assert "d20" not in _style_literal(source, STYLE_CONSTANTS[PARTY_BOARD])
+    assert 'class="d20' not in source
+    assert "HEXAGON_CLIP" not in source
+
+    html = _render_party_board(
+        {"type": "custom:nestquest-party-board-card"},
+        _three_child_states(),
+    )["html"]
+    row = re.search(r'<div class="wordmark-row">(.*?)</div>', html, re.DOTALL)
+    assert row is not None
+    row_html = row.group(1)
+    classes = re.findall(r'<(?:span|svg) class="([^"]+)"', row_html)
+    assert classes == ["rule", "monogram", "wordmark", "rule"]
+    assert '<svg class="monogram" viewBox="0 0 100 100" aria-hidden="true"' in row_html
+    assert "var(--nq-brand-blue)" in row_html
+    assert "var(--nq-brand-purple)" in row_html
+    assert ">N</text>" in row_html
+    assert ">NestQuest</span>" in row_html
+    assert "d20" not in row_html
+    assert "<img" not in row_html
+
+    bundle = _read(BUNDLE_PATH)
+    assert "d20-numeral\">20<" not in bundle
+    assert "data:image/png" not in bundle
+    assert not re.search(r"https?://", bundle)
+
+
 def test_party_board_renders_discovered_children_in_sort_order() -> None:
     """No child_order key: three plates render in the roster's sort
     order (the coordinator snapshot's order), one per child."""
