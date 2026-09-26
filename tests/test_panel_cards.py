@@ -1043,6 +1043,65 @@ def test_quest_log_crest_keeps_its_shield_classes() -> None:
         assert f'class="{crest_class}"' in crest.group(1), crest.group(1)
 
 
+def test_quest_log_meta_line_keeps_its_meta_class() -> None:
+    """An open quest's meta line is styled by ``.quest .meta`` (and
+    ``.quest .meta.late`` when overdue). Written as
+    ``meta ${late ? "late" : nothing}``, Lit dropped the whole class
+    attribute for every quest that was not late, leaving the due line
+    unstyled. The rendered markup must carry ``class="meta"`` on time and
+    ``class="meta late"`` overdue."""
+    generated = _generate_dashboard(
+        {}, _three_child_states(), url="http://homeassistant.local/nestquest"
+    )
+
+    def quest(instance_id: int, title: str, overdue: bool) -> dict:
+        return {
+            "id": instance_id,
+            "definition_id": instance_id,
+            "child_id": 1,
+            "title": title,
+            "icon": None,
+            "window": "morning",
+            "due_time": "08:15",
+            "state": "open",
+            "overdue": overdue,
+            "completed_at": None,
+            "on_time": None,
+        }
+
+    states = {
+        **_three_child_states(),
+        "sensor.nestquest_ada_quests_due_today": _state(
+            "2",
+            child_name="Ada",
+            child_id=1,
+            present=True,
+            instances=[
+                quest(41, "Make Bed", overdue=False),
+                quest(42, "Brush Teeth", overdue=True),
+            ],
+        ),
+    }
+    result = _render_quest_log(
+        generated["views"][1]["cards"][0],
+        states,
+        url="http://homeassistant.local/nestquest/ada",
+    )
+    metas = {}
+    for card in result["html"].split('data-instance-id="')[1:]:
+        meta = re.search(
+            r'<span class="quest-title">.*?</span>'
+            r"\s*(?:<!--[^>]*-->\s*)*<span([^>]*)>",
+            card,
+            re.S,
+        )
+        assert meta is not None, card[:800]
+        metas[card[: card.index('"')]] = meta.group(1)
+    assert set(metas) == {"41", "42"}, metas
+    assert metas["41"].strip() == 'class="meta"', metas["41"]
+    assert metas["42"].strip() == 'class="meta late"', metas["42"]
+
+
 def test_quest_log_crest_matches_the_spec_geometry() -> None:
     """PANEL-SPEC §3 header crest: 96x110 shield, 4px ring of
     rgba(255,255,255,.22) around the --nq-p-crest face, 44px/700 display

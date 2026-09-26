@@ -2096,7 +2096,7 @@ export class NestQuestQuestLogCard extends LitElement {
         <span class="tile" aria-hidden="true">${ICON_STAR}</span>
         <div class="body">
           <span class="quest-title">${instance.title}</span>
-          <span class="meta ${meta.late ? "late" : nothing}">${meta.text}</span>
+          <span class="${meta.late ? "meta late" : "meta"}">${meta.text}</span>
         </div>
         <button
           class="complete"
