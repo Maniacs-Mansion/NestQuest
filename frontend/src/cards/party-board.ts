@@ -497,11 +497,12 @@ const boardStyles = css`
 
   .hint {
     position: absolute;
-    top: 930px;
+    top: 896px;
     left: 0;
     right: 0;
+    margin: 0;
     font-family: var(--nq-p-font-body);
-    font-size: 24px;
+    font-size: 27px;
     font-weight: 600;
     line-height: 1.4;
     text-align: center;
