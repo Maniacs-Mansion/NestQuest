@@ -2057,7 +2057,7 @@ export class NestQuestQuestLogCard extends LitElement {
         : "";
       return html`
         <div class="quest sealed" data-instance-id=${instance.id}>
-          <span class="tile" aria-hidden="true">${renderQuestIcon(instance.icon, ICON_STAR)}</span>
+          <span class="tile" aria-hidden="true">${ICON_STAR}</span>
           <div class="body">
             <span class="quest-title">${instance.title}</span>
             <span class="meta">
