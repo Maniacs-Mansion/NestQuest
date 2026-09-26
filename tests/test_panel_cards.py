@@ -411,6 +411,36 @@ def test_panel_hard_rules_hold_in_the_card_sources() -> None:
     assert "@click" not in sealed_template
 
 
+def test_party_board_hint_clears_the_dock() -> None:
+    """PANEL-SPEC §2/§2.3: the hint line reads fully above the dock at
+    1920x1080. The hint's line box (top + font-size x line-height) must
+    end above the dock's top edge (1080 - bottom inset - dock height)
+    with a visible gap, at the 27px/600 design size. The hint is a <p>,
+    so its user-agent 1em top margin must be reset or it shifts the box
+    down by a whole font-size."""
+    style = _style_literal(_read(PARTY_BOARD), STYLE_CONSTANTS[PARTY_BOARD])
+    rules = {selector.strip(): body for selector, body in _css_rules(style)}
+    sizes = _size_tokens(_read(REWARD_TOKENS))
+
+    def px(body: str, prop: str) -> float:
+        declared = re.search(rf"(?<![-\w]){prop}:\s*([^;]+);", body)
+        assert declared is not None, prop
+        value = _font_size_px(declared.group(1), sizes)
+        assert value is not None, f"{prop}: {declared.group(1)}"
+        return value
+
+    board, hint, dock = rules[".board"], rules[".hint"], rules[".dock"]
+    assert "margin: 0;" in hint
+    line_height = float(re.search(r"line-height:\s*([\d.]+);", hint).group(1))
+    hint_bottom = px(hint, "top") + px(hint, "font-size") * line_height
+    dock_top = px(board, "height") - px(dock, "bottom") - px(dock, "height")
+    assert px(dock, "height") == 84
+    assert px(dock, "bottom") == 46
+    assert hint_bottom + 12 <= dock_top, (hint_bottom, dock_top)
+    assert px(hint, "font-size") == 27
+    assert "font-weight: 600;" in hint
+
+
 def test_panel_text_sizes_respect_the_22px_floor() -> None:
     """PANEL-SPEC §1: no body text below 22px. Every font-size in the
     panel styles resolves against the panel size tokens or an explicit
