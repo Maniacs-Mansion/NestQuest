@@ -59,6 +59,7 @@ from .dao_rules import (
     schedule_rule_to_storage,
 )
 from .db import NestQuestDatabase
+from .icons import validate_icon
 from .materialize import regenerate_for_definition
 from .recurrence import ScheduleRule, occurs_on
 
@@ -248,7 +249,7 @@ async def create_quest_definition(
     assignee_ids = _validate_assignee_ids(assignee_child_ids)
     window_specs = _normalize_windows(windows)
     description_value = _validate_text(description, "description")
-    icon_value = _validate_text(icon, "icon")
+    icon_value = validate_icon(icon)
     skip_on_away_value = _validate_skip_on_away(skip_on_away)
 
     storage = schedule_rule_to_storage(rule)
@@ -351,7 +352,7 @@ async def edit_quest_definition(
 
     icon_value: str | None | object = _UNSET
     if icon is not _UNSET:
-        icon_value = _validate_text(icon, "icon")
+        icon_value = validate_icon(icon)
 
     rule_storage: ScheduleRuleStorage | object = _UNSET
     if rule is not _UNSET:
