@@ -65,7 +65,7 @@ const { is: nt, defineProperty: it, getOwnPropertyDescriptor: st, getOwnProperty
   return t;
 } }, Ze = (i, e) => !nt(i, e), ye = { attribute: !0, type: String, converter: ae, reflect: !1, useDefault: !1, hasChanged: Ze };
 Symbol.metadata ??= /* @__PURE__ */ Symbol("metadata"), K.litPropertyMetadata ??= /* @__PURE__ */ new WeakMap();
-let z = class extends HTMLElement {
+let T = class extends HTMLElement {
   static addInitializer(e) {
     this._$Ei(), (this.l ??= []).push(e);
   }
@@ -246,7 +246,7 @@ let z = class extends HTMLElement {
   firstUpdated(e) {
   }
 };
-z.elementStyles = [], z.shadowRootOptions = { mode: "open" }, z[I("elementProperties")] = /* @__PURE__ */ new Map(), z[I("finalized")] = /* @__PURE__ */ new Map(), ct?.({ ReactiveElement: z }), (K.reactiveElementVersions ??= []).push("2.1.2");
+T.elementStyles = [], T.shadowRootOptions = { mode: "open" }, T[I("elementProperties")] = /* @__PURE__ */ new Map(), T[I("finalized")] = /* @__PURE__ */ new Map(), ct?.({ ReactiveElement: T }), (K.reactiveElementVersions ??= []).push("2.1.2");
 const pe = globalThis, be = (i) => i, V = pe.trustedTypes, ve = V ? V.createPolicy("lit-html", { createHTML: (i) => i }) : void 0, Qe = "$lit$", k = `lit$${Math.random().toFixed(9).slice(2)}$`, We = "?" + k, dt = `<${We}>`, A = document, P = () => A.createComment(""), H = (i) => i === null || typeof i != "object" && typeof i != "function", he = Array.isArray, pt = (i) => he(i) || typeof i?.[Symbol.iterator] == "function", Y = `[ 	
 \f\r]`, L = /<(?:(!--|\/[^a-zA-Z])|(\/?[a-zA-Z][^>\s]*)|(\/?$))/g, xe = /-->/g, we = />/g, $ = RegExp(`>|${Y}(?:([^\\s"'>=/]+)(${Y}*=${Y}*(?:[^ 	
 \f\r"'\`<>=]|("|')|))|$)`, "g"), ke = /'/g, $e = /"/g, Ge = /^(?:script|style|textarea|title)$/i, Ke = (i) => (e, ...t) => ({ _$litType$: i, strings: e, values: t }), d = Ke(1), qe = Ke(2), S = /* @__PURE__ */ Symbol.for("lit-noChange"), g = /* @__PURE__ */ Symbol.for("lit-nothing"), Me = /* @__PURE__ */ new WeakMap(), M = A.createTreeWalker(A, 129);
@@ -266,13 +266,13 @@ const ht = (i, e) => {
   }
   return [Je(i, a + (i[t] || "<?>") + (e === 2 ? "</svg>" : e === 3 ? "</math>" : "")), n];
 };
-class U {
+class R {
   constructor({ strings: e, _$litType$: t }, n) {
     let s;
     this.parts = [];
     let a = 0, r = 0;
     const l = e.length - 1, o = this.parts, [p, u] = ht(e, t);
-    if (this.el = U.createElement(p, n), M.currentNode = this.el.content, t === 2 || t === 3) {
+    if (this.el = R.createElement(p, n), M.currentNode = this.el.content, t === 2 || t === 3) {
       const c = this.el.content.firstChild;
       c.replaceWith(...c.childNodes);
     }
@@ -303,11 +303,11 @@ class U {
     return n.innerHTML = e, n;
   }
 }
-function T(i, e, t = i, n) {
+function z(i, e, t = i, n) {
   if (e === S) return e;
   let s = n !== void 0 ? t._$Co?.[n] : t._$Cl;
   const a = H(e) ? void 0 : e._$litDirective$;
-  return s?.constructor !== a && (s?._$AO?.(!1), a === void 0 ? s = void 0 : (s = new a(i), s._$AT(i, t, n)), n !== void 0 ? (t._$Co ??= [])[n] = s : t._$Cl = s), s !== void 0 && (e = T(i, s._$AS(i, e.values), s, n)), e;
+  return s?.constructor !== a && (s?._$AO?.(!1), a === void 0 ? s = void 0 : (s = new a(i), s._$AT(i, t, n)), n !== void 0 ? (t._$Co ??= [])[n] = s : t._$Cl = s), s !== void 0 && (e = z(i, s._$AS(i, e.values), s, n)), e;
 }
 class ut {
   constructor(e, t) {
@@ -356,7 +356,7 @@ class N {
     return this._$AB;
   }
   _$AI(e, t = this) {
-    e = T(this, e, t), H(e) ? e === g || e == null || e === "" ? (this._$AH !== g && this._$AR(), this._$AH = g) : e !== this._$AH && e !== S && this._(e) : e._$litType$ !== void 0 ? this.$(e) : e.nodeType !== void 0 ? this.T(e) : pt(e) ? this.k(e) : this._(e);
+    e = z(this, e, t), H(e) ? e === g || e == null || e === "" ? (this._$AH !== g && this._$AR(), this._$AH = g) : e !== this._$AH && e !== S && this._(e) : e._$litType$ !== void 0 ? this.$(e) : e.nodeType !== void 0 ? this.T(e) : pt(e) ? this.k(e) : this._(e);
   }
   O(e) {
     return this._$AA.parentNode.insertBefore(e, this._$AB);
@@ -368,7 +368,7 @@ class N {
     this._$AH !== g && H(this._$AH) ? this._$AA.nextSibling.data = e : this.T(A.createTextNode(e)), this._$AH = e;
   }
   $(e) {
-    const { values: t, _$litType$: n } = e, s = typeof n == "number" ? this._$AC(e) : (n.el === void 0 && (n.el = U.createElement(Je(n.h, n.h[0]), this.options)), n);
+    const { values: t, _$litType$: n } = e, s = typeof n == "number" ? this._$AC(e) : (n.el === void 0 && (n.el = R.createElement(Je(n.h, n.h[0]), this.options)), n);
     if (this._$AH?._$AD === s) this._$AH.p(t);
     else {
       const a = new ut(s, this), r = a.u(this.options);
@@ -377,7 +377,7 @@ class N {
   }
   _$AC(e) {
     let t = Me.get(e.strings);
-    return t === void 0 && Me.set(e.strings, t = new U(e)), t;
+    return t === void 0 && Me.set(e.strings, t = new R(e)), t;
   }
   k(e) {
     he(this._$AH) || (this._$AH = [], this._$AR());
@@ -409,11 +409,11 @@ class J {
   _$AI(e, t = this, n, s) {
     const a = this.strings;
     let r = !1;
-    if (a === void 0) e = T(this, e, t, 0), r = !H(e) || e !== this._$AH && e !== S, r && (this._$AH = e);
+    if (a === void 0) e = z(this, e, t, 0), r = !H(e) || e !== this._$AH && e !== S, r && (this._$AH = e);
     else {
       const l = e;
       let o, p;
-      for (e = a[0], o = 0; o < a.length - 1; o++) p = T(this, l[n + o], t, o), p === S && (p = this._$AH[o]), r ||= !H(p) || p !== this._$AH[o], p === g ? e = g : e !== g && (e += (p ?? "") + a[o + 1]), this._$AH[o] = p;
+      for (e = a[0], o = 0; o < a.length - 1; o++) p = z(this, l[n + o], t, o), p === S && (p = this._$AH[o]), r ||= !H(p) || p !== this._$AH[o], p === g ? e = g : e !== g && (e += (p ?? "") + a[o + 1]), this._$AH[o] = p;
     }
     r && !s && this.j(e);
   }
@@ -442,7 +442,7 @@ class gt extends J {
     super(e, t, n, s, a), this.type = 5;
   }
   _$AI(e, t = this) {
-    if ((e = T(this, e, t, 0) ?? g) === S) return;
+    if ((e = z(this, e, t, 0) ?? g) === S) return;
     const n = this._$AH, s = e === g && n !== g || e.capture !== n.capture || e.once !== n.once || e.passive !== n.passive, a = e !== g && (n === g || s);
     s && this.element.removeEventListener(this.name, this, n), a && this.element.addEventListener(this.name, this, e), this._$AH = e;
   }
@@ -458,11 +458,11 @@ class _t {
     return this._$AM._$AU;
   }
   _$AI(e) {
-    T(this, e);
+    z(this, e);
   }
 }
 const yt = { I: N }, bt = pe.litHtmlPolyfillSupport;
-bt?.(U, N), (pe.litHtmlVersions ??= []).push("3.3.3");
+bt?.(R, N), (pe.litHtmlVersions ??= []).push("3.3.3");
 const vt = (i, e, t) => {
   const n = t?.renderBefore ?? e;
   let s = n._$litPart$;
@@ -473,7 +473,7 @@ const vt = (i, e, t) => {
   return s._$AI(i), s;
 };
 const ue = globalThis;
-let C = class extends z {
+let C = class extends T {
   constructor() {
     super(...arguments), this.renderOptions = { host: this }, this._$Do = void 0;
   }
@@ -592,7 +592,7 @@ function Ct(i) {
 function Se(i) {
   return Number.isFinite(i) ? Math.min(100, Math.max(0, i)) : 0;
 }
-function ze(i) {
+function Te(i) {
   return Math.max(0, Math.round(i));
 }
 function At(i) {
@@ -620,7 +620,7 @@ function St(i, e) {
   );
   return Number.isFinite(s) ? s - i : 0;
 }
-function zt(i, e) {
+function Tt(i, e) {
   if (typeof i != "string")
     return null;
   const t = i.split("-");
@@ -636,14 +636,14 @@ function zt(i, e) {
   const r = Date.UTC(n, s - 1, a), l = new Date(r - St(r, e));
   return Number.isNaN(l.getTime()) ? null : l;
 }
-function Tt(i) {
+function zt(i) {
   const e = qt[i];
   return e || i.charAt(0).toUpperCase() + i.slice(1);
 }
 function Et(i, e) {
   return Mt[i] ?? e;
 }
-const Te = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 24.1 50 26 55.5 24.1Z M100 50 75.9 44.5 74 50 75.9 55.5Z M50 97 55.5 75.9 50 74 44.5 75.9Z M0 50 24.1 55.5 26 50 24.1 44.5Z M29.1 29.1 29.7 36.3 36.3 29.7Z M70.9 29.1 63.7 29.7 70.3 36.3Z M70.9 70.9 70.3 63.7 63.7 70.3Z M29.1 70.9 36.3 70.3 29.7 63.7Z", Nt = "M50 26.5 70.4 38.2 70.4 61.8 50 73.5 29.6 61.8 29.6 38.2Z", Lt = "M29.6 38.2H70.4M29.6 61.8H70.4M50 26.5 36.5 38.2M50 26.5 63.5 38.2M50 73.5 36.5 61.8M50 73.5 63.5 61.8M36.5 38.2V61.8M63.5 38.2V61.8M29.6 38.2 36.5 61.8M36.5 38.2 29.6 61.8M70.4 38.2 63.5 61.8M63.5 38.2 70.4 61.8", Ot = d`<svg
+const ze = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 24.1 50 26 55.5 24.1Z M100 50 75.9 44.5 74 50 75.9 55.5Z M50 97 55.5 75.9 50 74 44.5 75.9Z M0 50 24.1 55.5 26 50 24.1 44.5Z M29.1 29.1 29.7 36.3 36.3 29.7Z M70.9 29.1 63.7 29.7 70.3 36.3Z M70.9 70.9 70.3 63.7 63.7 70.3Z M29.1 70.9 36.3 70.3 29.7 63.7Z", Nt = "M50 26.5 70.4 38.2 70.4 61.8 50 73.5 29.6 61.8 29.6 38.2Z", Lt = "M29.6 38.2H70.4M29.6 61.8H70.4M50 26.5 36.5 38.2M50 26.5 63.5 38.2M50 73.5 36.5 61.8M50 73.5 63.5 61.8M36.5 38.2V61.8M63.5 38.2V61.8M29.6 38.2 36.5 61.8M36.5 38.2 29.6 61.8M70.4 38.2 63.5 61.8M63.5 38.2 70.4 61.8", Ot = d`<svg
   class="monogram"
   viewBox="0 0 100 100"
   aria-hidden="true"
@@ -850,7 +850,7 @@ const Te = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
     width: 188px;
     height: 214px;
     padding: 4px;
-    clip-path: ${x(Te)};
+    clip-path: ${x(ze)};
     background: rgba(255, 255, 255, 0.22);
   }
 
@@ -861,7 +861,7 @@ const Te = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
     align-items: center;
     justify-content: center;
     padding-bottom: 70px;
-    clip-path: ${x(Te)};
+    clip-path: ${x(ze)};
     background: var(--nq-p-crest);
   }
 
@@ -1113,7 +1113,7 @@ const Te = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
 >
   <circle cx="12" cy="12" r="10"></circle>
   <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"></polygon>
-</svg>`, Ut = d`<svg
+</svg>`, Rt = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -1125,7 +1125,7 @@ const Te = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
   <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path>
   <path d="M12 9v4"></path>
   <path d="M12 17h.01"></path>
-</svg>`, Rt = d`<svg
+</svg>`, Ut = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -1137,11 +1137,11 @@ const Te = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
   <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path>
   <path d="m2 2 20 20"></path>
 </svg>`, Ne = {
-  icon: Ut,
+  icon: Rt,
   headline: "NestQuest is not set up yet",
   body: "A parent needs to finish setting up NestQuest before the party can gather."
 }, jt = {
-  icon: Rt,
+  icon: Ut,
   headline: "The records cannot be reached",
   body: "The party's records are quiet right now. NestQuest will return shortly."
 }, Dt = d`<svg
@@ -1280,7 +1280,7 @@ const Te = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
       `sensor.nestquest_${e}_completion_pct_today`
     ), r = this._state(
       `binary_sensor.nestquest_${e}_present_today`
-    ), l = n?.attributes ?? {}, o = ze(te(n?.state, 0)), p = ze(te(s?.state, 0)), u = a ? te(a.state, Number.NaN) : Number.NaN, c = Number.isFinite(u) ? Se(u) : o > 0 ? Se(p / o * 100) : 0;
+    ), l = n?.attributes ?? {}, o = Te(te(n?.state, 0)), p = Te(te(s?.state, 0)), u = a ? te(a.state, Number.NaN) : Number.NaN, c = Number.isFinite(u) ? Se(u) : o > 0 ? Se(p / o * 100) : 0;
     let f = !0;
     const h = l.present;
     typeof h == "boolean" ? f = h : r && (f = String(r.state ?? "").trim().toLowerCase() === "on");
@@ -1293,10 +1293,10 @@ const Te = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
       typeof X == "string" && X.trim() && (m = X.trim());
     }
     m || (m = At(e));
-    const v = zt(
+    const v = Tt(
       r?.attributes?.next_present,
       this._timeZone()
-    ), R = v ? `Returns ${ee(v, this._timeZone())}` : null;
+    ), U = v ? `Returns ${ee(v, this._timeZone())}` : null;
     return {
       slug: e,
       name: m,
@@ -1305,7 +1305,7 @@ const Te = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
       completed: p,
       due: o,
       pct: c,
-      returns: R,
+      returns: U,
       unresolved: t
     };
   }
@@ -1439,7 +1439,7 @@ const Te = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
           <span class="clock">${$t(this._now, this._timeZone())}</span>
         </div>
       `;
-    const t = Tt(e.condition), n = Et(e.condition, t), s = e.temperature === null ? g : d`<span class="temp">${Math.round(e.temperature)}°</span>`, a = e.high === null || e.low === null ? null : `${Math.round(e.high)}° / ${Math.round(e.low)}°`;
+    const t = zt(e.condition), n = Et(e.condition, t), s = e.temperature === null ? g : d`<span class="temp">${Math.round(e.temperature)}°</span>`, a = e.high === null || e.low === null ? null : `${Math.round(e.high)}° / ${Math.round(e.low)}°`;
     return d`
       <div class="dock">
         ${Dt}
@@ -1539,8 +1539,8 @@ const Be = (i, e, t) => {
     else if (p === void 0 && (p = Be(r, h, m), u = Be(l, c, f)), p.has(l[c])) if (p.has(l[f])) {
       const _ = u.get(r[h]), v = _ !== void 0 ? s[_] : null;
       if (v === null) {
-        const R = O(i, s[c]);
-        q(R, a[h]), o[h] = R;
+        const U = O(i, s[c]);
+        q(U, a[h]), o[h] = U;
       } else o[h] = q(v, a[h]), O(i, s[c], v), s[_] = null;
       h++;
     } else ne(s[f]), f--;
@@ -2387,7 +2387,7 @@ function pn(i, e) {
   );
   return Number.isFinite(s) ? s - i : 0;
 }
-function Ue(i, e) {
+function Re(i, e) {
   if (typeof i != "string")
     return null;
   const t = i.split("-");
@@ -2470,7 +2470,7 @@ function gn(i) {
 function _n(i, e) {
   return mn[i] ?? e;
 }
-const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 0, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%)", je = [-9, 6, -4], bn = Ve`
+const Ue = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 0, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%)", je = [-9, 6, -4], bn = Ve`
   * {
     box-sizing: border-box;
   }
@@ -2524,13 +2524,44 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
     gap: 28px;
   }
 
+  button.return {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    height: var(--nq-p-button-height);
+    padding: 0 28px 0 20px;
+    border: 2px solid rgba(92, 62, 26, 0.5);
+    border-radius: 10px;
+    background: rgba(92, 62, 26, 0.1);
+    color: var(--nq-p-ink);
+    font-family: var(--nq-p-font-heading);
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: transform var(--nq-dur-micro) var(--nq-ease-out);
+  }
+
+  button.return:active {
+    transform: scale(0.98);
+  }
+
+  button.return svg {
+    width: 34px;
+    height: 34px;
+  }
+
   .crest {
     position: relative;
     flex: none;
     width: 96px;
     height: 110px;
     padding: 4px;
-    clip-path: ${x(Re)};
+    clip-path: ${x(Ue)};
     background: rgba(255, 255, 255, 0.22);
   }
 
@@ -2541,7 +2572,7 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
     align-items: center;
     justify-content: center;
     padding-bottom: 32px;
-    clip-path: ${x(Re)};
+    clip-path: ${x(Ue)};
     background: var(--nq-p-crest);
   }
 
@@ -3343,6 +3374,16 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
 >
   <path d="M18 6 6 18"></path>
   <path d="m6 6 12 12"></path>
+</svg>`, xn = d`<svg
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  aria-hidden="true"
+>
+  <path d="m15 18-6-6 6-6"></path>
 </svg>`, se = d`<svg
   viewBox="0 0 24 24"
   fill="none"
@@ -3355,7 +3396,7 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
   <polygon
     points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"
   ></polygon>
-</svg>`, xn = d`<svg
+</svg>`, wn = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -3390,7 +3431,7 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
   <path d="M20 12h2"></path>
   <path d="m6.34 17.66-1.41 1.41"></path>
   <path d="m19.07 4.93-1.41 1.41"></path>
-</svg>`, wn = d`<svg
+</svg>`, kn = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -3400,7 +3441,7 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
   aria-hidden="true"
 >
   <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path>
-</svg>`, kn = d`<svg
+</svg>`, $n = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -3411,7 +3452,7 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
 >
   <path d="M3.5 21 12 3.5 20.5 21"></path>
   <path d="M9 21l3-8 3 8"></path>
-</svg>`, $n = d`<svg
+</svg>`, qn = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -3422,7 +3463,7 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
 >
   <circle cx="12" cy="12" r="10"></circle>
   <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"></polygon>
-</svg>`, qn = d`<svg
+</svg>`, Mn = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -3434,7 +3475,7 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
   <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path>
   <path d="M12 9v4"></path>
   <path d="M12 17h.01"></path>
-</svg>`, Mn = d`<svg
+</svg>`, Cn = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -3445,7 +3486,7 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
 >
   <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path>
   <path d="m2 2 20 20"></path>
-</svg>`, Cn = d`<svg
+</svg>`, An = d`<svg
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
@@ -3456,22 +3497,22 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
 >
   <path d="M13 16a3 3 0 1 1 0 6H7a5 5 0 1 1 4.9-6Z"></path>
   <path d="M10.1 9A6 6 0 0 1 16 4a4.5 4.5 0 0 0 8.9 4.2v.1a6 6 0 0 1-5.2 5.7"></path>
-</svg>`, An = {
-  icon: $n,
+</svg>`, Sn = {
+  icon: qn,
   headline: "No adventurer chosen",
   body: "Open The Party and tap your crest to open your quest log."
-}, Sn = {
-  icon: qn,
+}, Tn = {
+  icon: Mn,
   headline: "NestQuest is not set up yet",
   body: "A parent needs to finish setting up NestQuest."
 }, zn = {
-  icon: Mn,
+  icon: Cn,
   headline: "The records cannot be reached",
   body: "The party's records are quiet right now. NestQuest will return shortly."
 }, De = [
-  { key: "morning", name: "Morning", range: "Until 11:59 AM", icon: xn },
+  { key: "morning", name: "Morning", range: "Until 11:59 AM", icon: wn },
   { key: "afternoon", name: "Afternoon", range: "12:00–5:00 PM", icon: Ye },
-  { key: "evening", name: "Evening", range: "5:00–9:00 PM", icon: wn }
+  { key: "evening", name: "Evening", range: "5:00–9:00 PM", icon: kn }
 ], W = class W extends C {
   constructor() {
     super(...arguments), this._now = /* @__PURE__ */ new Date(), this._confirm = null, this._optimistic = /* @__PURE__ */ new Map(), this._toast = null, this._countdown = null, this._unsubs = [], this._subscribed = !1, this._subGeneration = 0, this._onActivity = () => {
@@ -3554,9 +3595,9 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
   _renderMain(e) {
     switch (e.kind) {
       case "no-adventurer":
-        return this._renderNotice(An);
-      case "not-set-up":
         return this._renderNotice(Sn);
+      case "not-set-up":
+        return this._renderNotice(Tn);
       case "unreachable":
         return this._renderNotice(zn);
       case "away": {
@@ -3565,7 +3606,7 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
           ${this._renderHeader(e)}
           <div class="notice-wrap">
             <div class="notice away" role="status">
-              ${kn}
+              ${$n}
               <span class="notice-headline">${e.name} is on travels</span>
               ${t.map((n) => d`<p class="notice-body">${n}</p>`)}
             </div>
@@ -3669,7 +3710,7 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
   _awayReturns(e) {
     const t = this._timeZone(), n = this._state(
       `binary_sensor.nestquest_${e}_present_today`
-    ), s = Ue(
+    ), s = Re(
       n?.attributes?.next_present,
       t
     );
@@ -3815,7 +3856,7 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
       if (!u) {
         const _ = this._state(
           `binary_sensor.nestquest_${l}_present_today`
-        ), v = Ue(
+        ), v = Re(
           _?.attributes?.next_present,
           n
         );
@@ -3836,6 +3877,16 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
     const t = this._childSlug(), n = e.kind === "away", s = n ? e.name : this._childName(t) ?? (t ? ie(t) : null), { due: a, completed: r } = this._childCounts(t), l = this._remaining(), o = this._partyCounts(), p = s ? `${s}'s Quest Log` : "Quest Log", u = (s?.charAt(0) || "?").toUpperCase();
     return d`
       <header class="header">
+        ${this._boardPath() ? d`
+              <button
+                class="return"
+                type="button"
+                @click=${() => this._returnToBoard()}
+              >
+                ${xn}
+                <span>The Party</span>
+              </button>
+            ` : g}
         <span class="crest${n ? " away" : ""}" aria-hidden="true">
           <span class="crest-face">
             <span class="initial">${u}</span>
@@ -4183,7 +4234,7 @@ const Re = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
     const t = gn(e.condition), n = _n(e.condition, t), s = e.temperature === null ? g : d`<span class="temp">${Math.round(e.temperature)}°</span>`, a = e.high === null || e.low === null ? null : `${Math.round(e.high)}° / ${Math.round(e.low)}°`;
     return d`
       <div class="dock">
-        ${Cn}
+        ${An}
         ${s}
         <span class="divider"></span>
         <span class="condition">
@@ -4218,7 +4269,7 @@ fe({
   name: "NestQuest Quest Log",
   description: "One child's daily quests, grouped by window."
 });
-const Tn = ":host{--nq-brand-blue: #3B3AB8;--nq-brand-purple: #A035CC;--nq-brand-gradient: linear-gradient(135deg, var(--nq-brand-blue), var(--nq-brand-purple));--nq-brand-gradient-h: linear-gradient(90deg, var(--nq-brand-blue), var(--nq-brand-purple));--nq-a-page: #F4F4F6;--nq-a-surface: #FFFFFF;--nq-a-surface-subtle: #FAFAFA;--nq-a-selected: #EBEBF8;--nq-a-border: #E4E4EA;--nq-a-divider: #EDEDF1;--nq-a-ink: #18181D;--nq-a-ink-secondary: #52525E;--nq-a-ink-tertiary: #70707E;--nq-a-success: #15803D;--nq-a-danger: #DC2626;--nq-a-danger-strong: #B91C1C;--nq-a-danger-bg: #FEE2E2;--nq-a-warning-ink: #92400E;--nq-a-warning-ink-2: #78350F;--nq-a-warning-bg: #FEF3C7;--nq-a-warning-border: rgba(217,119,6,.35);--nq-a-info-bg: #DBEAFE;--nq-a-info-ink: #1E3A8A;--nq-a-info-icon: #1D4ED8;--nq-a-reversal: #7D28A0;--nq-a-font: Nunito, system-ui, sans-serif;--nq-a-size-screen: 24px;--nq-a-size-hero: 32px;--nq-a-size-card-title: 19px;--nq-a-size-stat: 22px;--nq-a-size-row: 13.5px;--nq-a-size-meta: 11px;--nq-a-size-label: 10px;--nq-a-track-label: .1em;--nq-a-density-page-pad: 14px 16px 92px;--nq-a-density-gap: 10px;--nq-a-density-card-pad: 13px;--nq-a-density-row-pad: 11px 13px;--nq-a-density-radius: 8px;--nq-a-density-shadow: none;--nq-a-tabbar-height: 70px;--nq-a-tap-min: 44px;--nq-a-radius-pill: 9999px;--nq-a-radius-sheet: 20px 20px 0 0;--nq-a-sheet-shadow: 0 -8px 28px rgba(9,9,11,.18);--nq-a-progress-height: 6px;--nq-ease-out: cubic-bezier(0, 0, .2, 1);--nq-dur-micro: .12s;--nq-dur-base: .2s;--nq-dur-modal: .35s}", G = class G extends C {
+const En = ":host{--nq-brand-blue: #3B3AB8;--nq-brand-purple: #A035CC;--nq-brand-gradient: linear-gradient(135deg, var(--nq-brand-blue), var(--nq-brand-purple));--nq-brand-gradient-h: linear-gradient(90deg, var(--nq-brand-blue), var(--nq-brand-purple));--nq-a-page: #F4F4F6;--nq-a-surface: #FFFFFF;--nq-a-surface-subtle: #FAFAFA;--nq-a-selected: #EBEBF8;--nq-a-border: #E4E4EA;--nq-a-divider: #EDEDF1;--nq-a-ink: #18181D;--nq-a-ink-secondary: #52525E;--nq-a-ink-tertiary: #70707E;--nq-a-success: #15803D;--nq-a-danger: #DC2626;--nq-a-danger-strong: #B91C1C;--nq-a-danger-bg: #FEE2E2;--nq-a-warning-ink: #92400E;--nq-a-warning-ink-2: #78350F;--nq-a-warning-bg: #FEF3C7;--nq-a-warning-border: rgba(217,119,6,.35);--nq-a-info-bg: #DBEAFE;--nq-a-info-ink: #1E3A8A;--nq-a-info-icon: #1D4ED8;--nq-a-reversal: #7D28A0;--nq-a-font: Nunito, system-ui, sans-serif;--nq-a-size-screen: 24px;--nq-a-size-hero: 32px;--nq-a-size-card-title: 19px;--nq-a-size-stat: 22px;--nq-a-size-row: 13.5px;--nq-a-size-meta: 11px;--nq-a-size-label: 10px;--nq-a-track-label: .1em;--nq-a-density-page-pad: 14px 16px 92px;--nq-a-density-gap: 10px;--nq-a-density-card-pad: 13px;--nq-a-density-row-pad: 11px 13px;--nq-a-density-radius: 8px;--nq-a-density-shadow: none;--nq-a-tabbar-height: 70px;--nq-a-tap-min: 44px;--nq-a-radius-pill: 9999px;--nq-a-radius-sheet: 20px 20px 0 0;--nq-a-sheet-shadow: 0 -8px 28px rgba(9,9,11,.18);--nq-a-progress-height: 6px;--nq-ease-out: cubic-bezier(0, 0, .2, 1);--nq-dur-micro: .12s;--nq-dur-base: .2s;--nq-dur-modal: .35s}", G = class G extends C {
   setConfig(e) {
     if (!e || typeof e != "object")
       throw new Error("Invalid configuration");
@@ -4234,7 +4285,7 @@ const Tn = ":host{--nq-brand-blue: #3B3AB8;--nq-brand-purple: #A035CC;--nq-brand
 G.properties = {
   hass: { attribute: !1 },
   _config: { state: !0 }
-}, G.styles = [x(Tn)];
+}, G.styles = [x(En)];
 let le = G;
 customElements.define("nestquest-admin-card", le);
 fe({
@@ -4245,29 +4296,29 @@ fe({
 function et(i) {
   return typeof i == "string" ? i.trim() : "";
 }
-function En(i) {
+function Nn(i) {
   if (i === null || typeof i != "object" || Array.isArray(i))
     return "";
   const e = i.slug;
   return typeof e == "string" ? e.trim() : "";
 }
-function Nn(i) {
+function Ln(i) {
   const e = et(i.url_path).replace(/^\/+|\/+$/g, "");
   return e || (window.location.pathname.split("/").filter(Boolean)[0] ?? "");
 }
-function Ln(i) {
+function On(i) {
   if (i === null || typeof i != "object" || Array.isArray(i))
     return "";
   const e = i.name;
   return typeof e == "string" ? e.trim() : "";
 }
-function On(i) {
+function Bn(i) {
   const n = i?.states?.["sensor.nestquest_household_quests_due_today"]?.attributes?.child_roster;
-  return Array.isArray(n) ? n.map((s) => ({ slug: En(s), name: Ln(s) })).filter((s) => s.slug.length > 0) : [];
+  return Array.isArray(n) ? n.map((s) => ({ slug: Nn(s), name: On(s) })).filter((s) => s.slug.length > 0) : [];
 }
-class Bn {
+class In {
   static async generate(e, t) {
-    const n = `/${Nn(e)}`, s = et(e.weather_entity), a = {
+    const n = `/${Ln(e)}`, s = et(e.weather_entity), a = {
       type: "custom:nestquest-party-board-card",
       quest_log_path: n
     };
@@ -4284,7 +4335,7 @@ class Bn {
           type: "panel",
           cards: [a]
         },
-        ...On(t).map((l) => ({
+        ...Bn(t).map((l) => ({
           path: l.slug,
           title: l.name ? `${l.name}'s Quest Log` : `${l.slug}'s Quest Log`,
           type: "panel",
@@ -4295,9 +4346,9 @@ class Bn {
   }
 }
 window.customStrategies = window.customStrategies ?? {};
-window.customStrategies["nestquest-party"] = Bn;
-const In = "/nestquest-static/nestquest-fonts.css";
+window.customStrategies["nestquest-party"] = In;
+const Pn = "/nestquest-static/nestquest-fonts.css";
 if (!document.querySelector('link[data-nq-fonts=""]')) {
   const i = document.createElement("link");
-  i.rel = "stylesheet", i.href = In, i.dataset.nqFonts = "", document.head.appendChild(i);
+  i.rel = "stylesheet", i.href = Pn, i.dataset.nqFonts = "", document.head.appendChild(i);
 }

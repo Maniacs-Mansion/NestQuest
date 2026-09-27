@@ -374,6 +374,37 @@ const logStyles = css`
     gap: 28px;
   }
 
+  button.return {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    height: var(--nq-p-button-height);
+    padding: 0 28px 0 20px;
+    border: 2px solid rgba(92, 62, 26, 0.5);
+    border-radius: 10px;
+    background: rgba(92, 62, 26, 0.1);
+    color: var(--nq-p-ink);
+    font-family: var(--nq-p-font-heading);
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: transform var(--nq-dur-micro) var(--nq-ease-out);
+  }
+
+  button.return:active {
+    transform: scale(0.98);
+  }
+
+  button.return svg {
+    width: 34px;
+    height: 34px;
+  }
+
   .crest {
     position: relative;
     flex: none;
@@ -1199,6 +1230,18 @@ const ICON_X = html`<svg
   <path d="m6 6 12 12"></path>
 </svg>`;
 
+const ICON_CHEVRON_LEFT = html`<svg
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  aria-hidden="true"
+>
+  <path d="m15 18-6-6 6-6"></path>
+</svg>`;
+
 const ICON_STAR = html`<svg
   viewBox="0 0 24 24"
   fill="none"
@@ -1944,6 +1987,18 @@ export class NestQuestQuestLogCard extends LitElement {
     const initial = (name?.charAt(0) || "?").toUpperCase();
     return html`
       <header class="header">
+        ${this._boardPath()
+          ? html`
+              <button
+                class="return"
+                type="button"
+                @click=${() => this._returnToBoard()}
+              >
+                ${ICON_CHEVRON_LEFT}
+                <span>The Party</span>
+              </button>
+            `
+          : nothing}
         <span class="crest${away ? " away" : ""}" aria-hidden="true">
           <span class="crest-face">
             <span class="initial">${initial}</span>

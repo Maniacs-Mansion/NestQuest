@@ -302,14 +302,15 @@ def test_quest_log_entrances_use_the_design_timing_and_easing() -> None:
         ".quest.tappable:active",
         "button.complete:active",
         "button.confirm-button:active",
+        "button.return:active",
     ):
         start = style.index(selector)
         block = style[start : style.index("}", start)]
         assert "transform: scale(0.98);" in block, selector
     assert (
         style.count("transition: transform var(--nq-dur-micro) var(--nq-ease-out);")
-        == 3
-    )  # quest card, Complete button, confirm buttons
+        == 4
+    )  # quest card, Complete button, confirm buttons, header return control
     board_style = _style_literal(_read(PARTY_BOARD), STYLE_CONSTANTS[PARTY_BOARD])
     start = board_style.index("button.plate:active")
     block = board_style[start : board_style.index("}", start)]
@@ -829,6 +830,7 @@ def _render_quest_log(
     idle_ms: int | None = None,
     probe_ms: int | None = None,
     tap_complete: int | None = None,
+    tap_return: bool = False,
 ) -> dict:
     """Render the built bundle's quest log and report its location.
 
@@ -854,6 +856,8 @@ def _render_quest_log(
         spec["probe_ms"] = probe_ms
     if tap_complete is not None:
         spec["tap_complete"] = tap_complete
+    if tap_return:
+        spec["tap_return"] = True
     completed = subprocess.run(
         ["node", str(QUEST_LOG_HARNESS)],
         input=json.dumps(spec),
@@ -921,6 +925,40 @@ def test_quest_log_idle_return_navigates_to_the_board() -> None:
     )
     assert result["headline"] == "Ada's Quest Log"
     assert result["location"] == "/nestquest"
+
+
+def test_quest_log_return_control_navigates_to_the_board() -> None:
+    """PANEL-SPEC §3: the Quest Log header carries an explicit return
+    control labelled for a child. Tapping it takes the same path as the
+    idle return — the strategy-computed board_path (the dashboard root) —
+    without waiting out the idle window."""
+    generated = _generate_dashboard(
+        {}, _three_child_states(), url="http://homeassistant.local/nestquest"
+    )
+    result = _render_quest_log(
+        generated["views"][1]["cards"][0],
+        _three_child_states(),
+        url="http://homeassistant.local/nestquest/ada",
+        tap_return=True,
+    )
+    assert result["headline"] == "Ada's Quest Log"
+    assert result["returned"] == {"rendered": True, "label": "The Party"}
+    assert result["location"] == "/nestquest"
+
+
+def test_quest_log_return_control_follows_the_panel_hard_rules() -> None:
+    """The return control is a 72px button with :active feedback only,
+    lives in the header (never the dock), and reuses the idle return's
+    _returnToBoard navigation rather than a second mechanism."""
+    log = _read(QUEST_LOG)
+    style = _style_literal(log, STYLE_CONSTANTS[QUEST_LOG])
+    rules = {selector.strip(): body for selector, body in _css_rules(style)}
+    assert "height: var(--nq-p-button-height);" in rules["button.return"]
+    assert "transform: scale(0.98);" in rules["button.return:active"]
+    header = log[log.index("private _renderHeader") : log.index("private _renderColumn")]
+    assert 'class="return"' in header
+    assert "@click=${() => this._returnToBoard()}" in header
+    assert log.count("this._returnToBoard()") == 4
 
 
 def test_quest_complete_screen_returns_to_the_board_after_the_countdown() -> None:
@@ -1035,9 +1073,12 @@ def test_quest_log_crest_keeps_its_shield_classes() -> None:
         )
         header = result["html"][result["html"].index('<header class="header">') :]
         crest = re.match(
-            r'<header class="header">\s*(?:<!--[^>]*-->\s*)*<span ([^>]*)>\s*'
+            r'<header class="header">\s*(?:<!--[^>]*-->\s*)*'
+            r'(?:<button class="return"[^>]*>.*?</button>\s*(?:<!--[^>]*-->\s*)*)?'
+            r'<span ([^>]*)>\s*'
             r'<span class="crest-face">\s*<span class="initial">',
             header,
+            re.DOTALL,
         )
         assert crest is not None, header[:600]
         assert f'class="{crest_class}"' in crest.group(1), crest.group(1)
