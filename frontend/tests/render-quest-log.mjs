@@ -14,6 +14,8 @@
  * tap_complete: <instance id> the harness taps that card's Complete button,
  * records whether the confirm dialog opened, taps the dialog's Complete, and
  * reports every hass.callService call as tap: {dialog_opened, service_calls}.
+ * With tap_return: true the harness taps the header's return control and
+ * reports it as returned: {rendered, label} before the final snapshot.
  * The Python panel tests drive this harness so the
  * assertions run against the exact bundle HACS ships.
  */
@@ -75,6 +77,17 @@ if (spec.tap_complete !== undefined) {
   tap = { dialog_opened: confirm !== null, service_calls: serviceCalls };
 }
 
+let returned = null;
+if (spec.tap_return) {
+  const control = element.shadowRoot.querySelector(".header button.return");
+  returned = {
+    rendered: control !== null,
+    label: control?.textContent?.trim() ?? "",
+  };
+  control?.click();
+  await element.updateComplete;
+}
+
 const snapshot = () => ({
   location: window.location.pathname,
   headline: element.shadowRoot.querySelector(".title")?.textContent?.trim() ?? "",
@@ -110,6 +123,6 @@ if (spec.idle_ms !== undefined) {
   await new Promise((resolve) => setTimeout(resolve, spec.idle_ms));
 }
 
-const payload = JSON.stringify({ ...snapshot(), probe, tap });
+const payload = JSON.stringify({ ...snapshot(), probe, tap, returned });
 await new Promise((resolve) => process.stdout.write(payload, () => resolve()));
 process.exit(0);

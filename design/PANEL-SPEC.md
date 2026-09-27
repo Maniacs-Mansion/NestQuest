@@ -71,6 +71,14 @@ and time only rather than removing it (the strip is part of the frame).
 
 Reached by tapping a present crest. Header at y=56, page inset 62px:
 
+- **Return control** first in the header, left of the crest: a `--nq-p-button-height`
+  72px button, radius 10px, `rgba(92,62,26,.1)` with a 2px `rgba(92,62,26,.5)` border
+  (the confirm dialog's **Not yet** treatment), `chevron-left` 34px + `The Party`
+  26px/700 Cinzel `--nq-p-ink`, 28px header gap to the crest. Tapping it takes the same
+  path as the idle return (§3.5) — navigate to `board_path` — immediately. Press
+  feedback `scale(.98)`, `--nq-dur-micro`. Not rendered when no `board_path` is
+  configured. The party board is the main display and has no return control; the
+  Quest complete screen (§5) keeps its auto-return.
 - Small crest 96×110 (initial 44px/700 display).
 - Title `<Name>'s Quest Log` 56px/700 display.
 - Sub `<weekday>, <Month D> · N of M claimed` 20px/600 Cinzel, tracking .24em, uppercase.
