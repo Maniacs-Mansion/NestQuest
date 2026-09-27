@@ -7,7 +7,8 @@
 Patch release carrying the kids' panel Return button onto `main`.
 
 - **Return button:** the Quest Log header now shows an explicit Return control —
-  a left chevron plus "The Party", 208×72, sitting left of the crest — so a child
+  a left chevron plus "The Party", 72px high and sized to its label, sitting left
+  of the crest — so a child
   can go straight back to the main Party board instead of waiting out the 40 s
   idle return. It calls the same navigation the idle return uses
   (`board_path` + `location-changed`), so there is exactly one navigation path.
