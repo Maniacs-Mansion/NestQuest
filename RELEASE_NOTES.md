@@ -39,7 +39,8 @@ passed").
   day over and the missed sweep removes the previous day's open quests.
 - The Quest Log header clock still formats in Home Assistant's configured
   `time_zone`; if HA is set to a zone other than the household's, that header
-  remains wrong. Set HA's time zone (or the admin timezone setting) correctly.
+  remains wrong. Set Home Assistant's own `time_zone` correctly — the admin/API
+  timezone setting does not affect the header clock.
 
 ### Rollback
 
