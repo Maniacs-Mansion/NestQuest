@@ -5,7 +5,8 @@
 ### Scope
 
 Patch release carrying the household time-zone fix onto `main` (PR #275, task
-6351b36d "Time zone errors").
+6351b36d "Time zone errors"), plus its release-review correction (PR #277, task
+45243478).
 
 ### Behaviour
 
@@ -20,8 +21,10 @@ Patch release carrying the household time-zone fix onto `main` (PR #275, task
   while it is sleeping, and re-reads the stored zone before sweeping, so it no
   longer fires at the old (UTC) rollover.
 - An admin-chosen zone — including an explicit choice of empty (API-host local)
-  — still wins over the reported zone. An invalid reported zone is logged and
-  ignored; the panel keeps serving on the stored settings.
+  — still wins over the reported zone: any admin update that supplies
+  `timezone` is recorded as an explicit choice (`timezone_configured` true). An
+  invalid reported zone is logged and ignored; the panel keeps serving on the
+  stored settings.
 
 ### Requirements
 
@@ -33,11 +36,18 @@ Patch release carrying the household time-zone fix onto `main` (PR #275, task
   database backup is required for this release.
 - Deployment note: this fix needs BOTH the API service and the HA integration
   upgraded. The integration supplies the zone and the API adopts it; upgrading
-  only one side leaves the previous behaviour. An install whose `timezone` was
-  previously set — or explicitly cleared to host-local — keeps that choice.
+  only one side leaves the previous behaviour. An install that sets or clears
+  its zone on 0.9.6 or later keeps that choice; see Known limitations for a zone
+  stored by an older release.
 
 ### Known limitations
 
+- A zone stored by a release before 0.9.6 without the explicit-choice marker
+  (for example through the previously documented
+  `PATCH /api/v1/admin/settings {"timezone": ...}`) is not distinguishable from
+  an automatically adopted value, so 0.9.6 adopts Home Assistant's reported zone
+  over it once. If a zone different from Home Assistant's is intended, re-save
+  it in the admin Preferences, which now records the explicit choice.
 - If `timezone` is empty and `timezone_configured` is true (an explicit
   "host local" choice), that choice is respected and the API host's zone (UTC
   on the standard deployment) still applies until an admin selects a zone in
