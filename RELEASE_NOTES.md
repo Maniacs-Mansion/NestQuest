@@ -1,5 +1,56 @@
 # NestQuest Release Notes
 
+## Version 0.9.6 — 2026-09-28
+
+### Scope
+
+Patch release carrying the household time-zone fix onto `main` (PR #275, task
+6351b36d "Time zone errors").
+
+### Behaviour
+
+- The Home Assistant integration now reports `hass.config.time_zone` to the API
+  in an `X-NestQuest-Timezone` header on every panel request.
+- While the API's `timezone` setting has never been explicitly chosen
+  (`timezone_configured` false), the API adopts and persists the reported zone
+  (under the settings lock), so the panel's overdue/today calculation, the
+  admin plane and the missed-sweep scheduler are all household-local even when
+  the API host runs UTC. No manual setup is required.
+- The missed-sweep scheduler re-plans immediately when the adopted zone changes
+  while it is sleeping, and re-reads the stored zone before sweeping, so it no
+  longer fires at the old (UTC) rollover.
+- An admin-chosen zone — including an explicit choice of empty (API-host local)
+  — still wins over the reported zone. An invalid reported zone is logged and
+  ignored; the panel keeps serving on the stored settings.
+
+### Requirements
+
+- Home Assistant floor 2024.6.0 (unchanged).
+
+### Breaking changes
+
+- None. The database schema is unchanged at version 9: no migration and no
+  database backup is required for this release.
+- Deployment note: this fix needs BOTH the API service and the HA integration
+  upgraded. The integration supplies the zone and the API adopts it; upgrading
+  only one side leaves the previous behaviour. An install whose `timezone` was
+  previously set — or explicitly cleared to host-local — keeps that choice.
+
+### Known limitations
+
+- If `timezone` is empty and `timezone_configured` is true (an explicit
+  "host local" choice), that choice is respected and the API host's zone (UTC
+  on the standard deployment) still applies until an admin selects a zone in
+  the admin Preferences.
+- A change to Home Assistant's own `time_zone` takes effect after the
+  integration reloads or Home Assistant restarts.
+
+### Rollback
+
+- No schema change: rolling back to 0.9.5 requires no database restore. The API
+  and the integration may be rolled back independently; rolling back only the
+  integration restores the previous stored-setting-only behaviour.
+
 ## Version 0.9.5 — 2026-09-27
 
 ### Scope
