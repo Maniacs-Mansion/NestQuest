@@ -327,12 +327,14 @@ class NestQuestSettings:
     def household_now(self, instant: datetime.datetime) -> datetime.datetime:
         """Return the aware ``instant`` expressed in the household's zone.
 
-        The API service has no Home Assistant ``time_zone``, so its one
+        The API service does not run inside Home Assistant, so its one
         clock read (an aware host-local ``now``) is converted here: with
-        :attr:`timezone` set the SAME instant is re-expressed in that
-        zone, so ``.date()`` and ``.time()`` are the household's wall
-        clock even when the host runs UTC.  With :attr:`timezone` empty
-        the instant is returned unchanged (the host's local time).
+        :attr:`timezone` set — the admin's choice, or else the zone the
+        integration reports from Home Assistant — the SAME instant is
+        re-expressed in that zone, so ``.date()`` and ``.time()`` are the
+        household's wall clock even when the host runs UTC.  With
+        :attr:`timezone` empty the instant is returned unchanged (the
+        host's local time).
         """
         if not self.timezone:
             return instant
