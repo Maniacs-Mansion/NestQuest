@@ -21,6 +21,7 @@ end-to-end through the quest-log harness.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -831,6 +832,9 @@ def _render_quest_log(
     probe_ms: int | None = None,
     tap_complete: int | None = None,
     tap_return: bool = False,
+    now: str | None = None,
+    advance_to: list[str] | None = None,
+    tz: str | None = None,
 ) -> dict:
     """Render the built bundle's quest log and report its location.
 
@@ -840,7 +844,10 @@ def _render_quest_log(
     segment — waits the optional probe window and captures one snapshot
     of the render mid-wait, then the optional idle window, and prints
     the final pathname and rendered title (plus the probe snapshot when
-    ``probe_ms`` was given).
+    ``probe_ms`` was given).  ``now`` pins the card's clock to an ISO
+    instant, ``advance_to`` moves it through further instants firing the
+    card's clock tick (one snapshot each, under ``ticks``), and ``tz``
+    sets the node process's ``TZ`` — the panel browser's local zone.
     """
     assert BUNDLE_PATH.is_file(), "bundle missing: run cd frontend && npm run build"
     assert QUEST_LOG_HARNESS.is_file()
@@ -858,12 +865,17 @@ def _render_quest_log(
         spec["tap_complete"] = tap_complete
     if tap_return:
         spec["tap_return"] = True
+    if now is not None:
+        spec["now"] = now
+    if advance_to is not None:
+        spec["advance_to"] = advance_to
     completed = subprocess.run(
         ["node", str(QUEST_LOG_HARNESS)],
         input=json.dumps(spec),
         capture_output=True,
         text=True,
         timeout=120,
+        env={**os.environ, "TZ": tz} if tz is not None else None,
     )
     assert completed.returncode == 0, (
         f"quest-log harness failed: {completed.stderr}"
@@ -1090,12 +1102,13 @@ def test_quest_log_meta_line_keeps_its_meta_class() -> None:
     ``meta ${late ? "late" : nothing}``, Lit dropped the whole class
     attribute for every quest that was not late, leaving the due line
     unstyled. The rendered markup must carry ``class="meta"`` on time and
-    ``class="meta late"`` overdue."""
+    ``class="meta late"`` overdue — overdue by the panel's pinned clock
+    (07:15 local: the 07:00 quest is late, the 08:15 one is not)."""
     generated = _generate_dashboard(
         {}, _three_child_states(), url="http://homeassistant.local/nestquest"
     )
 
-    def quest(instance_id: int, title: str, overdue: bool) -> dict:
+    def quest(instance_id: int, title: str, due_time: str) -> dict:
         return {
             "id": instance_id,
             "definition_id": instance_id,
@@ -1103,9 +1116,9 @@ def test_quest_log_meta_line_keeps_its_meta_class() -> None:
             "title": title,
             "icon": None,
             "window": "morning",
-            "due_time": "08:15",
+            "due_time": due_time,
             "state": "open",
-            "overdue": overdue,
+            "overdue": False,
             "completed_at": None,
             "on_time": None,
         }
@@ -1118,8 +1131,8 @@ def test_quest_log_meta_line_keeps_its_meta_class() -> None:
             child_id=1,
             present=True,
             instances=[
-                quest(41, "Make Bed", overdue=False),
-                quest(42, "Brush Teeth", overdue=True),
+                quest(41, "Make Bed", "08:15"),
+                quest(42, "Brush Teeth", "07:00"),
             ],
         ),
     }
@@ -1127,6 +1140,8 @@ def test_quest_log_meta_line_keeps_its_meta_class() -> None:
         generated["views"][1]["cards"][0],
         states,
         url="http://homeassistant.local/nestquest/ada",
+        now="2026-09-29T11:15:00Z",
+        tz="America/New_York",
     )
     metas = {}
     for card in result["html"].split('data-instance-id="')[1:]:
@@ -1141,6 +1156,83 @@ def test_quest_log_meta_line_keeps_its_meta_class() -> None:
     assert set(metas) == {"41", "42"}, metas
     assert metas["41"].strip() == 'class="meta"', metas["41"]
     assert metas["42"].strip() == 'class="meta late"', metas["42"]
+
+
+def _quest_metas(html: str) -> dict[str, tuple[str, str]]:
+    """Map each rendered open quest's instance id to its meta line's
+    attributes and text."""
+    metas = {}
+    for card in html.split('data-instance-id="')[1:]:
+        meta = re.search(
+            r'<span class="quest-title">.*?</span>'
+            r"\s*(?:<!--[^>]*-->\s*)*<span([^>]*)>(.*?)</span>",
+            card,
+            re.S,
+        )
+        assert meta is not None, card[:800]
+        text = " ".join(re.sub(r"<!--[^>]*-->", "", meta.group(2)).split())
+        metas[card[: card.index('"')]] = (meta.group(1).strip(), text)
+    return metas
+
+
+def test_quest_log_overdue_follows_the_panel_local_clock() -> None:
+    """Overdue is decided by the panel's own local clock, not the API's
+    ``overdue`` flag.  The owner saw 8:15 AM quests read OVERDUE at 7:15 AM
+    America/New_York: the API's flag had been computed on a UTC wall clock
+    (11:15).  Here the API still says ``overdue: true`` and Home
+    Assistant reports ``time_zone`` UTC, yet at 07:15 local the 08:15 quest
+    is due, at 08:15 (and 08:16, via the card's own clock tick) it is
+    overdue, and a quest with no due time is never overdue."""
+    generated = _generate_dashboard(
+        {}, _three_child_states(), url="http://homeassistant.local/nestquest"
+    )
+
+    def quest(instance_id: int, title: str, due_time: str | None) -> dict:
+        return {
+            "id": instance_id,
+            "definition_id": instance_id,
+            "child_id": 1,
+            "title": title,
+            "icon": None,
+            "window": "morning",
+            "due_time": due_time,
+            "state": "open",
+            "overdue": True,
+            "completed_at": None,
+            "on_time": None,
+        }
+
+    states = {
+        **_three_child_states(),
+        "sensor.nestquest_ada_quests_due_today": _state(
+            "2",
+            child_name="Ada",
+            child_id=1,
+            present=True,
+            instances=[
+                quest(42, "Brush Teeth", "08:15"),
+                quest(43, "Feed Fish", None),
+            ],
+        ),
+    }
+    result = _render_quest_log(
+        generated["views"][1]["cards"][0],
+        states,
+        url="http://homeassistant.local/nestquest/ada",
+        now="2026-09-29T11:15:00Z",
+        advance_to=["2026-09-29T12:15:00Z", "2026-09-29T12:16:00Z"],
+        tz="America/New_York",
+    )
+    due_by = ('class="meta"', "Due by 8:15 AM")
+    overdue = ('class="meta late"', "Overdue · due 8:15 AM")
+    not_due = ('class="meta"', "Due today")
+    at_0715, at_0815, at_0816 = (
+        _quest_metas(result["html"]),
+        *(_quest_metas(tick["html"]) for tick in result["ticks"]),
+    )
+    assert at_0715 == {"42": due_by, "43": not_due}, at_0715
+    assert at_0815 == {"42": overdue, "43": not_due}, at_0815
+    assert at_0816 == {"42": overdue, "43": not_due}, at_0816
 
 
 def test_quest_log_crest_matches_the_spec_geometry() -> None:

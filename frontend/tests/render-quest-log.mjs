@@ -16,6 +16,12 @@
  * reports every hass.callService call as tap: {dialog_opened, service_calls}.
  * With tap_return: true the harness taps the header's return control and
  * reports it as returned: {rendered, label} before the final snapshot.
+ * With now: <ISO instant> the card's clock is pinned there (argument-less
+ * new Date() and Date.now() return it; the process TZ decides its local
+ * wall time), and with advance_to: [<ISO instant>, ...] the clock moves to
+ * each instant in turn and the card's own 60 s clock-tick callbacks fire,
+ * one snapshot per instant reported as ticks (the top-level snapshot is
+ * taken before the clock moves).
  * The Python panel tests drive this harness so the
  * assertions run against the exact bundle HACS ships.
  */
@@ -46,6 +52,33 @@ globalThis.window = dom.window;
 // window; jsdom's EventTarget rejects Node's own global Event class, so the
 // jsdom Event must shadow it for the return navigation to be delivered.
 globalThis.Event = dom.window.Event;
+
+// Pin the clock: argument-less construction and Date.now() read `pinned`,
+// every other Date use is the real class.
+let pinned = spec.now !== undefined ? new Date(spec.now).getTime() : null;
+if (pinned !== null) {
+  const RealDate = Date;
+  class PinnedDate extends RealDate {
+    constructor(...args) {
+      super(...(args.length === 0 ? [pinned] : args));
+    }
+    static now() {
+      return pinned;
+    }
+  }
+  globalThis.Date = PinnedDate;
+  dom.window.Date = PinnedDate;
+}
+
+// Record the card's 60 s clock ticks so advance_to can fire them on demand.
+const clockTicks = [];
+const realSetInterval = dom.window.setInterval.bind(dom.window);
+dom.window.setInterval = (callback, ms, ...rest) => {
+  if (ms === 60000) {
+    clockTicks.push(callback);
+  }
+  return realSetInterval(callback, ms, ...rest);
+};
 
 await import(pathToFileURL(spec.bundle).href);
 
@@ -123,6 +156,18 @@ if (spec.idle_ms !== undefined) {
   await new Promise((resolve) => setTimeout(resolve, spec.idle_ms));
 }
 
-const payload = JSON.stringify({ ...snapshot(), probe, tap, returned });
+const settled = snapshot();
+let ticks = null;
+if (spec.advance_to !== undefined) {
+  ticks = [];
+  for (const instant of spec.advance_to) {
+    pinned = new Date(instant).getTime();
+    clockTicks.forEach((callback) => callback());
+    await element.updateComplete;
+    ticks.push(snapshot());
+  }
+}
+
+const payload = JSON.stringify({ ...settled, probe, tap, returned, ticks });
 await new Promise((resolve) => process.stdout.write(payload, () => resolve()));
 process.exit(0);
