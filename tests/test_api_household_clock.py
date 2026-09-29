@@ -445,6 +445,44 @@ async def test_admin_chosen_zone_wins_over_reported_zone(
     assert stored["timezone_configured"] is True
 
 
+# --- a timezone-only admin update is an explicit choice (task 45243478) ------
+
+
+@pytest.mark.parametrize("chosen", ["America/Los_Angeles", ""])
+async def test_timezone_only_admin_update_is_an_explicit_choice(
+    household: SimpleNamespace, chosen: str
+) -> None:
+    """``PATCH {"timezone": ...}`` alone marks the zone admin-chosen."""
+    await _adopt_new_york(household)
+    response = await household.client.patch(
+        "/api/v1/admin/settings",
+        json={"timezone": chosen},
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json()["timezone_configured"] is True
+    # A conflicting report is no longer adopted.
+    await _panel_pack_bag(household, "America/Chicago")
+    stored = await _stored_settings(household)
+    assert stored["timezone"] == chosen
+    assert stored["timezone_configured"] is True
+
+
+async def test_explicit_timezone_configured_false_is_respected(
+    household: SimpleNamespace,
+) -> None:
+    """A supplied ``timezone_configured`` is persisted exactly as given."""
+    response = await household.client.patch(
+        "/api/v1/admin/settings",
+        json={"timezone": "America/Chicago", "timezone_configured": False},
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json()["timezone_configured"] is False
+    await _panel_pack_bag(household, HOUSEHOLD_ZONE)
+    assert (await _stored_settings(household))["timezone"] == HOUSEHOLD_ZONE
+
+
 async def test_invalid_reported_zone_is_ignored(
     household: SimpleNamespace,
 ) -> None:
