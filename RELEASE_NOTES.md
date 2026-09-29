@@ -1,5 +1,50 @@
 # NestQuest Release Notes
 
+## Version 0.9.7 — 2026-09-29
+
+### Scope
+
+Patch release carrying the panel-local overdue correction onto `main` (PR #279,
+task fd1093b5 "Tasks are still showing over due when the local time has not
+passed").
+
+### Behaviour
+
+- The kids' Quest Log card now decides whether an open quest is OVERDUE from
+  the panel's OWN local clock (the wall time where the panel physically is)
+  compared with the quest's due time, instead of trusting the API snapshot's
+  `overdue` flag. A quest therefore cannot read OVERDUE before its due time has
+  passed on the panel, regardless of the API host's timezone, Home Assistant's
+  configured `time_zone`, or whether the 0.9.6 timezone changes have been
+  deployed. A quest is overdue at the due minute and after (`>=`); a quest with
+  no due time is never overdue.
+- The API's `overdue` field is unchanged; it still serves the admin plane and
+  automations. This is a panel display correction only.
+
+### Requirements
+
+- Home Assistant floor 2024.6.0 (unchanged).
+
+### Breaking changes
+
+- None. The database schema is unchanged at version 9: no migration and no
+  database backup is required for this release.
+
+### Known limitations
+
+- The comparison uses only wall-clock time. If the API is unreachable across
+  local midnight and the coordinator serves its last-good snapshot, a quest
+  from the previous day with a later due time can briefly read as not overdue
+  until that time passes again. On the normal path the API rolls the household
+  day over and the missed sweep removes the previous day's open quests.
+- The Quest Log header clock still formats in Home Assistant's configured
+  `time_zone`; if HA is set to a zone other than the household's, that header
+  remains wrong. Set HA's time zone (or the admin timezone setting) correctly.
+
+### Rollback
+
+- No schema change: rolling back to 0.9.6 requires no database restore.
+
 ## Version 0.9.6 — 2026-09-28
 
 ### Scope
