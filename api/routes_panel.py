@@ -198,7 +198,9 @@ async def _household_clock(
     Home Assistant's ``time_zone`` in :data:`PANEL_TIMEZONE_HEADER`;
     until the admin chooses a zone it is adopted and persisted
     (:func:`nestquest_core.settings_store.adopt_reported_timezone`), so
-    the scheduler and the admin plane follow it too.  An invalid
+    the admin plane follows it too, and the already-sleeping missed-sweep
+    scheduler is told (:meth:`MissedSweepScheduler.settings_changed`) so
+    it re-plans for the household rollover.  An invalid
     reported zone is logged and ignored — the panel keeps serving on
     the stored settings.
     """
@@ -208,6 +210,7 @@ async def _household_clock(
             settings = await core_settings_store.adopt_reported_timezone(
                 database, reported
             )
+            request.app.state.sweep_scheduler.settings_changed(settings)
         except ValueError:
             LOGGER.warning(
                 "Ignoring invalid %s header value %r",

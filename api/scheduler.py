@@ -13,6 +13,14 @@ local date when unset) and publishes each returned
 ``nestquest_quest_missed`` event on the app's ONE transition publisher
 (the same SSE stream every route publishes through).
 
+A household zone adopted from Home Assistant while the loop is asleep
+must not leave it waiting for the OLD zone's rollover (a UTC host would
+otherwise sweep at UTC midnight — 20:00 in New York — marking quests
+missed hours early).  :meth:`MissedSweepScheduler.settings_changed`
+wakes the sleeping loop to re-plan whenever the zone or rollover time
+it planned with has moved, and the loop re-reads the settings before
+sweeping and re-plans instead if they no longer match its plan.
+
 All sweep policy lives in the core (the watermark, the
 ``[watermark, today)`` window, the no-completion-event rule): this
 scheduler only decides WHEN.  A same-night rerun — e.g. two workers,
@@ -124,6 +132,11 @@ class MissedSweepScheduler:
         )
         self._sleep = sleep if sleep is not None else asyncio.sleep
         self._task: asyncio.Task | None = None
+        #: ``(timezone, day_rollover_time)`` the pending sweep was
+        #: planned with; ``None`` until the first plan.
+        self._planned: tuple[str, str] | None = None
+        #: Set by :meth:`settings_changed` to cut the current wait short.
+        self._wake = asyncio.Event()
 
     def start(self) -> None:
         """Start the background loop (idempotent: a running one stays)."""
@@ -142,6 +155,18 @@ class MissedSweepScheduler:
                 pass
             self._task = None
 
+    def settings_changed(self, settings: object) -> None:
+        """Re-plan the pending sweep if ``settings`` moved its rollover.
+
+        Called with freshly stored settings (e.g. a zone adopted from
+        Home Assistant).  A differing ``timezone`` or
+        ``day_rollover_time`` wakes the sleeping loop, which reloads the
+        settings and schedules the next sweep for the new household
+        rollover; an unchanged plan is left sleeping.
+        """
+        if (settings.timezone, settings.day_rollover_time) != self._planned:
+            self._wake.set()
+
     @property
     def running(self) -> bool:
         """Whether the background loop task is alive."""
@@ -150,6 +175,9 @@ class MissedSweepScheduler:
     async def _run_forever(self) -> None:
         """Schedule → sweep → repeat, forever (until cancelled)."""
         while True:
+            # Cleared BEFORE the settings read, so a change stored after
+            # the read still wakes this cycle's wait.
+            self._wake.clear()
             try:
                 settings = await core_settings_store.load_settings(
                     self._database
@@ -168,6 +196,8 @@ class MissedSweepScheduler:
                 )
                 await self._sleep(_RETRY_BACKOFF_SECONDS)
                 continue
+            plan = (settings.timezone, settings.day_rollover_time)
+            self._planned = plan
             # The host may run UTC: the rollover is a household wall-clock
             # time, so the clock read is re-expressed in the stored zone.
             delay = _delay_seconds(
@@ -178,8 +208,17 @@ class MissedSweepScheduler:
                 settings.day_rollover_time,
                 delay,
             )
-            await self._sleep(delay)
+            if not await self._sleep_unless_woken(delay):
+                continue
             try:
+                # Re-read before sweeping: a zone or rollover change the
+                # wake-up missed means this is not the household's
+                # rollover any more, so re-plan instead of sweeping.
+                settings = await core_settings_store.load_settings(
+                    self._database
+                )
+                if (settings.timezone, settings.day_rollover_time) != plan:
+                    continue
                 await self._run_once(
                     settings.household_now(self._clock()).date()
                 )
@@ -193,6 +232,19 @@ class MissedSweepScheduler:
                     _RETRY_BACKOFF_SECONDS,
                 )
                 await self._sleep(_RETRY_BACKOFF_SECONDS)
+
+    async def _sleep_unless_woken(self, delay: float) -> bool:
+        """Wait ``delay``; ``False`` if :meth:`settings_changed` woke it."""
+        sleeper = asyncio.ensure_future(self._sleep(delay))
+        waker = asyncio.ensure_future(self._wake.wait())
+        try:
+            await asyncio.wait(
+                {sleeper, waker}, return_when=asyncio.FIRST_COMPLETED
+            )
+            return sleeper.done()
+        finally:
+            sleeper.cancel()
+            waker.cancel()
 
     async def _run_once(self, today: datetime.date) -> None:
         """Run ONE sweep for ``today`` and publish what it built.
