@@ -1,5 +1,35 @@
 # NestQuest Release Notes
 
+## Version 0.9.5 — 2026-09-27
+
+### Scope
+
+Patch release carrying the kids' panel Return button onto `main`.
+
+- **Return button:** the Quest Log header now shows an explicit Return control —
+  a left chevron plus "The Party", 72px high and sized to its label, sitting left
+  of the crest — so a child
+  can go straight back to the main Party board instead of waiting out the 40 s
+  idle return. It calls the same navigation the idle return uses
+  (`board_path` + `location-changed`), so there is exactly one navigation path.
+  It is hidden when no board path is configured, appears on every header-bearing
+  Quest Log screen (normal, away, and "no quests today"), and does not appear on
+  the Quest-complete screen, which keeps its 12 s auto-return. The control meets
+  the panel's hard rules (72px tap target, 26px label, `:active` feedback only,
+  clear of the window columns and the dock), and the 40 s idle return and
+  crest-tap navigation are unchanged. (PR #272.)
+
+### Upgrade note
+
+The database schema is unchanged at version **9**; no migration or backup step is
+needed. No runtime dependency is added — only the bundled panel card changed.
+
+### Requirements
+
+Home Assistant 2024.6.0 or newer. Install through HACS from the
+`Maniacs-Mansion/NestQuest` GitHub mirror (kept current by the Gitea push
+mirror).
+
 ## Version 0.9.4 — 2026-09-26
 
 ### Scope
