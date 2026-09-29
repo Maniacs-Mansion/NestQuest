@@ -21,10 +21,11 @@ Patch release carrying the household time-zone fix onto `main` (PR #275, task
   while it is sleeping, and re-reads the stored zone before sweeping, so it no
   longer fires at the old (UTC) rollover.
 - An admin-chosen zone — including an explicit choice of empty (API-host local)
-  — still wins over the reported zone: any admin update that supplies
-  `timezone` is recorded as an explicit choice (`timezone_configured` true). An
-  invalid reported zone is logged and ignored; the panel keeps serving on the
-  stored settings.
+  — still wins over the reported zone. A timezone-only admin update is recorded
+  as an explicit choice (`timezone_configured` true); an explicitly supplied
+  `timezone_configured` value in the same update is honored as given. An invalid
+  reported zone is logged and ignored; the panel keeps serving on the stored
+  settings.
 
 ### Requirements
 
