@@ -184,6 +184,11 @@ async def update_settings(
     in one atomic upsert; the updated settings are returned.  The whole
     read → merge → write span runs inside the per-database settings
     lock, so concurrent updates queue instead of interleaving.
+
+    Supplying ``timezone`` without ``timezone_configured`` records the
+    zone as the admin's explicit choice (``timezone_configured`` is
+    persisted ``True`` in the same write); an explicitly supplied
+    ``timezone_configured`` is kept exactly as given.
     """
     if not isinstance(changes, Mapping):
         raise ValueError(
@@ -199,6 +204,10 @@ async def update_settings(
         raise ValueError(
             f"unknown settings field(s): {listed}; known fields: {known}"
         )
+    if "timezone" in changes and "timezone_configured" not in changes:
+        # An admin-supplied zone is an explicit choice, so Home
+        # Assistant's reported zone must no longer replace it.
+        changes = {**changes, "timezone_configured": True}
     async with _settings_lock(database):
         current = await load_settings(database)
         return await _write_merged(database, current, changes)
