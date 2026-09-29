@@ -351,6 +351,24 @@ async def test_stream_events_yields_documented_frames_and_sends_bearer() -> None
     assert call["json"] is None
 
 
+async def test_stream_events_reports_household_timezone() -> None:
+    """The SSE GET carries Home Assistant's zone beside the Bearer token
+    (task 6351b36d), like the snapshot and completion requests."""
+    frame = _frame_text(*DOCUMENTED_FRAMES[0])
+    transport = _StreamTransport(_StreamingResponse(200, [frame]))
+    client = NestQuestApiClient(
+        BASE_URL, TOKEN, transport, household_timezone="America/New_York"
+    )
+
+    frames = [frame async for frame in client.stream_events()]
+
+    assert frames == [DOCUMENTED_FRAMES[0]]
+    assert transport.calls[0]["headers"] == {
+        "Authorization": f"Bearer {TOKEN}",
+        "X-NestQuest-Timezone": "America/New_York",
+    }
+
+
 async def test_stream_events_buffers_lines_across_chunks_and_joins_data() -> None:
     """Chunk-split lines parse, and multi-line data joins per SSE rules."""
     first_type, first_payload = DOCUMENTED_FRAMES[0]

@@ -113,18 +113,25 @@ CONF_END_OF_DAY_REPORT_ENABLED = "end_of_day_report_enabled"
 CONF_CELEBRATION_ENABLED = "celebration_enabled"
 DEFAULT_AUTOMATION_ENABLED = True
 # The household's IANA time zone (e.g. ``America/New_York``) the API
-# service reads its clock in.  The empty string keeps the historical
-# behaviour — the API host's own local time — so an existing install is
-# unchanged until the owner sets it.  The integration itself always uses
-# Home Assistant's configured ``time_zone`` and ignores this field.
+# service reads its clock in.  The empty string is the API host's own
+# local time.  While the admin has not chosen a zone
+# (``timezone_configured`` is ``False``) the API adopts the zone the
+# integration reports from Home Assistant's configured ``time_zone``
+# (:data:`PANEL_TIMEZONE_HEADER`), so the default is the household's
+# zone without any manual setup.  The integration itself always uses
+# Home Assistant's ``time_zone`` and ignores this field.
 CONF_TIMEZONE = "timezone"
 DEFAULT_TIMEZONE = ""
 # Whether the admin has made an explicit ``timezone`` choice.  ``False``
-# (a fresh install) lets the admin UI auto-set the browser's zone once;
-# ``True`` pins the stored value — including an explicitly-chosen empty
-# ``timezone`` (the API host's local time) — so it is never auto-set again.
+# (a fresh install) lets the API follow Home Assistant's reported zone
+# and the admin UI auto-set the browser's zone once while none is
+# stored; ``True`` pins the stored value — including an explicitly-chosen
+# empty ``timezone`` (the API host's local time) — so neither changes it.
 CONF_TIMEZONE_CONFIGURED = "timezone_configured"
 DEFAULT_TIMEZONE_CONFIGURED = False
+# The panel-plane request header carrying Home Assistant's configured
+# IANA ``time_zone`` from the integration to the API service.
+PANEL_TIMEZONE_HEADER = "X-NestQuest-Timezone"
 
 # Panel-plane API client (Feature 18): the integration reaches the
 # NestQuest API service (Feature 16) over HTTP instead of the database.

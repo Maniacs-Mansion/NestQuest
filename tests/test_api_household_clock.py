@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from api import routes_admin, routes_panel
+from api import scheduler as scheduler_module
 from api.database import _executor
 from api.scheduler import MissedSweepScheduler, _delay_seconds
 from tests.admin_jwt_harness import (
@@ -326,3 +327,519 @@ def test_delay_seconds_is_true_elapsed_time_across_dst(
     now: datetime.datetime, target: datetime.time, expected: float
 ) -> None:
     assert _delay_seconds(target, now) == expected
+
+
+# --- the Home Assistant-reported zone (task 6351b36d) ------------------------
+#
+# The deployed household never set ``timezone``, so the UTC API host marked
+# morning quests overdue.  The integration reports Home Assistant's
+# ``time_zone`` on every panel request; while the admin has not chosen a
+# zone the API adopts it (persisted, so the scheduler and the admin plane
+# follow too), and an explicit admin choice still wins.
+
+
+def _reporting_panel_headers(zone: str) -> dict[str, str]:
+    return {**_panel_headers(), "X-NestQuest-Timezone": zone}
+
+
+async def _panel_pack_bag(
+    household: SimpleNamespace, zone: str
+) -> tuple[str, dict]:
+    response = await household.client.get(
+        "/api/v1/panel/snapshot", headers=_reporting_panel_headers(zone)
+    )
+    assert response.status_code == 200
+    body = response.json()
+    ada = next(
+        child
+        for child in body["children"]
+        if child["child_id"] == household.seed.ada.id
+    )
+    (instance,) = ada["instances"]
+    return body["today_iso"], instance
+
+
+async def _stored_settings(household: SimpleNamespace) -> dict:
+    response = await household.client.get(
+        "/api/v1/admin/settings", headers=_admin_headers()
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+async def test_unset_zone_adopts_reported_zone_for_overdue(
+    household: SimpleNamespace,
+) -> None:
+    """09:59:59 EDT on a UTC host, zone never set: NOT overdue."""
+    household.clock["now"] = _utc(13, 59, 59)
+    today_iso, instance = await _panel_pack_bag(household, HOUSEHOLD_ZONE)
+    assert today_iso == TODAY.isoformat()
+    assert instance["overdue"] is False
+    # Persisted as the automatic (not admin-chosen) household zone, so
+    # the admin plane and the missed-sweep scheduler read it too.
+    stored = await _stored_settings(household)
+    assert stored["timezone"] == HOUSEHOLD_ZONE
+    assert stored["timezone_configured"] is False
+    _today, admin_instance = await _pack_bag(household, "admin")
+    assert admin_instance["overdue"] is False
+
+
+async def test_unset_zone_adopts_reported_zone_for_today(
+    household: SimpleNamespace,
+) -> None:
+    """23:30 EDT is tomorrow in UTC; the household day is still today."""
+    household.clock["now"] = _utc(3, 30, day=27)
+    today_iso, _instance = await _panel_pack_bag(household, HOUSEHOLD_ZONE)
+    assert today_iso == TODAY.isoformat()
+
+
+async def test_reported_zone_completion_is_on_time(
+    household: SimpleNamespace,
+) -> None:
+    """A 09:30 EDT tap with the zone never set is on time."""
+    household.clock["now"] = _utc(13, 30)
+    seed = household.seed
+    response = await household.client.post(
+        f"/api/v1/panel/instances/{seed.pack_bag_instance.id}/complete",
+        headers=_reporting_panel_headers(HOUSEHOLD_ZONE),
+        json={"actor_child_id": seed.ada.id},
+    )
+    assert response.status_code == 200
+    _today_iso, instance = await _pack_bag(household, "admin")
+    assert instance["on_time"] is True
+
+
+async def test_reported_zone_follows_home_assistant_changes(
+    household: SimpleNamespace,
+) -> None:
+    """An automatically adopted zone tracks a later Home Assistant change."""
+    await _panel_pack_bag(household, "America/Chicago")
+    await _panel_pack_bag(household, HOUSEHOLD_ZONE)
+    assert (await _stored_settings(household))["timezone"] == HOUSEHOLD_ZONE
+
+
+async def _adopt_new_york(household: SimpleNamespace) -> None:
+    """Prove automatic adoption first, so later assertions can't pass
+    on code that ignores the reported zone altogether."""
+    await _panel_pack_bag(household, HOUSEHOLD_ZONE)
+    stored = await _stored_settings(household)
+    assert stored["timezone"] == HOUSEHOLD_ZONE
+    assert stored["timezone_configured"] is False
+
+
+@pytest.mark.parametrize("chosen", ["America/Los_Angeles", ""])
+async def test_admin_chosen_zone_wins_over_reported_zone(
+    household: SimpleNamespace, chosen: str
+) -> None:
+    await _adopt_new_york(household)
+    response = await household.client.patch(
+        "/api/v1/admin/settings",
+        json={"timezone": chosen, "timezone_configured": True},
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 200
+    # A conflicting report is no longer adopted.
+    await _panel_pack_bag(household, "America/Chicago")
+    stored = await _stored_settings(household)
+    assert stored["timezone"] == chosen
+    assert stored["timezone_configured"] is True
+
+
+# --- a timezone-only admin update is an explicit choice (task 45243478) ------
+
+
+@pytest.mark.parametrize("chosen", ["America/Los_Angeles", ""])
+async def test_timezone_only_admin_update_is_an_explicit_choice(
+    household: SimpleNamespace, chosen: str
+) -> None:
+    """``PATCH {"timezone": ...}`` alone marks the zone admin-chosen."""
+    await _adopt_new_york(household)
+    response = await household.client.patch(
+        "/api/v1/admin/settings",
+        json={"timezone": chosen},
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json()["timezone_configured"] is True
+    # A conflicting report is no longer adopted.
+    await _panel_pack_bag(household, "America/Chicago")
+    stored = await _stored_settings(household)
+    assert stored["timezone"] == chosen
+    assert stored["timezone_configured"] is True
+
+
+async def test_explicit_timezone_configured_false_is_respected(
+    household: SimpleNamespace,
+) -> None:
+    """A supplied ``timezone_configured`` is persisted exactly as given."""
+    response = await household.client.patch(
+        "/api/v1/admin/settings",
+        json={"timezone": "America/Chicago", "timezone_configured": False},
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json()["timezone_configured"] is False
+    await _panel_pack_bag(household, HOUSEHOLD_ZONE)
+    assert (await _stored_settings(household))["timezone"] == HOUSEHOLD_ZONE
+
+
+async def test_invalid_reported_zone_is_ignored(
+    household: SimpleNamespace,
+) -> None:
+    await _adopt_new_york(household)
+    household.clock["now"] = _utc(13, 59, 59)
+    _today_iso, instance = await _panel_pack_bag(household, "Mars/Olympus_Mons")
+    # Still read in the adopted zone: 09:59:59 EDT is not overdue.
+    assert instance["overdue"] is False
+    assert (await _stored_settings(household))["timezone"] == HOUSEHOLD_ZONE
+
+
+# --- the scheduler follows an adopted zone (task 6351b36d) -------------------
+#
+# On a UTC host with no stored zone the scheduler first plans for UTC
+# midnight; a zone adopted while it sleeps must move the sweep to the
+# household's midnight rather than sweep at 20:00 EDT.
+
+#: 13:00 UTC (09:00 EDT) to UTC midnight.
+_UTC_MIDNIGHT_DELAY = 11 * 3600
+#: 13:00 UTC (09:00 EDT) to New York midnight (04:00 UTC).
+_NEW_YORK_MIDNIGHT_DELAY = 15 * 3600
+
+
+async def test_scheduler_replans_when_panel_adopts_zone_while_sleeping(
+    temp_db_path: str,
+) -> None:
+    runner = AdminRunner(temp_db_path, jwks_for(ADMIN_KEY, KID))
+    async with runner as client:
+        app_state = runner.app.state
+        await app_state.sweep_scheduler.stop()
+        delays: list[float] = []
+        slept = asyncio.Condition()
+
+        async def sleep_stub(seconds: float) -> None:
+            async with slept:
+                delays.append(seconds)
+                slept.notify_all()
+            await asyncio.Event().wait()
+
+        scheduler = MissedSweepScheduler(
+            app_state.db.database, clock=lambda: _utc(13, 0), sleep=sleep_stub
+        )
+        app_state.sweep_scheduler = scheduler
+        scheduler.start()
+        try:
+            async with slept:
+                await asyncio.wait_for(
+                    slept.wait_for(lambda: len(delays) == 1), timeout=5
+                )
+            response = await client.get(
+                "/api/v1/panel/snapshot",
+                headers=_reporting_panel_headers(HOUSEHOLD_ZONE),
+            )
+            assert response.status_code == 200
+            async with slept:
+                await asyncio.wait_for(
+                    slept.wait_for(lambda: len(delays) == 2), timeout=5
+                )
+        finally:
+            await scheduler.stop()
+    assert delays == [
+        pytest.approx(_UTC_MIDNIGHT_DELAY),
+        pytest.approx(_NEW_YORK_MIDNIGHT_DELAY),
+    ]
+
+
+async def test_scheduler_rechecks_settings_before_sweeping(
+    temp_db_path: str, monkeypatch
+) -> None:
+    """A zone stored without a wake-up still stops the stale sweep."""
+    database = _core_db.NestQuestDatabase(_executor)
+    await database.open(temp_db_path)
+    try:
+        await _core_migrations.apply_migrations(database)
+        sweeps: list[datetime.date] = []
+
+        async def sweep_stub(_database, *, today):
+            sweeps.append(today)
+            return []
+
+        monkeypatch.setattr(
+            scheduler_module.core_sweep, "run_missed_sweep", sweep_stub
+        )
+        delays: list[float] = []
+        replanned = asyncio.Event()
+
+        async def sleep_stub(seconds: float) -> None:
+            delays.append(seconds)
+            if len(delays) == 1:
+                # The UTC rollover "arrives" after the zone was stored
+                # behind the scheduler's back.
+                await _settings_store.adopt_reported_timezone(
+                    database, HOUSEHOLD_ZONE
+                )
+                return
+            replanned.set()
+            await asyncio.Event().wait()
+
+        scheduler = MissedSweepScheduler(
+            database, clock=lambda: _utc(13, 0), sleep=sleep_stub
+        )
+        scheduler.start()
+        try:
+            await asyncio.wait_for(replanned.wait(), timeout=5)
+        finally:
+            await scheduler.stop()
+        assert sweeps == []
+        assert delays == [
+            pytest.approx(_UTC_MIDNIGHT_DELAY),
+            pytest.approx(_NEW_YORK_MIDNIGHT_DELAY),
+        ]
+    finally:
+        await database.close()
+
+
+# --- adoption is serialised with planning and sweeping (TZ-003) --------------
+#
+# An adoption racing the loop's own settings reads must never leave a
+# stale plan behind.  Each test holds the loop at one of its reads and
+# issues a real panel adoption there; when the scheduler's settings lock
+# is held at that point the adoption provably cannot commit until the
+# loop moves on, otherwise it is awaited to commit inside the window.
+
+
+def _hold_scheduler_read(monkeypatch, scheduler, nth: int, during):
+    """Run ``during(settings)`` inside the scheduler task's ``nth`` read."""
+    real_load = _settings_store.load_settings
+    reads = {"count": 0}
+
+    async def load_settings(database):
+        settings = await real_load(database)
+        if asyncio.current_task() is scheduler._task:
+            reads["count"] += 1
+            if reads["count"] == nth:
+                await during(settings)
+        return settings
+
+    monkeypatch.setattr(
+        scheduler_module.core_settings_store, "load_settings", load_settings
+    )
+    return real_load
+
+
+async def _adopt_via(client, zone: str) -> None:
+    response = await client.get(
+        "/api/v1/panel/snapshot", headers=_reporting_panel_headers(zone)
+    )
+    assert response.status_code == 200
+
+
+async def _adopt_inside_read(client, scheduler, zone: str) -> asyncio.Task:
+    """Start a panel adoption of ``zone``; let it commit unless serialised."""
+    adoption = asyncio.create_task(
+        client.get(
+            "/api/v1/panel/snapshot", headers=_reporting_panel_headers(zone)
+        )
+    )
+    lock = getattr(scheduler, "settings_lock", None)
+    if lock is None or not lock.locked():
+        await adoption
+    return adoption
+
+
+async def test_scheduler_follows_successive_zone_changes(
+    temp_db_path: str, monkeypatch
+) -> None:
+    """New York -> UTC -> New York while the re-plan read is in flight."""
+    runner = AdminRunner(temp_db_path, jwks_for(ADMIN_KEY, KID))
+    async with runner as client:
+        app_state = runner.app.state
+        await app_state.sweep_scheduler.stop()
+        delays: list[float] = []
+        slept = asyncio.Condition()
+
+        async def sleep_stub(seconds: float) -> None:
+            async with slept:
+                delays.append(seconds)
+                slept.notify_all()
+            await asyncio.Event().wait()
+
+        scheduler = MissedSweepScheduler(
+            app_state.db.database, clock=lambda: _utc(13, 0), sleep=sleep_stub
+        )
+        app_state.sweep_scheduler = scheduler
+        await _adopt_via(client, HOUSEHOLD_ZONE)
+        adoptions: list[asyncio.Task] = []
+
+        async def back_to_new_york(_settings) -> None:
+            adoptions.append(
+                await _adopt_inside_read(client, scheduler, HOUSEHOLD_ZONE)
+            )
+
+        # Read 1 plans New York; read 2 is the re-plan after UTC.
+        _hold_scheduler_read(monkeypatch, scheduler, 2, back_to_new_york)
+        scheduler.start()
+        try:
+            async with slept:
+                await asyncio.wait_for(
+                    slept.wait_for(lambda: len(delays) == 1), timeout=5
+                )
+            await _adopt_via(client, "UTC")
+            async with slept:
+                await asyncio.wait_for(
+                    slept.wait_for(lambda: len(delays) == 3), timeout=5
+                )
+            (adoption,) = adoptions
+            assert (await adoption).status_code == 200
+        finally:
+            await scheduler.stop()
+    # The in-flight read planned UTC; the New York adoption that followed
+    # it woke the wait, so the scheduler sleeps on New York midnight.
+    assert delays == [
+        pytest.approx(_NEW_YORK_MIDNIGHT_DELAY),
+        pytest.approx(_UTC_MIDNIGHT_DELAY),
+        pytest.approx(_NEW_YORK_MIDNIGHT_DELAY),
+    ]
+
+
+async def test_adoption_after_presweep_check_cannot_precede_the_sweep(
+    temp_db_path: str, monkeypatch
+) -> None:
+    """No sweep runs once an adoption has replaced its plan."""
+    runner = AdminRunner(temp_db_path, jwks_for(ADMIN_KEY, KID))
+    async with runner as client:
+        app_state = runner.app.state
+        await app_state.sweep_scheduler.stop()
+        delays: list[float] = []
+        replanned = asyncio.Event()
+
+        async def sleep_stub(seconds: float) -> None:
+            delays.append(seconds)
+            if len(delays) == 1:
+                return  # the UTC rollover arrives
+            replanned.set()
+            await asyncio.Event().wait()
+
+        scheduler = MissedSweepScheduler(
+            app_state.db.database, clock=lambda: _utc(13, 0), sleep=sleep_stub
+        )
+        app_state.sweep_scheduler = scheduler
+        adoptions: list[asyncio.Task] = []
+
+        async def adopt_new_york(_settings) -> None:
+            adoptions.append(
+                await _adopt_inside_read(client, scheduler, HOUSEHOLD_ZONE)
+            )
+
+        # Read 1 plans UTC; read 2 is the pre-sweep re-check.
+        real_load = _hold_scheduler_read(
+            monkeypatch, scheduler, 2, adopt_new_york
+        )
+        swept_under: list[str] = []
+
+        async def sweep_stub(database, *, today):
+            swept_under.append((await real_load(database)).timezone)
+            return []
+
+        monkeypatch.setattr(
+            scheduler_module.core_sweep, "run_missed_sweep", sweep_stub
+        )
+        scheduler.start()
+        try:
+            await asyncio.wait_for(replanned.wait(), timeout=5)
+            (adoption,) = adoptions
+            assert (await adoption).status_code == 200
+        finally:
+            await scheduler.stop()
+    # The sweep ran for the UTC plan with UTC still stored, never after
+    # New York had been adopted; the next plan is New York midnight.
+    assert swept_under == [""]
+    assert delays == [
+        pytest.approx(_UTC_MIDNIGHT_DELAY),
+        pytest.approx(_NEW_YORK_MIDNIGHT_DELAY),
+    ]
+
+
+# --- the wait's child tasks (TZ-004) ------------------------------------------
+
+
+async def test_failed_sleep_is_retried_not_swept(
+    temp_db_path: str, monkeypatch
+) -> None:
+    """A sleep that raises backs off and re-plans; nothing is swept."""
+    database = _core_db.NestQuestDatabase(_executor)
+    await database.open(temp_db_path)
+    try:
+        await _core_migrations.apply_migrations(database)
+        sweeps: list[datetime.date] = []
+
+        async def sweep_stub(_database, *, today):
+            sweeps.append(today)
+            return []
+
+        monkeypatch.setattr(
+            scheduler_module.core_sweep, "run_missed_sweep", sweep_stub
+        )
+        delays: list[float] = []
+        replanned = asyncio.Event()
+
+        async def sleep_stub(seconds: float) -> None:
+            delays.append(seconds)
+            if len(delays) == 1:
+                raise RuntimeError("timer failed")
+            if len(delays) == 2:
+                return  # the retry backoff
+            replanned.set()
+            await asyncio.Event().wait()
+
+        scheduler = MissedSweepScheduler(
+            database, clock=lambda: _utc(13, 0), sleep=sleep_stub
+        )
+        scheduler.start()
+        try:
+            await asyncio.wait_for(replanned.wait(), timeout=5)
+        finally:
+            await scheduler.stop()
+        assert sweeps == []
+        assert delays == [
+            pytest.approx(_UTC_MIDNIGHT_DELAY),
+            scheduler_module._RETRY_BACKOFF_SECONDS,
+            pytest.approx(_UTC_MIDNIGHT_DELAY),
+        ]
+    finally:
+        await database.close()
+
+
+async def test_stop_waits_for_the_sleep_to_finish_cancelling(
+    temp_db_path: str,
+) -> None:
+    database = _core_db.NestQuestDatabase(_executor)
+    await database.open(temp_db_path)
+    try:
+        await _core_migrations.apply_migrations(database)
+        sleeping = asyncio.Event()
+        sleepers: list[asyncio.Task] = []
+        cleaned_up: list[bool] = []
+
+        async def sleep_stub(_seconds: float) -> None:
+            sleepers.append(asyncio.current_task())
+            sleeping.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                # Cancellation cleanup that takes a loop turn.
+                await asyncio.sleep(0)
+                cleaned_up.append(True)
+
+        scheduler = MissedSweepScheduler(
+            database, clock=lambda: _utc(13, 0), sleep=sleep_stub
+        )
+        scheduler.start()
+        try:
+            await asyncio.wait_for(sleeping.wait(), timeout=5)
+        finally:
+            await scheduler.stop()
+        (sleeper,) = sleepers
+        assert sleeper.done()
+        assert cleaned_up == [True]
+    finally:
+        await database.close()

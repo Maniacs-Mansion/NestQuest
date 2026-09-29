@@ -36,7 +36,8 @@ after the first update:
   this field existed simply lacks it and resolves to ``""``,
 - ``timezone_configured`` — a real boolean: ``True`` once the admin
   explicitly chose ``timezone`` (including the empty host-local value),
-  so the admin UI never auto-sets it again.  A document stored before
+  so neither Home Assistant's reported zone
+  (:func:`adopt_reported_timezone`) nor the admin UI changes it again.  A document stored before
   this field existed lacks it and resolves to ``False``.
 
 Only values whose core validators ACCEPTED are ever written, so a
@@ -183,6 +184,11 @@ async def update_settings(
     in one atomic upsert; the updated settings are returned.  The whole
     read → merge → write span runs inside the per-database settings
     lock, so concurrent updates queue instead of interleaving.
+
+    Supplying ``timezone`` without ``timezone_configured`` records the
+    zone as the admin's explicit choice (``timezone_configured`` is
+    persisted ``True`` in the same write); an explicitly supplied
+    ``timezone_configured`` is kept exactly as given.
     """
     if not isinstance(changes, Mapping):
         raise ValueError(
@@ -198,20 +204,55 @@ async def update_settings(
         raise ValueError(
             f"unknown settings field(s): {listed}; known fields: {known}"
         )
+    if "timezone" in changes and "timezone_configured" not in changes:
+        # An admin-supplied zone is an explicit choice, so Home
+        # Assistant's reported zone must no longer replace it.
+        changes = {**changes, "timezone_configured": True}
     async with _settings_lock(database):
         current = await load_settings(database)
-        document: dict[str, Any] = {
-            field: getattr(current, field) for field in _FIELD_NAMES
-        }
-        for name, raw_value in changes.items():
-            default, validator = _RESOLUTIONS[name]
-            try:
-                document[name] = validator(
-                    default if raw_value is None else raw_value
-                )
-            except ValueError as error:
-                raise ValueError(_named(name, error)) from error
-        await MetaStateDao(database).set(
-            SETTINGS_META_KEY, json.dumps(document, sort_keys=True)
-        )
+        return await _write_merged(database, current, changes)
+
+
+async def adopt_reported_timezone(
+    database: NestQuestDatabase, zone: str
+) -> NestQuestSettings:
+    """Adopt Home Assistant's reported ``zone`` unless the admin chose one.
+
+    While ``timezone_configured`` is ``False`` the stored ``timezone``
+    follows the zone the integration reports, so the API's clock is the
+    household's without any manual setup; ``timezone_configured`` stays
+    ``False`` (the value is automatic, not an admin choice).  Once the
+    admin has chosen — including an explicitly-chosen empty zone — the
+    stored settings are returned untouched.  The check and the write
+    share the settings lock, so a concurrent admin choice is never
+    overwritten.  An invalid ``zone`` raises a ``ValueError`` naming
+    ``timezone`` and writes nothing.
+    """
+    async with _settings_lock(database):
+        current = await load_settings(database)
+        if current.timezone_configured or current.timezone == zone:
+            return current
+        return await _write_merged(database, current, {"timezone": zone})
+
+
+async def _write_merged(
+    database: NestQuestDatabase,
+    current: NestQuestSettings,
+    changes: Mapping[str, Any],
+) -> NestQuestSettings:
+    """Validate ``changes``, merge onto ``current``, persist; lock held."""
+    document: dict[str, Any] = {
+        field: getattr(current, field) for field in _FIELD_NAMES
+    }
+    for name, raw_value in changes.items():
+        default, validator = _RESOLUTIONS[name]
+        try:
+            document[name] = validator(
+                default if raw_value is None else raw_value
+            )
+        except ValueError as error:
+            raise ValueError(_named(name, error)) from error
+    await MetaStateDao(database).set(
+        SETTINGS_META_KEY, json.dumps(document, sort_keys=True)
+    )
     return NestQuestSettings(**document)
