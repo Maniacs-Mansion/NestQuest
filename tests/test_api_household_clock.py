@@ -326,3 +326,118 @@ def test_delay_seconds_is_true_elapsed_time_across_dst(
     now: datetime.datetime, target: datetime.time, expected: float
 ) -> None:
     assert _delay_seconds(target, now) == expected
+
+
+# --- the Home Assistant-reported zone (task 6351b36d) ------------------------
+#
+# The deployed household never set ``timezone``, so the UTC API host marked
+# morning quests overdue.  The integration reports Home Assistant's
+# ``time_zone`` on every panel request; while the admin has not chosen a
+# zone the API adopts it (persisted, so the scheduler and the admin plane
+# follow too), and an explicit admin choice still wins.
+
+
+def _reporting_panel_headers(zone: str) -> dict[str, str]:
+    return {**_panel_headers(), "X-NestQuest-Timezone": zone}
+
+
+async def _panel_pack_bag(
+    household: SimpleNamespace, zone: str
+) -> tuple[str, dict]:
+    response = await household.client.get(
+        "/api/v1/panel/snapshot", headers=_reporting_panel_headers(zone)
+    )
+    assert response.status_code == 200
+    body = response.json()
+    ada = next(
+        child
+        for child in body["children"]
+        if child["child_id"] == household.seed.ada.id
+    )
+    (instance,) = ada["instances"]
+    return body["today_iso"], instance
+
+
+async def _stored_settings(household: SimpleNamespace) -> dict:
+    response = await household.client.get(
+        "/api/v1/admin/settings", headers=_admin_headers()
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+async def test_unset_zone_adopts_reported_zone_for_overdue(
+    household: SimpleNamespace,
+) -> None:
+    """09:59:59 EDT on a UTC host, zone never set: NOT overdue."""
+    household.clock["now"] = _utc(13, 59, 59)
+    today_iso, instance = await _panel_pack_bag(household, HOUSEHOLD_ZONE)
+    assert today_iso == TODAY.isoformat()
+    assert instance["overdue"] is False
+    # Persisted as the automatic (not admin-chosen) household zone, so
+    # the admin plane and the missed-sweep scheduler read it too.
+    stored = await _stored_settings(household)
+    assert stored["timezone"] == HOUSEHOLD_ZONE
+    assert stored["timezone_configured"] is False
+    _today, admin_instance = await _pack_bag(household, "admin")
+    assert admin_instance["overdue"] is False
+
+
+async def test_unset_zone_adopts_reported_zone_for_today(
+    household: SimpleNamespace,
+) -> None:
+    """23:30 EDT is tomorrow in UTC; the household day is still today."""
+    household.clock["now"] = _utc(3, 30, day=27)
+    today_iso, _instance = await _panel_pack_bag(household, HOUSEHOLD_ZONE)
+    assert today_iso == TODAY.isoformat()
+
+
+async def test_reported_zone_completion_is_on_time(
+    household: SimpleNamespace,
+) -> None:
+    """A 09:30 EDT tap with the zone never set is on time."""
+    household.clock["now"] = _utc(13, 30)
+    seed = household.seed
+    response = await household.client.post(
+        f"/api/v1/panel/instances/{seed.pack_bag_instance.id}/complete",
+        headers=_reporting_panel_headers(HOUSEHOLD_ZONE),
+        json={"actor_child_id": seed.ada.id},
+    )
+    assert response.status_code == 200
+    _today_iso, instance = await _pack_bag(household, "admin")
+    assert instance["on_time"] is True
+
+
+async def test_reported_zone_follows_home_assistant_changes(
+    household: SimpleNamespace,
+) -> None:
+    """An automatically adopted zone tracks a later Home Assistant change."""
+    await _panel_pack_bag(household, "America/Chicago")
+    await _panel_pack_bag(household, HOUSEHOLD_ZONE)
+    assert (await _stored_settings(household))["timezone"] == HOUSEHOLD_ZONE
+
+
+@pytest.mark.parametrize("chosen", ["America/Los_Angeles", ""])
+async def test_admin_chosen_zone_wins_over_reported_zone(
+    household: SimpleNamespace, chosen: str
+) -> None:
+    response = await household.client.patch(
+        "/api/v1/admin/settings",
+        json={"timezone": chosen, "timezone_configured": True},
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 200
+    await _panel_pack_bag(household, HOUSEHOLD_ZONE)
+    stored = await _stored_settings(household)
+    assert stored["timezone"] == chosen
+    assert stored["timezone_configured"] is True
+
+
+async def test_invalid_reported_zone_is_ignored(
+    household: SimpleNamespace,
+) -> None:
+    household.clock["now"] = _utc(13, 59, 59)
+    _today_iso, instance = await _panel_pack_bag(household, "Mars/Olympus_Mons")
+    # Host-local (UTC) behaviour, unchanged store.
+    assert instance["overdue"] is True
+    assert (await _stored_settings(household))["timezone"] == ""

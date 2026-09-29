@@ -686,6 +686,8 @@ async def test_coordinator_configured_token_builds_real_client(
         hass, entry, session_factory=_session_factory
     )
     assert isinstance(real_client, NestQuestApiClient)
+    # Home Assistant's zone is reported to the API (task 6351b36d).
+    assert real_client._household_timezone == hass.config.time_zone
 
     set_coordinator_client(entry, real_client)
     assert await async_setup_entry(hass, entry) is True
