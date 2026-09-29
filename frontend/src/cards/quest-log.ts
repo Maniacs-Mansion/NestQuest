@@ -36,7 +36,6 @@ type PanelInstance = {
   window: string;
   due_time: string | null;
   state: string;
-  overdue: boolean;
   completed_at: string | null;
   on_time: boolean | null;
 };
@@ -154,6 +153,17 @@ function formatWallClock(value: string | null): string | null {
   return `${hour12}:${match[2]} ${suffix}`;
 }
 
+/** Minutes past midnight of a household ``HH:MM`` wall time, or null. */
+function wallClockMinutes(value: string | null): number | null {
+  const match = value ? /^(\d{1,2}):(\d{2})$/.exec(value.trim()) : null;
+  if (!match) {
+    return null;
+  }
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  return hours > 23 || minutes > 59 ? null : hours * 60 + minutes;
+}
+
 function asString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -253,7 +263,6 @@ function toPanelInstance(value: unknown): PanelInstance | null {
     window: asString(row.window).toLowerCase(),
     due_time: asString(row.due_time) || null,
     state,
-    overdue: row.overdue === true,
     completed_at: asString(row.completed_at) || null,
     on_time: row.on_time === true ? true : row.on_time === false ? false : null,
   };
@@ -1749,6 +1758,20 @@ export class NestQuestQuestLogCard extends LitElement {
     `;
   }
 
+  /** Overdue by the panel's own clock: the browser runs on the
+      household's real local time, so an open quest turns overdue once its
+      ``due_time`` wall time has arrived there — whatever zone the API or
+      Home Assistant computed the API's ``overdue`` flag in.  With no due
+      time it is never overdue (the API's rule too).  ``_now`` is reactive
+      and ticks every 60 s, so the line flips on the minute it falls due. */
+  private _isOverdue(instance: PanelInstance): boolean {
+    const due = wallClockMinutes(instance.due_time);
+    if (instance.state !== "open" || due === null) {
+      return false;
+    }
+    return this._now.getHours() * 60 + this._now.getMinutes() >= due;
+  }
+
   private _timeZone(): string | undefined {
     return hassTimeZone(this.hass);
   }
@@ -1833,7 +1856,6 @@ export class NestQuestQuestLogCard extends LitElement {
         continue;
       }
       instance.state = "completed";
-      instance.overdue = false;
       instance.completed_at = stampedAt;
     }
     if (settled) {
@@ -2130,7 +2152,7 @@ export class NestQuestQuestLogCard extends LitElement {
       `;
     }
     const dueAt = formatWallClock(instance.due_time);
-    const meta = instance.overdue
+    const meta = this._isOverdue(instance)
       ? {
           text: dueAt ? `Overdue · due ${dueAt}` : "Overdue",
           late: true,
