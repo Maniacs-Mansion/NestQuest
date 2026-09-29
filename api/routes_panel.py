@@ -200,17 +200,21 @@ async def _household_clock(
     (:func:`nestquest_core.settings_store.adopt_reported_timezone`), so
     the admin plane follows it too, and the already-sleeping missed-sweep
     scheduler is told (:meth:`MissedSweepScheduler.settings_changed`) so
-    it re-plans for the household rollover.  An invalid
+    it re-plans for the household rollover — under the scheduler's
+    ``settings_lock``, so the adoption never lands between its settings
+    check and its sweep.  An invalid
     reported zone is logged and ignored — the panel keeps serving on
     the stored settings.
     """
     reported = request.headers.get(PANEL_TIMEZONE_HEADER, "").strip()
     if reported:
+        scheduler = request.app.state.sweep_scheduler
         try:
-            settings = await core_settings_store.adopt_reported_timezone(
-                database, reported
-            )
-            request.app.state.sweep_scheduler.settings_changed(settings)
+            async with scheduler.settings_lock:
+                settings = await core_settings_store.adopt_reported_timezone(
+                    database, reported
+                )
+                scheduler.settings_changed(settings)
         except ValueError:
             LOGGER.warning(
                 "Ignoring invalid %s header value %r",

@@ -21,6 +21,19 @@ wakes the sleeping loop to re-plan whenever the zone or rollover time
 it planned with has moved, and the loop re-reads the settings before
 sweeping and re-plans instead if they no longer match its plan.
 
+Guarantee: no sweep runs for a plan a committed adoption has replaced.
+An adopting writer holds :attr:`MissedSweepScheduler.settings_lock`
+across its write AND its :meth:`~MissedSweepScheduler.settings_changed`
+call; the loop holds the same lock across its plan read (read, record
+the plan, clear the wake flag) and across the pre-sweep re-read plus
+the sweep itself.  So an adoption commits either before a plan read
+(which then sees it), after one (``settings_changed`` compares against
+that exact plan and wakes the wait), or after the sweep — never between
+a read and what the loop does with it.  The lock is never held across
+the wait, and the loop takes nothing else before it, so a waiting
+panel request cannot deadlock: it is delayed at most by one settings
+read or one sweep.
+
 All sweep policy lives in the core (the watermark, the
 ``[watermark, today)`` window, the no-completion-event rule): this
 scheduler only decides WHEN.  A same-night rerun — e.g. two workers,
@@ -137,6 +150,9 @@ class MissedSweepScheduler:
         self._planned: tuple[str, str] | None = None
         #: Set by :meth:`settings_changed` to cut the current wait short.
         self._wake = asyncio.Event()
+        #: Serialises settings adoption with planning and sweeping (see
+        #: the module docstring's guarantee).
+        self.settings_lock = asyncio.Lock()
 
     def start(self) -> None:
         """Start the background loop (idempotent: a running one stays)."""
@@ -159,7 +175,9 @@ class MissedSweepScheduler:
         """Re-plan the pending sweep if ``settings`` moved its rollover.
 
         Called with freshly stored settings (e.g. a zone adopted from
-        Home Assistant).  A differing ``timezone`` or
+        Home Assistant), with :attr:`settings_lock` held across the write
+        and this call so the comparison is against the loop's current
+        plan, never a read still in flight.  A differing ``timezone`` or
         ``day_rollover_time`` wakes the sleeping loop, which reloads the
         settings and schedules the next sweep for the new household
         rollover; an unchanged plan is left sleeping.
@@ -175,16 +193,19 @@ class MissedSweepScheduler:
     async def _run_forever(self) -> None:
         """Schedule → sweep → repeat, forever (until cancelled)."""
         while True:
-            # Cleared BEFORE the settings read, so a change stored after
-            # the read still wakes this cycle's wait.
-            self._wake.clear()
             try:
-                settings = await core_settings_store.load_settings(
-                    self._database
-                )
-                rollover = datetime.time.fromisoformat(
-                    settings.day_rollover_time
-                )
+                # Under the lock no adoption can commit between this read
+                # and the recorded plan, so any later one wakes the wait.
+                async with self.settings_lock:
+                    self._wake.clear()
+                    settings = await core_settings_store.load_settings(
+                        self._database
+                    )
+                    rollover = datetime.time.fromisoformat(
+                        settings.day_rollover_time
+                    )
+                    plan = (settings.timezone, settings.day_rollover_time)
+                    self._planned = plan
             except Exception:
                 # Not silent: the failure is logged and retried after
                 # the backoff, so one bad settings document or a
@@ -196,8 +217,6 @@ class MissedSweepScheduler:
                 )
                 await self._sleep(_RETRY_BACKOFF_SECONDS)
                 continue
-            plan = (settings.timezone, settings.day_rollover_time)
-            self._planned = plan
             # The host may run UTC: the rollover is a household wall-clock
             # time, so the clock read is re-expressed in the stored zone.
             delay = _delay_seconds(
@@ -208,24 +227,30 @@ class MissedSweepScheduler:
                 settings.day_rollover_time,
                 delay,
             )
-            if not await self._sleep_unless_woken(delay):
-                continue
             try:
+                if not await self._sleep_unless_woken(delay):
+                    continue
                 # Re-read before sweeping: a zone or rollover change the
                 # wake-up missed means this is not the household's
-                # rollover any more, so re-plan instead of sweeping.
-                settings = await core_settings_store.load_settings(
-                    self._database
-                )
-                if (settings.timezone, settings.day_rollover_time) != plan:
-                    continue
-                await self._run_once(
-                    settings.household_now(self._clock()).date()
-                )
+                # rollover any more, so re-plan instead of sweeping.  The
+                # lock keeps an adoption from committing between this
+                # check and the sweep.
+                async with self.settings_lock:
+                    settings = await core_settings_store.load_settings(
+                        self._database
+                    )
+                    if (
+                        settings.timezone,
+                        settings.day_rollover_time,
+                    ) != plan:
+                        continue
+                    await self._run_once(
+                        settings.household_now(self._clock()).date()
+                    )
             except Exception:
-                # Not silent either: the sweep error is logged and the
-                # loop backs off before the next cycle, whose watermark
-                # re-read makes an already-swept day a no-op.
+                # Not silent either: a failed wait or sweep is logged and
+                # the loop backs off before the next cycle, whose
+                # watermark re-read makes an already-swept day a no-op.
                 LOGGER.exception(
                     "NestQuest scheduled missed sweep failed; retrying in "
                     "%gs",
@@ -234,17 +259,27 @@ class MissedSweepScheduler:
                 await self._sleep(_RETRY_BACKOFF_SECONDS)
 
     async def _sleep_unless_woken(self, delay: float) -> bool:
-        """Wait ``delay``; ``False`` if :meth:`settings_changed` woke it."""
+        """Wait ``delay``; ``False`` if :meth:`settings_changed` woke it.
+
+        Both children are cancelled AND awaited before returning (or
+        before a cancellation propagates), so none outlives :meth:`stop`;
+        a sleep that failed re-raises its exception here for the loop's
+        retry policy.
+        """
         sleeper = asyncio.ensure_future(self._sleep(delay))
         waker = asyncio.ensure_future(self._wake.wait())
         try:
             await asyncio.wait(
                 {sleeper, waker}, return_when=asyncio.FIRST_COMPLETED
             )
-            return sleeper.done()
         finally:
+            slept = sleeper.done()
             sleeper.cancel()
             waker.cancel()
+            await asyncio.gather(sleeper, waker, return_exceptions=True)
+        if slept:
+            sleeper.result()
+        return slept
 
     async def _run_once(self, today: datetime.date) -> None:
         """Run ONE sweep for ``today`` and publish what it built.
