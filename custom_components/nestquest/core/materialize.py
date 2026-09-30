@@ -255,12 +255,12 @@ async def materialize(
     after a presence change) cannot touch any unrelated child's rows.
     When omitted (or None) the walk covers every assignee as before.
 
-    ``today`` optionally pins the resolved HA-local date the walk's
+    ``today`` optionally pins the resolved household-local date the walk's
     no-past guard compares against; it is threaded into every
     :meth:`~.dao_instances.QuestInstancesDao.upsert_if_valid` write.  When
     omitted the host clock (``datetime.date.today``) is used, which is the
-    historical default.  A caller that computed the horizon in Home
-    Assistant's configured time zone MUST pass that same date here so a
+    historical default.  A caller that computed the horizon in the
+    household's application time zone MUST pass that same date here so a
     time zone behind the host around midnight is not rejected as "past".
 
     ``start_date`` is clamped up to the resolved "today" (the same
@@ -298,8 +298,8 @@ async def materialize(
     start = datetime.datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
 
-    # Clamp a past start up to today (the HA-local anchor when the caller
-    # pinned one, else the host clock) so the walk can never emit a
+    # Clamp a past start up to today (the household-local anchor when the
+    # caller pinned one, else the host clock) so the walk can never emit a
     # past-dated instance; the DAO's no-past guard remains the backstop.
     # A range entirely in the past therefore yields zero instances.
     today_date = _resolve_today(today)
@@ -345,7 +345,7 @@ async def regenerate_for_definition(
     :func:`~.dao_instances._today` — so the delete cutoff and the
     re-materialization range share one anchor, and the walk's
     ``upsert_if_valid`` no-past guard never rejects the regenerated
-    range.  ``today`` optionally pins a caller-resolved HA-local date
+    range.  ``today`` optionally pins a caller-resolved household-local date
     (threaded into both the delete cutoff and the re-materialization)
     so a household time zone behind the host around midnight stays
     consistent.  ``horizon_days`` sizes the re-materialization window;
@@ -413,9 +413,9 @@ async def regenerate_for_child(
     :meth:`~.dao_instances.QuestInstancesDao.delete_future_uncompleted_for_child`),
     so the delete cutoff and the re-materialization window share ONE
     execution-day anchor even when the call is queued across midnight.
-    ``today`` optionally pins a caller-resolved HA-local date, threaded
+    ``today`` optionally pins a caller-resolved household-local date, threaded
     into the delete cutoff and the re-materialization for the same
-    host-vs-HA time-zone consistency.  ``horizon_days`` sizes the
+    host-vs-household time-zone consistency.  ``horizon_days`` sizes the
     re-materialization window; when omitted it falls back to
     :data:`~.const.DEFAULT_HORIZON_DAYS`.  A bool, non-int, or sub-1 value
     raises ValueError BEFORE any delete.  Returns the number of instances

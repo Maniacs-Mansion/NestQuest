@@ -115,8 +115,12 @@ DEFAULT_AUTOMATION_ENABLED = True
 # The household's IANA time zone (e.g. ``America/New_York``) the API
 # service reads its clock in.  The empty string is the API host's own
 # local time.  Only an admin sets it (manually, from the admin app);
-# nothing sets it automatically.  The integration itself always uses
-# Home Assistant's ``time_zone`` and ignores this field.
+# nothing sets it automatically.  The integration relays the API's
+# effective application timezone (the coordinator carries it and the
+# household sensor publishes it for the panel cards) and never derives
+# the application clock from Home Assistant's configuration; the Home
+# Assistant / browser zone applies only when the API publishes no zone
+# (e.g. an older API).
 CONF_TIMEZONE = "timezone"
 DEFAULT_TIMEZONE = ""
 

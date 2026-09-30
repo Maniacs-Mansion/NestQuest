@@ -39,9 +39,10 @@ lets exactly one of them win the claim — the loser returns [] and
 announces nothing.
 
 The caller supplies ``today`` as a plain :class:`datetime.date`: the
-household-local calendar date, read from ``hass.config.time_zone`` by
-the integration or from the configured household timezone by the API.
-This module never reads a timezone database or config of its own.
+household-local calendar date, which the API reads in the
+admin-stored application timezone (the API host's local zone when none
+is stored).  This module never reads a timezone database or config of
+its own.
 """
 from __future__ import annotations
 
@@ -97,9 +98,9 @@ async def run_missed_sweep(
     """Build one missed event per unswept past-due open instance.
 
     ``today`` is the household-local calendar date the sweep runs for
-    (the caller owns the clock: the integration reads it from
-    ``hass.config.time_zone``, the API from the configured household
-    timezone, falling back to its host's local time when unset).
+    (the caller owns the clock: the API reads it in the admin-stored
+    application timezone, falling back to its host's local time when
+    unset).
     Returns the ``(event_type, payload)`` tuples to announce, EMPTY
     when the watermark already covers ``today`` (a same-night rerun) —
     the caller decides how to publish them and announces nothing on

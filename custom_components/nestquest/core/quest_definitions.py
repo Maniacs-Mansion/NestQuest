@@ -345,7 +345,7 @@ async def edit_quest_definition(
     future instances only; no ``quest_instances`` or
     ``completion_events`` row is touched.
 
-    ``today`` optionally pins the caller-resolved HA-local date the
+    ``today`` optionally pins the caller-resolved household-local date the
     regeneration's no-past guard and horizon are anchored to (threaded
     into :func:`~.materialize.regenerate_for_definition`); it is a plain
     ``datetime.date`` with no HA import here — the Feature 09 service
@@ -449,7 +449,7 @@ async def assign_child(
     ``quest_definition_assignees`` link is written; existing instances
     and completion history are never touched.
 
-    ``today`` optionally pins the caller-resolved HA-local date threaded
+    ``today`` optionally pins the caller-resolved household-local date threaded
     into the assignment's regeneration (see :func:`edit_quest_definition`).
     ``horizon_days`` optionally sizes the regeneration's re-materialization
     window the same way.
@@ -491,7 +491,7 @@ async def unassign_child(
     argument.  Only the ``quest_definition_assignees`` link is written;
     existing instances and completion history are never touched.
 
-    ``today`` optionally pins the caller-resolved HA-local date threaded
+    ``today`` optionally pins the caller-resolved household-local date threaded
     into the unassignment's regeneration (see :func:`edit_quest_definition`).
     ``horizon_days`` optionally sizes the regeneration's re-materialization
     window the same way.
@@ -548,7 +548,7 @@ async def set_quest_definition_active(
     connection-scoped lock, so the returned bundle is a consistent
     snapshot that a concurrent mutation cannot race.
 
-    ``today`` optionally pins the caller-resolved HA-local date threaded
+    ``today`` optionally pins the caller-resolved household-local date threaded
     into the activation change's regeneration (see
     :func:`edit_quest_definition`).  ``horizon_days`` optionally sizes the
     regeneration's re-materialization window the same way.

@@ -9,7 +9,7 @@ snapshot (the same ChildDaySnapshot the day sensors read):
   celebration automation must never fire on an empty day (the
   day-complete event carries the same rule, Feature 10 task 7).
 - ``binary_sensor.nestquest_<child>_present_today`` — ON when the
-  presence engine resolves the child present on the HA-local date
+  presence engine resolves the child present on the household-local date
   (schedules and overrides, D-004 anchor-date arithmetic).
 
 Naming and registry identity follow the day sensors' contract: names
