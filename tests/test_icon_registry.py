@@ -63,6 +63,75 @@ def test_artefacts_carry_exactly_the_curated_names_and_labels() -> None:
     assert 15 <= len(curated["fa"]) <= 25
 
 
+def test_artefacts_carry_the_full_font_awesome_free_solid_set() -> None:
+    text = ARTEFACTS[0].read_text(encoding="utf-8")
+    solid = _generated_set(text, "FA_SOLID_ICONS")
+    names = [entry["name"] for entry in solid]
+    assert names == sorted(names)
+    assert len(set(names)) == len(names)
+    # The complete Free Solid set, not a curated pick (7.x ships ~1,400).
+    assert len(solid) >= 1400
+    for entry in solid:
+        assert set(entry) == {"kind", "key", "name", "label", "viewBox", "paths"}
+        assert entry["kind"] == "fa"
+        assert entry["key"] == f"fa:{entry['name']}"
+        assert entry["label"] == " ".join(
+            part[0].upper() + part[1:] for part in entry["name"].split("-")
+        )
+        assert re.fullmatch(r"0 0 \d+ \d+", entry["viewBox"])
+        assert entry["paths"] and all(entry["paths"])
+    # A well-known glyph, a barely-known one, and every curated quick-pick.
+    assert {"rocket", "mug-hot", "person-dress-burst"} <= set(names)
+    assert {e["name"] for e in _curated()["fa"]} <= set(names)
+    assert "rocket-ship-9000" not in names
+
+
+def test_resolve_icon_resolves_any_free_solid_name() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("needs node")
+    script = (
+        "const m = await import(process.argv[1]);"
+        "const out = {};"
+        "for (const v of JSON.parse(process.argv[2])) {"
+        " const r = m.resolveIcon(v); out[v] = [r.kind, r.label ?? null]; }"
+        "console.log(JSON.stringify(out));"
+    )
+    values = [
+        "fa:rocket",
+        "fa:mug-hot",
+        "fa:person-dress-burst",
+        "fa:paw",
+        "fa:rocket-ship-9000",
+        "fa:Rocket",
+        "fa:",
+        "lucide:dog",
+        "dog",
+        "lucide:rocket",
+    ]
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", script,
+         ARTEFACTS[0].as_uri(), json.dumps(values)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 and "Unknown file extension" in result.stderr:
+        pytest.skip("node cannot strip TypeScript types (needs Node 22.18+)")
+    assert result.returncode == 0, result.stderr
+    resolved = json.loads(result.stdout)
+    assert resolved["fa:rocket"] == ["fa", "Rocket"]
+    assert resolved["fa:mug-hot"] == ["fa", "Mug Hot"]
+    assert resolved["fa:person-dress-burst"] == ["fa", "Person Dress Burst"]
+    # Curated entries keep their quick-pick label.
+    assert resolved["fa:paw"] == ["fa", "Pets"]
+    assert resolved["lucide:dog"][0] == "lucide"
+    assert resolved["dog"][0] == "lucide"
+    for unknown in ("fa:rocket-ship-9000", "fa:Rocket", "fa:", "lucide:rocket"):
+        assert resolved[unknown] == ["fallback", None], unknown
+
+
 def test_registry_has_no_remote_url_cdn_or_lucide_runtime() -> None:
     for path in (SOURCE, GENERATOR, *ARTEFACTS):
         text = path.read_text(encoding="utf-8")

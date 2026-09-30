@@ -3,7 +3,14 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 // The offline generator is the only writer of both registry artefacts.
 import { OUTPUT_PATHS, REPO_ROOT, SOURCE_PATH, renderRegistry } from "../../../tools/icons/generate.mjs";
-import { EMOJI_MAX_CODE_POINTS, FALLBACK_ICON, FA_ICONS, LUCIDE_ICONS, resolveIcon } from "./registry.generated";
+import {
+  EMOJI_MAX_CODE_POINTS,
+  FALLBACK_ICON,
+  FA_ICONS,
+  FA_SOLID_ICONS,
+  LUCIDE_ICONS,
+  resolveIcon,
+} from "./registry.generated";
 
 type Curated = { lucide: { name: string; label: string }[]; fa: { name: string; label: string }[] };
 
@@ -45,7 +52,18 @@ describe("shared icon registry — one source of truth", () => {
       expect(icon.viewBox).toMatch(/^0 0 \d+ 512$/);
       expect(icon.paths.length, icon.name).toBeGreaterThan(0);
     }
-    for (const icon of [...LUCIDE_ICONS, ...FA_ICONS]) {
+    const solidNames = FA_SOLID_ICONS.map((icon) => icon.name);
+    expect(solidNames.length).toBeGreaterThanOrEqual(1400);
+    expect(solidNames).toEqual([...solidNames].sort());
+    expect(new Set(solidNames).size).toBe(solidNames.length);
+    for (const { name } of FA_ICONS) expect(solidNames, name).toContain(name);
+    for (const icon of FA_SOLID_ICONS) {
+      expect(icon.kind).toBe("fa");
+      expect(icon.key).toBe(`fa:${icon.name}`);
+      expect(icon.viewBox).toMatch(/^0 0 \d+ 512$/);
+      expect(icon.paths.length, icon.name).toBeGreaterThan(0);
+    }
+    for (const icon of [...LUCIDE_ICONS, ...FA_ICONS, ...FA_SOLID_ICONS]) {
       for (const d of icon.paths) expect(d, icon.key).toMatch(/^[Mm][-0-9.,\sA-Za-z]+$/);
     }
   });
@@ -60,6 +78,12 @@ describe("resolveIcon", () => {
     const broom = resolveIcon("fa:broom");
     expect(broom.kind).toBe("fa");
     expect(broom).toBe(FA_ICONS.find((icon) => icon.name === "broom"));
+
+    // Any Free Solid name resolves, not just the curated quick-pick set.
+    const rocket = resolveIcon("fa:rocket");
+    expect(rocket).toBe(FA_SOLID_ICONS.find((icon) => icon.name === "rocket"));
+    expect(rocket).toMatchObject({ kind: "fa", key: "fa:rocket", label: "Rocket" });
+    expect(resolveIcon("fa:person-dress-burst")).toMatchObject({ kind: "fa", label: "Person Dress Burst" });
 
     expect(resolveIcon("emoji:🐶")).toEqual({ kind: "emoji", key: "emoji:🐶", text: "🐶" });
     expect(resolveIcon("emoji:👨‍👩‍👧")).toEqual({ kind: "emoji", key: "emoji:👨‍👩‍👧", text: "👨‍👩‍👧" });
