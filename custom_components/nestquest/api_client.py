@@ -6,9 +6,6 @@ speaks the API's panel plane — ``GET /api/v1/panel/snapshot`` (today's
 household snapshot) and ``POST /api/v1/panel/instances/{id}/complete``
 (completion as the tapped child profile) — authenticated with the
 static panel service token as a Bearer credential on every request.
-Every request also reports Home Assistant's configured ``time_zone`` in
-the ``X-NestQuest-Timezone`` header, so the API (which may run UTC)
-reads the household's clock until the admin chooses a zone there.
 
 Transport-injected by construction: the constructor takes the base URL,
 the panel token, and the HTTP session to use.  The session speaks the
@@ -57,7 +54,6 @@ from .const import (
     CONF_PANEL_TOKEN,
     DEFAULT_API_BASE_URL,
     DEFAULT_PANEL_TOKEN,
-    PANEL_TIMEZONE_HEADER,
 )
 
 if TYPE_CHECKING:
@@ -160,8 +156,7 @@ def client_from_entry(hass: Any, entry: Any) -> NestQuestApiClient:
     """Build the production client for a config entry.
 
     Reads the configured base URL and panel token off the entry
-    (:func:`resolve_api_config`), reports ``hass.config.time_zone`` as
-    the household zone, and hands the client Home Assistant's
+    (:func:`resolve_api_config`) and hands the client Home Assistant's
     SHARED aiohttp session (``homeassistant.helpers.aiohttp_client
     .async_get_clientsession``) so panel calls ride HA's one connection
     pool.  The helper import is deferred into this function on purpose:
@@ -173,10 +168,7 @@ def client_from_entry(hass: Any, entry: Any) -> NestQuestApiClient:
 
     base_url, panel_token = resolve_api_config(entry)
     return NestQuestApiClient(
-        base_url,
-        panel_token,
-        async_get_clientsession(hass),
-        household_timezone=hass.config.time_zone,
+        base_url, panel_token, async_get_clientsession(hass)
     )
 
 
@@ -197,13 +189,8 @@ class NestQuestApiClient:
         session: aiohttp.ClientSession,
         *,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
-        household_timezone: str | None = None,
     ) -> None:
         """Store the connection settings; the session is injected.
-
-        ``household_timezone`` is Home Assistant's configured IANA
-        ``time_zone``; when given it rides every request in the
-        ``X-NestQuest-Timezone`` header.
 
         ``session`` is an aiohttp ``ClientSession`` in production and a
         stub transport in tests.  ``base_url`` must be a full http(s)
@@ -229,14 +216,10 @@ class NestQuestApiClient:
         self._panel_token = panel_token
         self._session = session
         self._timeout_seconds = float(timeout_seconds)
-        self._household_timezone = household_timezone
 
     def _headers(self) -> dict[str, str]:
-        """The Bearer credential plus the reported household zone."""
-        headers = {"Authorization": f"Bearer {self._panel_token}"}
-        if self._household_timezone:
-            headers[PANEL_TIMEZONE_HEADER] = self._household_timezone
-        return headers
+        """The Bearer credential every panel-plane request carries."""
+        return {"Authorization": f"Bearer {self._panel_token}"}
 
     async def get_snapshot(self) -> dict[str, Any]:
         """Fetch and parse today's household snapshot.

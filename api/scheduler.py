@@ -13,7 +13,7 @@ local date when unset) and publishes each returned
 ``nestquest_quest_missed`` event on the app's ONE transition publisher
 (the same SSE stream every route publishes through).
 
-A household zone adopted from Home Assistant while the loop is asleep
+A household zone changed while the loop is asleep
 must not leave it waiting for the OLD zone's rollover (a UTC host would
 otherwise sweep at UTC midnight — 20:00 in New York — marking quests
 missed hours early).  :meth:`MissedSweepScheduler.settings_changed`
@@ -21,17 +21,17 @@ wakes the sleeping loop to re-plan whenever the zone or rollover time
 it planned with has moved, and the loop re-reads the settings before
 sweeping and re-plans instead if they no longer match its plan.
 
-Guarantee: no sweep runs for a plan a committed adoption has replaced.
-An adopting writer holds :attr:`MissedSweepScheduler.settings_lock`
+Guarantee: no sweep runs for a plan a committed settings write has
+replaced.  A settings writer holds :attr:`MissedSweepScheduler.settings_lock`
 across its write AND its :meth:`~MissedSweepScheduler.settings_changed`
 call; the loop holds the same lock across its plan read (read, record
 the plan, clear the wake flag) and across the pre-sweep re-read plus
-the sweep itself.  So an adoption commits either before a plan read
+the sweep itself.  So a write commits either before a plan read
 (which then sees it), after one (``settings_changed`` compares against
 that exact plan and wakes the wait), or after the sweep — never between
 a read and what the loop does with it.  The lock is never held across
 the wait, and the loop takes nothing else before it, so a waiting
-panel request cannot deadlock: it is delayed at most by one settings
+writer cannot deadlock: it is delayed at most by one settings
 read or one sweep.
 
 All sweep policy lives in the core (the watermark, the
@@ -150,7 +150,7 @@ class MissedSweepScheduler:
         self._planned: tuple[str, str] | None = None
         #: Set by :meth:`settings_changed` to cut the current wait short.
         self._wake = asyncio.Event()
-        #: Serialises settings adoption with planning and sweeping (see
+        #: Serialises settings writes with planning and sweeping (see
         #: the module docstring's guarantee).
         self.settings_lock = asyncio.Lock()
 
@@ -174,8 +174,8 @@ class MissedSweepScheduler:
     def settings_changed(self, settings: object) -> None:
         """Re-plan the pending sweep if ``settings`` moved its rollover.
 
-        Called with freshly stored settings (e.g. a zone adopted from
-        Home Assistant), with :attr:`settings_lock` held across the write
+        Called with freshly stored settings (e.g. an admin's zone
+        change), with :attr:`settings_lock` held across the write
         and this call so the comparison is against the loop's current
         plan, never a read still in flight.  A differing ``timezone`` or
         ``day_rollover_time`` wakes the sleeping loop, which reloads the
@@ -194,7 +194,7 @@ class MissedSweepScheduler:
         """Schedule → sweep → repeat, forever (until cancelled)."""
         while True:
             try:
-                # Under the lock no adoption can commit between this read
+                # Under the lock no settings write can commit between this read
                 # and the recorded plan, so any later one wakes the wait.
                 async with self.settings_lock:
                     self._wake.clear()
@@ -233,7 +233,7 @@ class MissedSweepScheduler:
                 # Re-read before sweeping: a zone or rollover change the
                 # wake-up missed means this is not the household's
                 # rollover any more, so re-plan instead of sweeping.  The
-                # lock keeps an adoption from committing between this
+                # lock keeps a settings write from committing between this
                 # check and the sweep.
                 async with self.settings_lock:
                     settings = await core_settings_store.load_settings(
