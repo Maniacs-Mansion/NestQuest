@@ -270,6 +270,24 @@ async def test_manual_timezone_patch_persists_and_is_returned(
     assert "timezone_configured" not in stored
 
 
+@pytest.mark.parametrize("zone", ["America/Los_Angeles", ""])
+async def test_timezone_alone_sticks_on_a_fresh_database(
+    settings_client: SimpleNamespace, zone: str
+) -> None:
+    """A lone ``timezone`` PATCH needs no other field to persist."""
+    client = settings_client.client
+    patched = await client.patch(
+        "/api/v1/admin/settings",
+        json={"timezone": zone},
+        headers=_admin_headers(),
+    )
+    assert patched.status_code == 200
+    reread = await client.get(
+        "/api/v1/admin/settings", headers=_admin_headers()
+    )
+    assert reread.json() == {**DEFAULT_SETTINGS, "timezone": zone}
+
+
 async def test_timezone_configured_is_an_unknown_field(
     settings_client: SimpleNamespace,
 ) -> None:
@@ -320,6 +338,9 @@ async def test_stored_legacy_timezone_configured_key_is_ignored(
         ({"morning_summary_enabled": "yes"}, "morning_summary_enabled"),
         ({"celebration_enabled": 1}, "celebration_enabled"),
         ({"notify_target": 5}, "notify_target"),
+        ({"timezone": "Mars/Olympus_Mons"}, "timezone"),
+        ({"timezone": "America/New York"}, "timezone"),
+        ({"timezone": 5}, "timezone"),
     ],
 )
 async def test_invalid_value_is_rejected_and_stored_settings_unchanged(
@@ -473,6 +494,13 @@ async def test_settings_routes_refuse_non_admin_and_absent_credentials(
         "/api/v1/admin/settings", json={"horizon_days": 7}
     )
     assert absent_patch.status_code == 401
+
+    forbidden_zone = await client.patch(
+        "/api/v1/admin/settings",
+        json={"timezone": "America/New_York"},
+        headers={"Authorization": f"Bearer {non_admin}"},
+    )
+    assert forbidden_zone.status_code == 403
 
     # No refused request changed anything: the settings are untouched.
     after = await client.get(

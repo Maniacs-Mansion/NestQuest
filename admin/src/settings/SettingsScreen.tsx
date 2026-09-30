@@ -6,7 +6,8 @@
  *
  * Preferences: the household settings (planning horizon, day rollover,
  * timezone, notifications). Save patches only the changed fields. The
- * timezone is only ever set by the admin saving it here.
+ * timezone — the application's source of local time — is only ever set by
+ * the admin picking or typing a zone here and saving it.
  *
  * One write at a time across both sections.
  */
@@ -256,7 +257,7 @@ const HH_MM = /^([01]\d|2[0-3]):[0-5]\d$/;
 /** "UTC" or an IANA-looking "Area/Location" (the API checks it resolves). */
 const IANA_ZONE = /^(UTC|[A-Za-z]+(\/[A-Za-z0-9_+-]+)+)$/;
 
-/** The Timezone field's suggestions; any other IANA zone can be typed. */
+/** The Timezone picker's zones; any other IANA zone can be typed via "Other". */
 export const COMMON_TIMEZONES = [
   "UTC",
   "America/New_York",
@@ -289,6 +290,9 @@ export const COMMON_TIMEZONES = [
   "Australia/Sydney",
   "Pacific/Auckland",
 ];
+
+/** The picker's "Other IANA zone…" option; never sent to the API. */
+const OTHER_ZONE = "__other__";
 
 /** The form's working copy: the number is text so it can be mid-edit. */
 type PreferencesDraft = Omit<HouseholdSettings, "horizon_days"> & { horizon_days: string };
@@ -348,6 +352,10 @@ function PreferencesForm({
 }) {
   const [draft, setDraft] = useState<PreferencesDraft>(() => preferencesDraft(settings));
   const update = (patch: Partial<PreferencesDraft>) => setDraft((d) => ({ ...d, ...patch }));
+  // A saved zone outside the curated list opens in the free-text entry.
+  const [otherZone, setOtherZone] = useState(
+    () => settings.timezone !== "" && !COMMON_TIMEZONES.includes(settings.timezone),
+  );
   const disabled = saving || locked;
 
   function submit(event: FormEvent) {
@@ -400,25 +408,49 @@ function PreferencesForm({
         />
       </label>
       {timeInput("day_rollover_time", "Day rollover")}
-      <label className="settings-field">
-        <span className="settings-label">Timezone</span>
-        <input
+      <div className="settings-field">
+        <label className="settings-label" htmlFor="settings-timezone">
+          Timezone
+        </label>
+        <select
+          id="settings-timezone"
           className="settings-input"
-          type="text"
-          list="settings-timezones"
-          placeholder="Host local time"
-          autoComplete="off"
-          spellCheck={false}
-          value={draft.timezone}
+          aria-describedby="settings-timezone-help"
+          value={otherZone ? OTHER_ZONE : draft.timezone}
           disabled={disabled}
-          onChange={(event) => update({ timezone: event.target.value })}
-        />
-      </label>
-      <datalist id="settings-timezones">
-        {COMMON_TIMEZONES.map((zone) => (
-          <option key={zone} value={zone} />
-        ))}
-      </datalist>
+          onChange={(event) => {
+            const choice = event.target.value;
+            setOtherZone(choice === OTHER_ZONE);
+            if (choice !== OTHER_ZONE) update({ timezone: choice });
+          }}
+        >
+          <option value="">API host local time (no zone set)</option>
+          {COMMON_TIMEZONES.map((zone) => (
+            <option key={zone} value={zone}>
+              {zone}
+            </option>
+          ))}
+          <option value={OTHER_ZONE}>Other IANA zone…</option>
+        </select>
+        {otherZone ? (
+          <input
+            className="settings-input"
+            type="text"
+            aria-label="Other timezone"
+            placeholder="Area/Location, e.g. America/Boise"
+            autoComplete="off"
+            spellCheck={false}
+            value={draft.timezone}
+            disabled={disabled}
+            onChange={(event) => update({ timezone: event.target.value })}
+          />
+        ) : null}
+        <p className="settings-hint" id="settings-timezone-help">
+          The application timezone: the source of local time for the panel, the scheduler and this
+          admin app. It changes only when you save it here; with no zone set, the API host&apos;s
+          local time is used.
+        </p>
+      </div>
       <label className="settings-field">
         <span className="settings-label">Notify target</span>
         <input
