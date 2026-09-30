@@ -7,7 +7,8 @@
  * Preferences: the household settings (planning horizon, day rollover,
  * timezone, notifications). Save patches only the changed fields. The
  * timezone — the application's source of local time — is only ever set by
- * the admin picking or typing a zone here and saving it.
+ * the admin picking or typing a zone here and saving it; every zone loaded
+ * or saved here is published app-wide (time/AppTimezone.tsx).
  *
  * One write at a time across both sections.
  */
@@ -35,6 +36,7 @@ import {
   type SettingsChanges,
 } from "../api/settings";
 import { FOCUSABLE, inertOutside } from "../schedule/OverrideEditor";
+import { usePublishAppTimezone } from "../time/AppTimezone";
 import { ArrowDownGlyph, ArrowUpGlyph, ChevronLeftGlyph, PlusGlyph } from "./glyphs";
 import "./SettingsScreen.css";
 
@@ -593,6 +595,7 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
   const titleRef = useRef<HTMLHeadingElement>(null);
   const addRef = useRef<HTMLButtonElement>(null);
   const formWasOpen = useRef(false);
+  const publishTimezone = usePublishAppTimezone();
 
   // Modal focus: move in on open, keep the background out of reach, and hand
   // focus back to the opener (the Settings button) on close.
@@ -634,7 +637,9 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
     setPreferences({ kind: "loading" });
     fetchSettings()
       .then((settings) => {
-        if (!cancelled) setPreferences({ kind: "ready", settings });
+        if (cancelled) return;
+        setPreferences({ kind: "ready", settings });
+        publishTimezone(settings.timezone);
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -728,6 +733,7 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
     try {
       const settings = await updateSettings(changes);
       setPreferences({ kind: "ready", settings });
+      publishTimezone(settings.timezone);
       setPreferencesMessage({ kind: "info", text: "Preferences saved." });
     } catch (error) {
       setPreferencesMessage({

@@ -93,6 +93,7 @@ class FakeMonotonic:
 FIXTURE_SNAPSHOT = {
     "today_iso": _today_iso(),
     "cycle_day": 3,
+    "timezone": "",
     "children": [
         {
             "child_id": 1,
@@ -793,7 +794,12 @@ async def test_snapshot_from_api_payload_empty_household() -> None:
     """An empty household (no children) is a valid snapshot: empty
     children tuple, cycle day passes through."""
     snapshot = snapshot_from_api_payload(
-        {"today_iso": "2026-09-23", "cycle_day": 0, "children": []}
+        {
+            "today_iso": "2026-09-23",
+            "cycle_day": 0,
+            "timezone": "",
+            "children": [],
+        }
     )
     assert snapshot.children == ()
     assert snapshot.cycle_day == 0

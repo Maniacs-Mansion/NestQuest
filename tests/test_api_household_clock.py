@@ -632,6 +632,24 @@ async def test_admin_saved_zone_is_authoritative_across_surfaces(
     assert delays[1] == pytest.approx(299)
 
 
+async def test_panel_snapshot_publishes_the_stored_zone(
+    household: SimpleNamespace,
+) -> None:
+    """The panel snapshot carries the stored application zone verbatim so
+    the cards format their visible date and clock in it — ``""`` until the
+    admin saves one, then exactly the saved zone."""
+    async def panel_zone() -> str:
+        response = await household.client.get(
+            "/api/v1/panel/snapshot", headers=_panel_headers()
+        )
+        assert response.status_code == 200
+        return response.json()["timezone"]
+
+    assert await panel_zone() == ""
+    await _set_zone(household, "Pacific/Auckland")
+    assert await panel_zone() == "Pacific/Auckland"
+
+
 # --- settings writes are serialised with planning and sweeping (TZ-003) ------
 #
 # A zone write racing the loop's own settings reads must never leave a

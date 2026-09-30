@@ -4,8 +4,10 @@
  * Calendar dates ("YYYY-MM-DD") are parsed by their components and formatted
  * in UTC, so the printed day never shifts with the viewer's offset — unlike
  * `new Date("YYYY-MM-DD")`, which is UTC midnight and reads as the previous
- * day in negative-offset zones.
+ * day in negative-offset zones. Instants are shown in the application
+ * timezone (time/zone.ts).
  */
+import { zoneOption } from "../time/zone";
 
 const LOCALE = "en-US";
 
@@ -44,7 +46,11 @@ export function formatDueTime(hhmm: string): string {
   return format(date, { hour: "numeric", minute: "2-digit", timeZone: "UTC" });
 }
 
-/** A UTC ISO timestamp shown as the viewer's local time, "7:04 AM". */
-export function formatClockTime(isoTimestamp: string): string {
-  return format(new Date(isoTimestamp), { hour: "numeric", minute: "2-digit" });
+/** A UTC ISO timestamp shown as wall-clock time in `timeZone` ("" = browser), "7:04 AM". */
+export function formatClockTime(isoTimestamp: string, timeZone: string): string {
+  return format(new Date(isoTimestamp), {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: zoneOption(timeZone),
+  });
 }

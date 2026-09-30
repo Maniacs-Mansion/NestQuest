@@ -165,7 +165,9 @@ async def test_admin_jwt_returns_documented_snapshot(
 
     Every field is asserted as an explicit literal, with ONE clock
     read for the request.  With no missed view in the real snapshot,
-    the admin body equals the panel body for the same household.
+    the admin body equals the panel body for the same household — the
+    panel body additionally carries the stored ``timezone`` its cards
+    format the visible date and clock in (unset here).
     """
     client = snapshot_household.client
     seed = snapshot_household.seed
@@ -241,7 +243,7 @@ async def test_admin_jwt_returns_documented_snapshot(
         "/api/v1/panel/snapshot", headers=_panel_headers()
     )
     assert panel.status_code == 200
-    assert panel.json() == body
+    assert panel.json() == {**body, "timezone": ""}
 
 
 async def test_admin_keeps_missed_instance_panel_omits_it(

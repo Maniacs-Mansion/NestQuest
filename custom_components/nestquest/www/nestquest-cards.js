@@ -65,7 +65,7 @@ const { is: nt, defineProperty: it, getOwnPropertyDescriptor: st, getOwnProperty
   return t;
 } }, Ze = (i, e) => !nt(i, e), ye = { attribute: !0, type: String, converter: ae, reflect: !1, useDefault: !1, hasChanged: Ze };
 Symbol.metadata ??= /* @__PURE__ */ Symbol("metadata"), K.litPropertyMetadata ??= /* @__PURE__ */ new WeakMap();
-let T = class extends HTMLElement {
+let z = class extends HTMLElement {
   static addInitializer(e) {
     this._$Ei(), (this.l ??= []).push(e);
   }
@@ -246,7 +246,7 @@ let T = class extends HTMLElement {
   firstUpdated(e) {
   }
 };
-T.elementStyles = [], T.shadowRootOptions = { mode: "open" }, T[I("elementProperties")] = /* @__PURE__ */ new Map(), T[I("finalized")] = /* @__PURE__ */ new Map(), ct?.({ ReactiveElement: T }), (K.reactiveElementVersions ??= []).push("2.1.2");
+z.elementStyles = [], z.shadowRootOptions = { mode: "open" }, z[I("elementProperties")] = /* @__PURE__ */ new Map(), z[I("finalized")] = /* @__PURE__ */ new Map(), ct?.({ ReactiveElement: z }), (K.reactiveElementVersions ??= []).push("2.1.2");
 const pe = globalThis, be = (i) => i, V = pe.trustedTypes, ve = V ? V.createPolicy("lit-html", { createHTML: (i) => i }) : void 0, Qe = "$lit$", k = `lit$${Math.random().toFixed(9).slice(2)}$`, We = "?" + k, dt = `<${We}>`, A = document, P = () => A.createComment(""), H = (i) => i === null || typeof i != "object" && typeof i != "function", he = Array.isArray, pt = (i) => he(i) || typeof i?.[Symbol.iterator] == "function", Y = `[ 	
 \f\r]`, L = /<(?:(!--|\/[^a-zA-Z])|(\/?[a-zA-Z][^>\s]*)|(\/?$))/g, xe = /-->/g, we = />/g, $ = RegExp(`>|${Y}(?:([^\\s"'>=/]+)(${Y}*=${Y}*(?:[^ 	
 \f\r"'\`<>=]|("|')|))|$)`, "g"), ke = /'/g, $e = /"/g, Ge = /^(?:script|style|textarea|title)$/i, Ke = (i) => (e, ...t) => ({ _$litType$: i, strings: e, values: t }), d = Ke(1), qe = Ke(2), S = /* @__PURE__ */ Symbol.for("lit-noChange"), g = /* @__PURE__ */ Symbol.for("lit-nothing"), Me = /* @__PURE__ */ new WeakMap(), M = A.createTreeWalker(A, 129);
@@ -303,11 +303,11 @@ class R {
     return n.innerHTML = e, n;
   }
 }
-function z(i, e, t = i, n) {
+function T(i, e, t = i, n) {
   if (e === S) return e;
   let s = n !== void 0 ? t._$Co?.[n] : t._$Cl;
   const a = H(e) ? void 0 : e._$litDirective$;
-  return s?.constructor !== a && (s?._$AO?.(!1), a === void 0 ? s = void 0 : (s = new a(i), s._$AT(i, t, n)), n !== void 0 ? (t._$Co ??= [])[n] = s : t._$Cl = s), s !== void 0 && (e = z(i, s._$AS(i, e.values), s, n)), e;
+  return s?.constructor !== a && (s?._$AO?.(!1), a === void 0 ? s = void 0 : (s = new a(i), s._$AT(i, t, n)), n !== void 0 ? (t._$Co ??= [])[n] = s : t._$Cl = s), s !== void 0 && (e = T(i, s._$AS(i, e.values), s, n)), e;
 }
 class ut {
   constructor(e, t) {
@@ -356,7 +356,7 @@ class N {
     return this._$AB;
   }
   _$AI(e, t = this) {
-    e = z(this, e, t), H(e) ? e === g || e == null || e === "" ? (this._$AH !== g && this._$AR(), this._$AH = g) : e !== this._$AH && e !== S && this._(e) : e._$litType$ !== void 0 ? this.$(e) : e.nodeType !== void 0 ? this.T(e) : pt(e) ? this.k(e) : this._(e);
+    e = T(this, e, t), H(e) ? e === g || e == null || e === "" ? (this._$AH !== g && this._$AR(), this._$AH = g) : e !== this._$AH && e !== S && this._(e) : e._$litType$ !== void 0 ? this.$(e) : e.nodeType !== void 0 ? this.T(e) : pt(e) ? this.k(e) : this._(e);
   }
   O(e) {
     return this._$AA.parentNode.insertBefore(e, this._$AB);
@@ -409,11 +409,11 @@ class J {
   _$AI(e, t = this, n, s) {
     const a = this.strings;
     let r = !1;
-    if (a === void 0) e = z(this, e, t, 0), r = !H(e) || e !== this._$AH && e !== S, r && (this._$AH = e);
+    if (a === void 0) e = T(this, e, t, 0), r = !H(e) || e !== this._$AH && e !== S, r && (this._$AH = e);
     else {
       const l = e;
       let o, p;
-      for (e = a[0], o = 0; o < a.length - 1; o++) p = z(this, l[n + o], t, o), p === S && (p = this._$AH[o]), r ||= !H(p) || p !== this._$AH[o], p === g ? e = g : e !== g && (e += (p ?? "") + a[o + 1]), this._$AH[o] = p;
+      for (e = a[0], o = 0; o < a.length - 1; o++) p = T(this, l[n + o], t, o), p === S && (p = this._$AH[o]), r ||= !H(p) || p !== this._$AH[o], p === g ? e = g : e !== g && (e += (p ?? "") + a[o + 1]), this._$AH[o] = p;
     }
     r && !s && this.j(e);
   }
@@ -442,7 +442,7 @@ class gt extends J {
     super(e, t, n, s, a), this.type = 5;
   }
   _$AI(e, t = this) {
-    if ((e = z(this, e, t, 0) ?? g) === S) return;
+    if ((e = T(this, e, t, 0) ?? g) === S) return;
     const n = this._$AH, s = e === g && n !== g || e.capture !== n.capture || e.once !== n.once || e.passive !== n.passive, a = e !== g && (n === g || s);
     s && this.element.removeEventListener(this.name, this, n), a && this.element.addEventListener(this.name, this, e), this._$AH = e;
   }
@@ -458,7 +458,7 @@ class _t {
     return this._$AM._$AU;
   }
   _$AI(e) {
-    z(this, e);
+    T(this, e);
   }
 }
 const yt = { I: N }, bt = pe.litHtmlPolyfillSupport;
@@ -473,7 +473,7 @@ const vt = (i, e, t) => {
   return s._$AI(i), s;
 };
 const ue = globalThis;
-let C = class extends T {
+let C = class extends z {
   constructor() {
     super(...arguments), this.renderOptions = { host: this }, this._$Do = void 0;
   }
@@ -592,7 +592,7 @@ function Ct(i) {
 function Se(i) {
   return Number.isFinite(i) ? Math.min(100, Math.max(0, i)) : 0;
 }
-function Te(i) {
+function ze(i) {
   return Math.max(0, Math.round(i));
 }
 function At(i) {
@@ -620,7 +620,7 @@ function St(i, e) {
   );
   return Number.isFinite(s) ? s - i : 0;
 }
-function Tt(i, e) {
+function zt(i, e) {
   if (typeof i != "string")
     return null;
   const t = i.split("-");
@@ -636,14 +636,14 @@ function Tt(i, e) {
   const r = Date.UTC(n, s - 1, a), l = new Date(r - St(r, e));
   return Number.isNaN(l.getTime()) ? null : l;
 }
-function zt(i) {
+function Tt(i) {
   const e = qt[i];
   return e || i.charAt(0).toUpperCase() + i.slice(1);
 }
 function Et(i, e) {
   return Mt[i] ?? e;
 }
-const ze = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 24.1 50 26 55.5 24.1Z M100 50 75.9 44.5 74 50 75.9 55.5Z M50 97 55.5 75.9 50 74 44.5 75.9Z M0 50 24.1 55.5 26 50 24.1 44.5Z M29.1 29.1 29.7 36.3 36.3 29.7Z M70.9 29.1 63.7 29.7 70.3 36.3Z M70.9 70.9 70.3 63.7 63.7 70.3Z M29.1 70.9 36.3 70.3 29.7 63.7Z", Nt = "M50 26.5 70.4 38.2 70.4 61.8 50 73.5 29.6 61.8 29.6 38.2Z", Lt = "M29.6 38.2H70.4M29.6 61.8H70.4M50 26.5 36.5 38.2M50 26.5 63.5 38.2M50 73.5 36.5 61.8M50 73.5 63.5 61.8M36.5 38.2V61.8M63.5 38.2V61.8M29.6 38.2 36.5 61.8M36.5 38.2 29.6 61.8M70.4 38.2 63.5 61.8M63.5 38.2 70.4 61.8", Ot = d`<svg
+const Te = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 24.1 50 26 55.5 24.1Z M100 50 75.9 44.5 74 50 75.9 55.5Z M50 97 55.5 75.9 50 74 44.5 75.9Z M0 50 24.1 55.5 26 50 24.1 44.5Z M29.1 29.1 29.7 36.3 36.3 29.7Z M70.9 29.1 63.7 29.7 70.3 36.3Z M70.9 70.9 70.3 63.7 63.7 70.3Z M29.1 70.9 36.3 70.3 29.7 63.7Z", Nt = "M50 26.5 70.4 38.2 70.4 61.8 50 73.5 29.6 61.8 29.6 38.2Z", Lt = "M29.6 38.2H70.4M29.6 61.8H70.4M50 26.5 36.5 38.2M50 26.5 63.5 38.2M50 73.5 36.5 61.8M50 73.5 63.5 61.8M36.5 38.2V61.8M63.5 38.2V61.8M29.6 38.2 36.5 61.8M36.5 38.2 29.6 61.8M70.4 38.2 63.5 61.8M63.5 38.2 70.4 61.8", Ot = d`<svg
   class="monogram"
   viewBox="0 0 100 100"
   aria-hidden="true"
@@ -850,7 +850,7 @@ const ze = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
     width: 188px;
     height: 214px;
     padding: 4px;
-    clip-path: ${x(ze)};
+    clip-path: ${x(Te)};
     background: rgba(255, 255, 255, 0.22);
   }
 
@@ -861,7 +861,7 @@ const ze = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
     align-items: center;
     justify-content: center;
     padding-bottom: 70px;
-    clip-path: ${x(ze)};
+    clip-path: ${x(Te)};
     background: var(--nq-p-crest);
   }
 
@@ -1243,8 +1243,13 @@ const ze = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
       </div>
     `;
   }
+  /** The zone the visible date and clock render in: the application
+   *  timezone the admin stored (published on the household rollup by
+   *  custom_components/nestquest/sensor.py — ``timezone``).  Only when
+   *  none is stored does Home Assistant's zone (or the browser's) apply. */
   _timeZone() {
-    return kt(this.hass);
+    const e = this._state("sensor.nestquest_household_quests_due_today")?.attributes?.timezone;
+    return typeof e == "string" && e.trim() ? e.trim() : kt(this.hass);
   }
   _state(e) {
     const n = this.hass?.states?.[e];
@@ -1280,7 +1285,7 @@ const ze = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
       `sensor.nestquest_${e}_completion_pct_today`
     ), r = this._state(
       `binary_sensor.nestquest_${e}_present_today`
-    ), l = n?.attributes ?? {}, o = Te(te(n?.state, 0)), p = Te(te(s?.state, 0)), u = a ? te(a.state, Number.NaN) : Number.NaN, c = Number.isFinite(u) ? Se(u) : o > 0 ? Se(p / o * 100) : 0;
+    ), l = n?.attributes ?? {}, o = ze(te(n?.state, 0)), p = ze(te(s?.state, 0)), u = a ? te(a.state, Number.NaN) : Number.NaN, c = Number.isFinite(u) ? Se(u) : o > 0 ? Se(p / o * 100) : 0;
     let f = !0;
     const h = l.present;
     typeof h == "boolean" ? f = h : r && (f = String(r.state ?? "").trim().toLowerCase() === "on");
@@ -1293,7 +1298,7 @@ const ze = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
       typeof X == "string" && X.trim() && (m = X.trim());
     }
     m || (m = At(e));
-    const v = Tt(
+    const v = zt(
       r?.attributes?.next_present,
       this._timeZone()
     ), U = v ? `Returns ${ee(v, this._timeZone())}` : null;
@@ -1439,7 +1444,7 @@ const ze = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
           <span class="clock">${$t(this._now, this._timeZone())}</span>
         </div>
       `;
-    const t = zt(e.condition), n = Et(e.condition, t), s = e.temperature === null ? g : d`<span class="temp">${Math.round(e.temperature)}°</span>`, a = e.high === null || e.low === null ? null : `${Math.round(e.high)}° / ${Math.round(e.low)}°`;
+    const t = Tt(e.condition), n = Et(e.condition, t), s = e.temperature === null ? g : d`<span class="temp">${Math.round(e.temperature)}°</span>`, a = e.high === null || e.low === null ? null : `${Math.round(e.high)}° / ${Math.round(e.low)}°`;
     return d`
       <div class="dock">
         ${Dt}
@@ -3501,11 +3506,11 @@ const Ue = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
   icon: qn,
   headline: "No adventurer chosen",
   body: "Open The Party and tap your crest to open your quest log."
-}, Tn = {
+}, zn = {
   icon: Mn,
   headline: "NestQuest is not set up yet",
   body: "A parent needs to finish setting up NestQuest."
-}, zn = {
+}, Tn = {
   icon: Cn,
   headline: "The records cannot be reached",
   body: "The party's records are quiet right now. NestQuest will return shortly."
@@ -3597,9 +3602,9 @@ const Ue = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
       case "no-adventurer":
         return this._renderNotice(Sn);
       case "not-set-up":
-        return this._renderNotice(Tn);
-      case "unreachable":
         return this._renderNotice(zn);
+      case "unreachable":
+        return this._renderNotice(Tn);
       case "away": {
         const t = ["The quest log unlocks when they return."];
         return e.returns && t.push(`Returns ${e.returns}`), d`
@@ -3727,8 +3732,13 @@ const Ue = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
       </div>
     `;
   }
+  /** The zone the visible date and clock render in: the application
+   *  timezone the admin stored (published on the household rollup by
+   *  custom_components/nestquest/sensor.py — ``timezone``).  Only when
+   *  none is stored does Home Assistant's zone (or the browser's) apply. */
   _timeZone() {
-    return rn(this.hass);
+    const e = this._state("sensor.nestquest_household_quests_due_today")?.attributes?.timezone;
+    return typeof e == "string" && e.trim() ? e.trim() : rn(this.hass);
   }
   _state(e) {
     const n = this.hass?.states?.[e];

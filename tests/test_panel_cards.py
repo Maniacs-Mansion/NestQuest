@@ -567,6 +567,8 @@ def _render_party_board(
     states: dict,
     url: str | None = None,
     click_plate: str | None = None,
+    now: str | None = None,
+    tz: str | None = None,
 ) -> dict:
     """Render the built bundle's party board and return its plates.
 
@@ -575,7 +577,9 @@ def _render_party_board(
     mounts the card with the given config and hass snapshot, optionally
     taps the named plate, and prints the ordered plates its shadow DOM
     renders, which of them are tappable buttons, and the pathname after
-    the optional tap.
+    the optional tap.  ``now`` pins the card's clock to an ISO instant
+    and ``tz`` sets the node process's ``TZ`` — the panel browser's
+    local zone.
     """
     assert BUNDLE_PATH.is_file(), "bundle missing: run cd frontend && npm run build"
     assert RENDER_HARNESS.is_file()
@@ -589,12 +593,15 @@ def _render_party_board(
         spec["url"] = url
     if click_plate is not None:
         spec["click_plate"] = click_plate
+    if now is not None:
+        spec["now"] = now
     completed = subprocess.run(
         ["node", str(RENDER_HARNESS)],
         input=json.dumps(spec),
         capture_output=True,
         text=True,
         timeout=120,
+        env={**os.environ, "TZ": tz} if tz is not None else None,
     )
     assert completed.returncode == 0, (
         f"render harness failed: {completed.stderr}"
@@ -1233,6 +1240,71 @@ def test_quest_log_overdue_follows_the_api_snapshot_not_the_panel_clock() -> Non
     )
     assert before == {"42": overdue, "43": due_by}, before
     assert after == {"42": overdue, "43": due_by}, after
+
+
+def test_panel_date_and_clock_follow_the_stored_application_timezone() -> None:
+    """The stored application timezone is the single source of local-time
+    truth for the panel's visible date and clock too: the household rollup
+    publishes it (``timezone``) and both cards format in it — the party
+    board's kicker and dock date and clock, the quest log's header date —
+    even though Home Assistant's zone and the panel browser's zone are both
+    UTC.  At 2026-09-29T23:30Z it is still Tuesday 11:30 PM in UTC but
+    already Wednesday 12:30 PM in Pacific/Auckland (NZDT)."""
+    generated = _generate_dashboard(
+        {}, _three_child_states(), url="http://homeassistant.local/nestquest"
+    )
+    states = _three_child_states()
+    states["sensor.nestquest_household_quests_due_today"]["attributes"][
+        "timezone"
+    ] = "Pacific/Auckland"
+    now = "2026-09-29T23:30:00Z"
+
+    def text(html: str) -> str:
+        return re.sub(r"<!--.*?-->", "", html).replace("\u202f", " ")
+
+    def board_date_and_clock(html: str) -> tuple[str, str, str]:
+        found = re.search(
+            r'<p class="kicker">The Party · (.*?)</p>.*?'
+            r'<span class="date">(.*?)</span>.*?<span class="clock">(.*?)</span>',
+            text(html),
+            re.DOTALL,
+        )
+        assert found is not None, html
+        return found.group(1), found.group(2), found.group(3)
+
+    board = _render_party_board(
+        generated["views"][0]["cards"][0], states, now=now, tz="UTC"
+    )["html"]
+    assert board_date_and_clock(board) == (
+        "Wednesday, Sep 30",
+        "Wednesday, Sep 30",
+        "12:30 PM",
+    )
+
+    log = _render_quest_log(
+        generated["views"][1]["cards"][0],
+        states,
+        url="http://homeassistant.local/nestquest/ada",
+        now=now,
+        tz="UTC",
+    )["html"]
+    sub = re.search(r'<p class="sub">\s*(.*?) ·', text(log), re.DOTALL)
+    assert sub is not None, log
+    assert sub.group(1) == "Wednesday, Sep 30"
+
+    # With no stored zone the documented fallback applies: Home
+    # Assistant's zone (UTC here) formats the same instant.
+    del states["sensor.nestquest_household_quests_due_today"]["attributes"][
+        "timezone"
+    ]
+    fallback = _render_party_board(
+        generated["views"][0]["cards"][0], states, now=now, tz="UTC"
+    )["html"]
+    assert board_date_and_clock(fallback) == (
+        "Tuesday, Sep 29",
+        "Tuesday, Sep 29",
+        "11:30 PM",
+    )
 
 
 def test_quest_log_crest_matches_the_spec_geometry() -> None:

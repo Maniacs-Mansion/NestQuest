@@ -441,6 +441,9 @@ class NestQuestHouseholdDueTodaySensor(_NestQuestHouseholdSensor):
                 for child in data.children
             },
             "child_roster": _child_roster(data.children),
+            # The stored application timezone ("" when unset): the
+            # panel cards format their visible date and clock in it.
+            "timezone": data.timezone,
         }
 
 

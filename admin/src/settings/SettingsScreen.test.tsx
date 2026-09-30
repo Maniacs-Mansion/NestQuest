@@ -6,6 +6,7 @@ import SettingsScreen, { SCROLL_BOTTOM_PADDING } from "./SettingsScreen";
 import type { AdminChild } from "../api/definitions";
 import type { HouseholdSettings } from "../api/settings";
 import { storeTokens } from "../auth/oidc";
+import { AppTimezoneProvider, useAppTimezone } from "../time/AppTimezone";
 
 const CHILDREN_PATH = "/api/v1/admin/children";
 const REORDER_PATH = `${CHILDREN_PATH}/reorder`;
@@ -789,5 +790,44 @@ describe("SettingsScreen — manual timezone control", () => {
       expect(Object.keys(write.body as object)).toEqual(["timezone"]);
       expect(write.body).not.toHaveProperty("timezone_configured");
     }
+  });
+});
+
+describe("SettingsScreen — the saved zone applies app-wide", () => {
+  function ZoneProbe() {
+    return <output data-testid="app-zone">{useAppTimezone() || "(browser)"}</output>;
+  }
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+    children = [child(1, "Declan", 1)];
+    settings = { ...DEFAULT_SETTINGS, timezone: "" };
+    writeResponse = null;
+    fetchMock = vi.fn(async (url: string, init?: RequestInit) => routeFetch(url, init));
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("a saved zone becomes the application timezone at once", async () => {
+    render(
+      <AppTimezoneProvider>
+        <ZoneProbe />
+        <SettingsScreen onClose={vi.fn()} />
+      </AppTimezoneProvider>,
+    );
+    const form = await screen.findByRole("form", { name: "Preferences" });
+    expect(screen.getByTestId("app-zone").textContent).toBe("(browser)");
+
+    fireEvent.change(within(form).getByRole("combobox", { name: "Timezone" }), {
+      target: { value: "America/New_York" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Save preferences" }));
+    await screen.findByText("Preferences saved.");
+    expect(screen.getByTestId("app-zone").textContent).toBe("America/New_York");
   });
 });

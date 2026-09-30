@@ -4,6 +4,7 @@ import { TransitionsProvider } from "./api/useTransitions";
 import DefinitionsTab from "./definitions/DefinitionsTab";
 import HistoryTab from "./history/HistoryTab";
 import ScheduleTab from "./schedule/ScheduleTab";
+import { AppTimezoneProvider } from "./time/AppTimezone";
 import TodayTab from "./today/TodayTab";
 
 const TABS = [
@@ -32,15 +33,18 @@ export default function App() {
           role="tabpanel"
           aria-labelledby={`tab-${active}`}
         >
-          {active === "today" ? (
-            <TodayTab />
-          ) : active === "tasks" ? (
-            <DefinitionsTab />
-          ) : active === "schedule" ? (
-            <ScheduleTab />
-          ) : (
-            <HistoryTab />
-          )}
+          {/* Every screen's local time is the stored application timezone. */}
+          <AppTimezoneProvider>
+            {active === "today" ? (
+              <TodayTab />
+            ) : active === "tasks" ? (
+              <DefinitionsTab />
+            ) : active === "schedule" ? (
+              <ScheduleTab />
+            ) : (
+              <HistoryTab />
+            )}
+          </AppTimezoneProvider>
         </main>
         <nav className="admin-tabbar" aria-label="Admin sections">
           {TABS.map((tab) => (

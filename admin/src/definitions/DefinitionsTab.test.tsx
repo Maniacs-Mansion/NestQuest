@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import DefinitionsTab from "./DefinitionsTab";
 import {
@@ -12,6 +12,7 @@ import {
 } from "./definitionIcons";
 import type { AdminChild, DefinitionRule, QuestDefinition } from "../api/definitions";
 import { storeTokens } from "../auth/oidc";
+import { AppTimezoneProvider } from "../time/AppTimezone";
 
 function child(id: number, name: string, overrides: Partial<AdminChild> = {}): AdminChild {
   return {
@@ -1721,5 +1722,56 @@ describe("DefinitionsTab start date", () => {
     });
     expect(api.writes()).toHaveLength(0);
     expect(within(s).getByText("Pick a start date.")).toBeTruthy();
+  });
+});
+
+describe("DefinitionsTab start date in the stored application timezone", () => {
+  async function newSheetStartDate(timezone: string): Promise<string> {
+    api = fakeApi([BRUSH]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+        String(input).endsWith("/api/v1/admin/settings")
+          ? Promise.resolve(jsonResponse({ timezone }))
+          : api.fetchMock(input, init),
+      ),
+    );
+    render(
+      <AppTimezoneProvider>
+        <DefinitionsTab />
+      </AppTimezoneProvider>,
+    );
+    await screen.findByText("Brush teeth");
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    return startDateInput(sheet()).value;
+  }
+
+  beforeAll(() => {
+    vi.stubEnv("TZ", "UTC");
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+  });
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+    // Wed 23 Sep 13:00 UTC is already Thu 24 Sep 01:00 in Auckland.
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-09-23T13:00:00Z") });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("a new task defaults to today in the stored zone", async () => {
+    expect(await newSheetStartDate("Pacific/Auckland")).toBe("2026-09-24");
+  });
+
+  it("an empty stored zone defaults to the browser's local today", async () => {
+    expect(await newSheetStartDate("")).toBe("2026-09-23");
   });
 });

@@ -57,6 +57,9 @@ import {
   normalizeDefinitionIconName,
 } from "./definitionIcons";
 import { GlyphSvg } from "../icons/GlyphSvg";
+import { weekdayOf } from "../schedule/cycle";
+import { useAppTimezone } from "../time/AppTimezone";
+import { todayIn } from "../time/zone";
 import "./DefinitionsTab.css";
 
 /** ADMIN-SPEC §1: every scroll column ends with 92px so content clears the tab bar. */
@@ -121,20 +124,13 @@ type LoadState =
 /** `null` = closed, `"new"` = creating, a definition = editing it. */
 type SheetTarget = null | "new" | QuestDefinition;
 
-function pad2(n: number): string {
-  return String(n).padStart(2, "0");
-}
-
-function localIsoDate(date: Date): string {
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
-}
-
 function emptyDueTimes(): Record<WindowName, string> {
   return { morning: "", afternoon: "", evening: "" };
 }
 
-function newDraft(activeChildren: AdminChild[]): Draft {
-  const today = new Date();
+/** Draft defaults take `today` ("YYYY-MM-DD") in the application timezone. */
+function newDraft(activeChildren: AdminChild[], today: string): Draft {
+  const [, month, day] = today.split("-").map(Number);
   return {
     title: "",
     icon: null,
@@ -142,22 +138,22 @@ function newDraft(activeChildren: AdminChild[]): Draft {
     assigneeIds: activeChildren.length === 1 ? [activeChildren[0].id] : [],
     repeats: "daily",
     interval: "1",
-    weekdays: [(today.getDay() + 6) % 7],
-    dayOfMonth: String(today.getDate()),
-    month: String(today.getMonth() + 1),
+    weekdays: [weekdayOf(today)],
+    dayOfMonth: String(day),
+    month: String(month),
     monthlyWeekday: null,
     windows: [],
     dueTimes: emptyDueTimes(),
     // Mirrors the API's create default: no instance on an away day.
     skipOnAway: true,
-    startDate: localIsoDate(today),
+    startDate: today,
     endDate: null,
   };
 }
 
-function draftFrom(definition: QuestDefinition, activeChildren: AdminChild[]): Draft {
+function draftFrom(definition: QuestDefinition, activeChildren: AdminChild[], today: string): Draft {
   const { rule } = definition;
-  const today = new Date();
+  const [, month, day] = today.split("-").map(Number);
   const active = new Set(activeChildren.map((child) => child.id));
   const dueTimes = emptyDueTimes();
   for (const w of definition.windows) dueTimes[w.window] = w.due_time ?? "";
@@ -172,9 +168,9 @@ function draftFrom(definition: QuestDefinition, activeChildren: AdminChild[]): D
     weekdays:
       rule.rule_type === "weekly" || rule.rule_type === "custom_days"
         ? [...(rule.weekday_set ?? [])]
-        : [(today.getDay() + 6) % 7],
-    dayOfMonth: String(rule.day_of_month ?? today.getDate()),
-    month: String(rule.month ?? today.getMonth() + 1),
+        : [weekdayOf(today)],
+    dayOfMonth: String(rule.day_of_month ?? day),
+    month: String(rule.month ?? month),
     monthlyWeekday:
       rule.rule_type === "monthly_weekday"
         ? { nth: rule.nth_weekday ?? 1, weekday: rule.nth_weekday_weekday ?? 0 }
@@ -465,9 +461,11 @@ function EditSheet({
   onSaved: () => void;
   onDeleted: (result: DefinitionDeleteResult) => void;
 }) {
-  const [draft, setDraft] = useState<Draft>(() =>
-    target === "new" ? newDraft(activeChildren) : draftFrom(target, activeChildren),
-  );
+  const timeZone = useAppTimezone();
+  const [draft, setDraft] = useState<Draft>(() => {
+    const today = todayIn(timeZone);
+    return target === "new" ? newDraft(activeChildren, today) : draftFrom(target, activeChildren, today);
+  });
   // The active selection as loaded: while it is unchanged, the PATCH omits
   // assignee_child_ids, because the API replaces the whole set and inactive
   // children cannot be sent back.

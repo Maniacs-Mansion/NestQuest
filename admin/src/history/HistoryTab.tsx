@@ -9,9 +9,10 @@ import { ApiForbiddenError } from "../api/client";
 import type { TransitionEvent } from "../api/events";
 import { useTransitions } from "../api/useTransitions";
 import { exportHistoryCsv, fetchHistory, type HistoryFilter, type HistoryRow } from "../api/history";
-import { localTodayIso } from "../schedule/cycle";
 import { dayLabel, groupByDay, rowMeta, rowTime, shiftIso } from "./format";
 import { DownloadGlyph, LockGlyph } from "./glyphs";
+import { useAppTimezone } from "../time/AppTimezone";
+import { todayIn } from "../time/zone";
 import "./HistoryTab.css";
 
 /** ADMIN-SPEC §1: every scroll column ends with 92px so content clears the tab bar. */
@@ -129,7 +130,7 @@ function StatRow({ stats }: { stats: HistoryStats }) {
   );
 }
 
-function EventRow({ row }: { row: HistoryRow }) {
+function EventRow({ row, timeZone }: { row: HistoryRow; timeZone: string }) {
   return (
     <li className="history-event" data-testid="history-row">
       <span
@@ -142,10 +143,10 @@ function EventRow({ row }: { row: HistoryRow }) {
           {row.quest_title} · {row.child_name}
         </div>
         <div className="history-event-meta" data-testid="history-meta">
-          {rowMeta(row)}
+          {rowMeta(row, timeZone)}
         </div>
       </div>
-      <span className="history-event-time">{rowTime(row)}</span>
+      <span className="history-event-time">{rowTime(row, timeZone)}</span>
     </li>
   );
 }
@@ -161,7 +162,10 @@ function FooterNote() {
   );
 }
 
-export default function HistoryTab({ today = localTodayIso() }: { today?: string }) {
+/** `today` ("YYYY-MM-DD") defaults to today in the application timezone. */
+export default function HistoryTab({ today: todayProp }: { today?: string }) {
+  const timeZone = useAppTimezone();
+  const today = todayProp ?? todayIn(timeZone);
   const [filter, setFilter] = useState<HistoryFilter>("all");
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [attempt, setAttempt] = useState(0);
@@ -244,7 +248,7 @@ export default function HistoryTab({ today = localTodayIso() }: { today?: string
       </div>
     );
   } else {
-    const groups = groupByDay(shown.data.rows);
+    const groups = groupByDay(shown.data.rows, timeZone);
     body =
       groups.length > 0 ? (
         groups.map((group) => (
@@ -252,7 +256,7 @@ export default function HistoryTab({ today = localTodayIso() }: { today?: string
             <h3 className="history-section-label">{dayLabel(group.day, today)}</h3>
             <ul className="history-card history-list">
               {group.rows.map((row, index) => (
-                <EventRow key={`${row.instance_id}-${row.event_type}-${row.occurred_at ?? ""}-${index}`} row={row} />
+                <EventRow key={`${row.instance_id}-${row.event_type}-${row.occurred_at ?? ""}-${index}`} row={row} timeZone={timeZone} />
               ))}
             </ul>
           </section>

@@ -151,7 +151,12 @@ DOCUMENTED_FIELDS = {
 
 #: A minimal panel snapshot payload for the full-setup wiring tests
 #: (the shape ``snapshot_from_api_payload`` consumes; no children).
-MINIMAL_SNAPSHOT = {"today_iso": "2026-09-23", "cycle_day": 1, "children": []}
+MINIMAL_SNAPSHOT = {
+    "today_iso": "2026-09-23",
+    "cycle_day": 1,
+    "timezone": "",
+    "children": [],
+}
 
 
 # ---------------------------------------------------------------------------

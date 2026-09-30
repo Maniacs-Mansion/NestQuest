@@ -20,7 +20,6 @@ import {
 import {
   cycleLabel,
   dayState,
-  localTodayIso,
   monthDates,
   monthStart,
   patternDaysLabel,
@@ -38,6 +37,8 @@ import {
 } from "./glyphs";
 import OverrideEditor from "./OverrideEditor";
 import PatternEditor from "./PatternEditor";
+import { useAppTimezone } from "../time/AppTimezone";
+import { todayIn } from "../time/zone";
 import "./ScheduleTab.css";
 
 /** ADMIN-SPEC §1: every scroll column ends with 92px so content clears the tab bar. */
@@ -324,11 +325,13 @@ function OverrideRow({ override, childName, deletion, onAskDelete, onKeep, onDel
 }
 
 export interface ScheduleTabProps {
-  /** "YYYY-MM-DD"; defaults to the viewer's local date. */
+  /** "YYYY-MM-DD"; defaults to today in the application timezone. */
   today?: string;
 }
 
-export default function ScheduleTab({ today = localTodayIso() }: ScheduleTabProps) {
+export default function ScheduleTab({ today: todayProp }: ScheduleTabProps) {
+  const timeZone = useAppTimezone();
+  const today = todayProp ?? todayIn(timeZone);
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [attempt, setAttempt] = useState(0);
   const [selectedId, setSelectedId] = useState<number | null>(null);

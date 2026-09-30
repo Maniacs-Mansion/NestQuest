@@ -332,6 +332,7 @@ async def test_build_snapshot_explicit_values(hass, make_entry, tmp_path) -> Non
             return {
                 "today_iso": built.today_iso,
                 "cycle_day": built.cycle_day,
+                "timezone": built.timezone,
                 "children": [
                     {
                         "child_id": child.child_id,
