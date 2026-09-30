@@ -259,8 +259,8 @@ async def materialize(
     no-past guard compares against; it is threaded into every
     :meth:`~.dao_instances.QuestInstancesDao.upsert_if_valid` write.  When
     omitted the host clock (``datetime.date.today``) is used, which is the
-    historical default.  A caller that computed the horizon in Home
-    Assistant's configured time zone MUST pass that same date here so a
+    historical default.  A caller that computed the horizon in the
+    household's application time zone MUST pass that same date here so a
     time zone behind the host around midnight is not rejected as "past".
 
     ``start_date`` is clamped up to the resolved "today" (the same
@@ -415,7 +415,7 @@ async def regenerate_for_child(
     execution-day anchor even when the call is queued across midnight.
     ``today`` optionally pins a caller-resolved household-local date, threaded
     into the delete cutoff and the re-materialization for the same
-    host-vs-HA time-zone consistency.  ``horizon_days`` sizes the
+    host-vs-household time-zone consistency.  ``horizon_days`` sizes the
     re-materialization window; when omitted it falls back to
     :data:`~.const.DEFAULT_HORIZON_DAYS`.  A bool, non-int, or sub-1 value
     raises ValueError BEFORE any delete.  Returns the number of instances
