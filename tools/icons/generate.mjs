@@ -16,13 +16,15 @@
  * Lucide circles, rects and lines are converted to path `d` strings so every
  * glyph is plain `{ viewBox, paths }` data any renderer can draw.
  *
- * Besides the curated sets, the module embeds the complete Font Awesome Free
- * Solid set (`FA_SOLID_ICONS`). Its source is the installed
+ * Besides the curated sets (the Lucide set and the Font Awesome quick picks),
+ * the module embeds the complete Font Awesome Free Solid set (`FA_SOLID_ICONS`),
+ * which is what `fa:<name>` resolves against. Its source is the installed
  * @fortawesome/free-solid-svg-icons package itself: every exported icon
  * definition, de-duplicated by canonical `iconName` (the package also exports
  * each legacy alias, e.g. faHome for `house`, as the same definition). The
  * package carries no human labels, so each label is the kebab name in Title
- * Case (`spray-can-sparkles` → "Spray Can Sparkles").
+ * Case (`spray-can-sparkles` → "Spray Can Sparkles"). Embedding the full set
+ * makes both bundles heavier: the panel bundle is about 1 MB raw / 276 kB gzip.
  */
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";

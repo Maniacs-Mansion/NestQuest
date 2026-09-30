@@ -106,7 +106,8 @@ collapse the column, the three-column rhythm is the layout.
 1. **Icon tile** 64×64, radius 10px, `--nq-p-icon-tile`, glyph 34px white — the
    definition's icon, resolved from its namespaced key (`ADMIN-SPEC.md` §3.3):
    `lucide:<name>` draws the curated Lucide glyph **stroked** (fill none, stroke-width 2,
-   round caps and joins); `fa:<name>` draws the curated Font Awesome glyph **filled**;
+   round caps and joins); `fa:<name>` draws the Font Awesome Free Solid glyph **filled** (any icon in the full
+   set, not only the quick picks);
    `emoji:<grapheme>` renders the emoji **as text**. A legacy bare name resolves as
    `lucide:<name>`. No icon, or any key that does not resolve (unknown namespace or name,
    malformed emoji), falls back to the **star** glyph. Glyph data is bundled from the

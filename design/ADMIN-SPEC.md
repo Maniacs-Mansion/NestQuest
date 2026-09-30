@@ -105,14 +105,25 @@ Each definition carries one optional icon, shown on both surfaces. The picker of
 sources:
 
 - **Lucide** — a grid of the curated Lucide glyphs, drawn stroked.
-- **Font Awesome** — a grid of a curated subset of the Font Awesome Free *solid* set,
-  drawn filled.
+- **Font Awesome** — a search over the **full** Font Awesome Free *solid* set (every
+  glyph in `@fortawesome/free-solid-svg-icons`), plus a curated quick-pick grid, all drawn
+  filled. With the search field empty the quick-pick grid shows; typing filters the full
+  set by name or label (an exact name ranks first, then name prefixes, then the rest),
+  shown 40 results per page with *Previous* / *Show more*.
+  **Free-text rule:** an admin may type a Free Solid icon name directly (trimmed,
+  case-insensitive — `Dog` stores `fa:dog`). Text that is not the exact name of a Free
+  Solid icon — a partial search, a misspelling, or a Pro or Brands name — is rejected in
+  the picker with an inline error and cannot be saved until a result is selected or the
+  full name is typed.
 - **Emoji** — a text input; the typed emoji is stored as entered (not trimmed) and must be
   1–8 code points with no whitespace, control characters, `<`, `>` or `&`.
 
-Both curated lists come from `tools/icons/curated-icons.json`; their glyph path data is
-generated into the admin and panel bundles by `tools/icons/generate.mjs` (no CDN, no
-runtime fetch). See `THIRD-PARTY-NOTICES.md` for licences.
+The curated Lucide set and the Font Awesome quick-pick list come from
+`tools/icons/curated-icons.json`; `tools/icons/generate.mjs` generates their glyph path
+data, together with the full Font Awesome Free Solid set, into the admin and panel bundles
+(no CDN, no runtime fetch). Embedding the full set makes both bundles heavier — the panel
+bundle (`nestquest-cards.js`) is about 1 MB raw / 276 kB gzip. See
+`THIRD-PARTY-NOTICES.md` for licences.
 
 The stored value is a **namespaced key**:
 

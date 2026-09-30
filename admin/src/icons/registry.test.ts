@@ -157,7 +157,7 @@ describe("offline bundling", () => {
     }
   });
 
-  it("no bundled source imports an icon package — only the curated generated data ships", () => {
+  it("no bundled source imports an icon package — only the generated registry data ships", () => {
     const sources = [join(REPO_ROOT, "admin", "src"), join(REPO_ROOT, "frontend", "src")]
       .flatMap(filesUnder)
       .filter((path) => /\.(ts|tsx)$/.test(path) && !path.endsWith(".test.ts") && !path.endsWith(".test.tsx"));
