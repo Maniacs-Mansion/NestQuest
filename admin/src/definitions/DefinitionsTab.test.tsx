@@ -1609,7 +1609,7 @@ describe("DefinitionsTab Font Awesome search", () => {
     expect(within(s).queryByRole("radiogroup", { name: "Font Awesome search results" })).toBeNull();
   });
 
-  it("a query swaps the quick picks for bounded, labelled results with Show more", async () => {
+  it("a query swaps the quick picks for one bounded, labelled page of results", async () => {
     await renderReady();
     fireEvent.click(screen.getByRole("button", { name: "New" }));
     const s = sheet();
@@ -1619,10 +1619,17 @@ describe("DefinitionsTab Font Awesome search", () => {
     expect(within(s).queryByRole("radiogroup", { name: "Font Awesome" })).toBeNull();
     expect(resultKeys(s)).toHaveLength(40);
     expect(within(results(s)).getAllByRole("radio")[0].textContent).toBe(searchFaIcons("a")[0].label);
-    expect(within(s).getByText(`Showing 40 of ${total}`)).toBeTruthy();
+    expect(within(s).getByText(`Showing 1–40 of ${total}`)).toBeTruthy();
+    expect(within(s).queryByRole("button", { name: "Previous" })).toBeNull();
 
+    // "Show more" replaces the page rather than appending to it.
+    const firstPage = resultKeys(s);
     fireEvent.click(within(s).getByRole("button", { name: "Show more" }));
-    expect(resultKeys(s)).toHaveLength(80);
+    expect(resultKeys(s)).toEqual(searchFaIcons("a").slice(40, 80).map((icon) => `fa:${icon.name}`));
+    expect(resultKeys(s).some((key) => firstPage.includes(key))).toBe(false);
+    expect(within(s).getByText(`Showing 41–80 of ${total}`)).toBeTruthy();
+    fireEvent.click(within(s).getByRole("button", { name: "Previous" }));
+    expect(resultKeys(s)).toEqual(firstPage);
 
     // A new query starts again from the first page.
     fireEvent.change(searchInput(s), { target: { value: "dog" } });
@@ -1632,6 +1639,29 @@ describe("DefinitionsTab Font Awesome search", () => {
 
     fireEvent.change(searchInput(s), { target: { value: "" } });
     expect(within(s).getByRole("radiogroup", { name: "Font Awesome" })).toBeTruthy();
+  });
+
+  it("paging through every match never mounts more than one page", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    const s = sheet();
+    fireEvent.change(searchInput(s), { target: { value: "-" } });
+    const all = searchFaIcons("-").map((icon) => `fa:${icon.name}`);
+    expect(all.length).toBeGreaterThan(900);
+
+    const seen: string[] = [];
+    for (;;) {
+      expect(results(s).children.length).toBeGreaterThan(0);
+      expect(results(s).children.length).toBeLessThanOrEqual(40);
+      seen.push(...resultKeys(s));
+      const more = within(s).queryByRole("button", { name: "Show more" });
+      if (!more) break;
+      fireEvent.click(more);
+    }
+    // Every match stays reachable, one page at a time, in order.
+    expect(seen).toEqual(all);
+    const lastStart = Math.floor((all.length - 1) / 40) * 40 + 1;
+    expect(within(s).getByText(`Showing ${lastStart}–${all.length} of ${all.length}`)).toBeTruthy();
   });
 
   it("selecting a search result POSTs fa:<name> and renders on its row", async () => {

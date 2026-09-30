@@ -642,4 +642,6 @@
 
 .defs-show-more {
   align-self: flex-start;
+  display: flex;
+  gap: 8px;
 }

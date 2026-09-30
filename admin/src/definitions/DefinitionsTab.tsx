@@ -92,7 +92,7 @@ const REPEATS_BY_RULE: Record<DefinitionRule["rule_type"], Repeats> = {
 /** How many upcoming dates the edit sheet previews. */
 const PREVIEW_COUNT = 5;
 
-/** Font Awesome search results shown at once, and added per "Show more". */
+/** Font Awesome search results per page; only one page is ever mounted. */
 const FA_RESULTS_PAGE = 40;
 
 /** Quiet period after the last rule edit before the preview is requested. */
@@ -498,7 +498,9 @@ function EditSheet({
       : target.assignees.filter((a) => !activeChildren.some((child) => child.id === a.id));
   const [pickerOpen, setPickerOpen] = useState(false);
   const faResults = useMemo(() => searchFaIcons(draft.faText), [draft.faText]);
-  const [faShown, setFaShown] = useState(FA_RESULTS_PAGE);
+  const [faPage, setFaPage] = useState(0);
+  const faStart = faPage * FA_RESULTS_PAGE;
+  const faEnd = Math.min(faStart + FA_RESULTS_PAGE, faResults.length);
   const noIcon = draft.icon === null && !draft.emoji && !draft.faText.trim();
   const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -676,7 +678,7 @@ function EditSheet({
               placeholder="Search or type an icon name, e.g. dog"
               value={draft.faText}
               onChange={(e) => {
-                setFaShown(FA_RESULTS_PAGE);
+                setFaPage(0);
                 update({ faText: e.target.value, icon: faTypedIconKey(e.target.value), emoji: "" });
               }}
             />
@@ -693,7 +695,7 @@ function EditSheet({
                     role="radiogroup"
                     aria-label="Font Awesome search results"
                   >
-                    {faResults.slice(0, faShown).map((icon) => {
+                    {faResults.slice(faStart, faEnd).map((icon) => {
                       const { name, label } = icon;
                       const on = faIconName(draft.icon) === name;
                       return (
@@ -716,16 +718,21 @@ function EditSheet({
                     })}
                   </div>
                   <p className="defs-hint">
-                    Showing {Math.min(faShown, faResults.length)} of {faResults.length}
+                    Showing {faStart + 1}–{faEnd} of {faResults.length}
                   </p>
-                  {faResults.length > faShown ? (
-                    <button
-                      type="button"
-                      className="defs-retry defs-show-more"
-                      onClick={() => setFaShown((shown) => shown + FA_RESULTS_PAGE)}
-                    >
-                      Show more
-                    </button>
+                  {faResults.length > FA_RESULTS_PAGE ? (
+                    <div className="defs-show-more">
+                      {faPage > 0 ? (
+                        <button type="button" className="defs-retry" onClick={() => setFaPage((page) => page - 1)}>
+                          Previous
+                        </button>
+                      ) : null}
+                      {faEnd < faResults.length ? (
+                        <button type="button" className="defs-retry" onClick={() => setFaPage((page) => page + 1)}>
+                          Show more
+                        </button>
+                      ) : null}
+                    </div>
                   ) : null}
                 </>
               ) : null
