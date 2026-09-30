@@ -1355,7 +1355,7 @@ describe("DefinitionsTab Font Awesome and emoji icons", () => {
     fireEvent.click(within(s).getByRole("button", { name: "Morning" }));
   }
 
-  it("ships the curated Font Awesome subset, each drawn as a filled glyph", () => {
+  it("ships the curated Font Awesome quick picks, each drawn as a filled glyph", () => {
     expect(FA_DEFINITION_ICONS.length).toBeGreaterThan(0);
     for (const entry of FA_DEFINITION_ICONS) {
       expect(entry.kind).toBe("fa");
