@@ -4,6 +4,7 @@
  */
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -53,8 +54,12 @@ import {
   emojiIconText,
   faIconKey,
   faIconName,
+  faTextProblem,
+  faTypedIconKey,
+  findDefinitionIcon,
   lucideIconKey,
   normalizeDefinitionIconName,
+  searchFaIcons,
 } from "./definitionIcons";
 import { GlyphSvg } from "../icons/GlyphSvg";
 import { weekdayOf } from "../schedule/cycle";
@@ -87,6 +92,9 @@ const REPEATS_BY_RULE: Record<DefinitionRule["rule_type"], Repeats> = {
 /** How many upcoming dates the edit sheet previews. */
 const PREVIEW_COUNT = 5;
 
+/** Font Awesome search results shown at once, and added per "Show more". */
+const FA_RESULTS_PAGE = 40;
+
 /** Quiet period after the last rule edit before the preview is requested. */
 const PREVIEW_DEBOUNCE_MS = 300;
 
@@ -101,6 +109,11 @@ interface Draft {
   icon: string | null;
   /** The emoji field's text; typing in it sets `icon` to `emoji:<text>`. */
   emoji: string;
+  /**
+   * The Font Awesome search text; typing an exact Free Solid name sets
+   * `icon` to `fa:<name>`, and picking a search result keeps the text.
+   */
+  faText: string;
   assigneeIds: number[];
   repeats: Repeats;
   interval: string;
@@ -135,6 +148,7 @@ function newDraft(activeChildren: AdminChild[], today: string): Draft {
     title: "",
     icon: null,
     emoji: "",
+    faText: "",
     assigneeIds: activeChildren.length === 1 ? [activeChildren[0].id] : [],
     repeats: "daily",
     interval: "1",
@@ -157,10 +171,13 @@ function draftFrom(definition: QuestDefinition, activeChildren: AdminChild[], to
   const active = new Set(activeChildren.map((child) => child.id));
   const dueTimes = emptyDueTimes();
   for (const w of definition.windows) dueTimes[w.window] = w.due_time ?? "";
+  const fa = findDefinitionIcon(definition.icon);
   return {
     title: definition.title,
     icon: definition.icon,
     emoji: emojiIconText(definition.icon),
+    // A Free Solid icon outside the quick picks opens as its search result.
+    faText: fa?.kind === "fa" && !FA_DEFINITION_ICONS.includes(fa) ? fa.name : "",
     // Inactive children cannot be submitted (the API rejects them with 422).
     assigneeIds: definition.assignees.map((a) => a.id).filter((id) => active.has(id)),
     repeats: REPEATS_BY_RULE[rule.rule_type],
@@ -250,6 +267,7 @@ function buildBody(draft: Draft, keepsAssignees = false): DefinitionCreateBody |
   if (draft.emoji && draft.icon === null) {
     return "Enter a single emoji (no spaces or < > &), or clear the emoji field.";
   }
+  if (draft.faText.trim() && draft.icon === null) return faTextProblem(draft.faText);
   const rule = buildRule(draft);
   if (typeof rule === "string") return rule;
   const windows: WindowEntry[] = WINDOW_ORDER.filter((w) => draft.windows.includes(w)).map(
@@ -479,6 +497,9 @@ function EditSheet({
       ? []
       : target.assignees.filter((a) => !activeChildren.some((child) => child.id === a.id));
   const [pickerOpen, setPickerOpen] = useState(false);
+  const faResults = useMemo(() => searchFaIcons(draft.faText), [draft.faText]);
+  const [faShown, setFaShown] = useState(FA_RESULTS_PAGE);
+  const noIcon = draft.icon === null && !draft.emoji && !draft.faText.trim();
   const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -619,12 +640,10 @@ function EditSheet({
               <button
                 type="button"
                 role="radio"
-                aria-checked={draft.icon === null && !draft.emoji}
+                aria-checked={noIcon}
                 aria-label="No icon"
-                className={
-                  draft.icon === null && !draft.emoji ? "defs-icon defs-icon--on" : "defs-icon"
-                }
-                onClick={() => update({ icon: null, emoji: "" })}
+                className={noIcon ? "defs-icon defs-icon--on" : "defs-icon"}
+                onClick={() => update({ icon: null, emoji: "", faText: "" })}
               >
                 <TaskGlyph size={18} />
               </button>
@@ -640,7 +659,7 @@ function EditSheet({
                     aria-label={label}
                     data-icon-option={name}
                     className={on ? "defs-icon defs-icon--on" : "defs-icon"}
-                    onClick={() => update({ icon: lucideIconKey(name), emoji: "" })}
+                    onClick={() => update({ icon: lucideIconKey(name), emoji: "", faText: "" })}
                   >
                     <GlyphSvg icon={icon} size={18} />
                   </button>
@@ -650,26 +669,88 @@ function EditSheet({
             <span className="defs-sublabel" id="defs-label-icon-fa">
               Font Awesome
             </span>
-            <div className="defs-icon-grid" role="radiogroup" aria-labelledby="defs-label-icon-fa">
-              {FA_DEFINITION_ICONS.map((icon) => {
-                const { name, label } = icon;
-                const on = faIconName(draft.icon) === name;
-                return (
-                  <button
-                    key={name}
-                    type="button"
-                    role="radio"
-                    aria-checked={on}
-                    aria-label={label}
-                    data-icon-option={faIconKey(name)}
-                    className={on ? "defs-icon defs-icon--on" : "defs-icon"}
-                    onClick={() => update({ icon: faIconKey(name), emoji: "" })}
+            <input
+              className="defs-input"
+              type="search"
+              aria-label="Search Font Awesome icons"
+              placeholder="Search or type an icon name, e.g. dog"
+              value={draft.faText}
+              onChange={(e) => {
+                setFaShown(FA_RESULTS_PAGE);
+                update({ faText: e.target.value, icon: faTypedIconKey(e.target.value), emoji: "" });
+              }}
+            />
+            {draft.faText.trim() && draft.icon === null ? (
+              <p className="defs-hint defs-hint--error" role="alert">
+                {faTextProblem(draft.faText)}
+              </p>
+            ) : null}
+            {draft.faText.trim() ? (
+              faResults.length > 0 ? (
+                <>
+                  <div
+                    className="defs-icon-grid defs-icon-grid--results"
+                    role="radiogroup"
+                    aria-label="Font Awesome search results"
                   >
-                    <GlyphSvg icon={icon} size={18} />
-                  </button>
-                );
-              })}
-            </div>
+                    {faResults.slice(0, faShown).map((icon) => {
+                      const { name, label } = icon;
+                      const on = faIconName(draft.icon) === name;
+                      return (
+                        <button
+                          key={name}
+                          type="button"
+                          role="radio"
+                          aria-checked={on}
+                          aria-label={label}
+                          data-icon-option={faIconKey(name)}
+                          className={
+                            on ? "defs-icon defs-icon-result defs-icon--on" : "defs-icon defs-icon-result"
+                          }
+                          onClick={() => update({ icon: faIconKey(name), emoji: "" })}
+                        >
+                          <GlyphSvg icon={icon} size={18} />
+                          <span className="defs-icon-label">{label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="defs-hint">
+                    Showing {Math.min(faShown, faResults.length)} of {faResults.length}
+                  </p>
+                  {faResults.length > faShown ? (
+                    <button
+                      type="button"
+                      className="defs-retry defs-show-more"
+                      onClick={() => setFaShown((shown) => shown + FA_RESULTS_PAGE)}
+                    >
+                      Show more
+                    </button>
+                  ) : null}
+                </>
+              ) : null
+            ) : (
+              <div className="defs-icon-grid" role="radiogroup" aria-labelledby="defs-label-icon-fa">
+                {FA_DEFINITION_ICONS.map((icon) => {
+                  const { name, label } = icon;
+                  const on = faIconName(draft.icon) === name;
+                  return (
+                    <button
+                      key={name}
+                      type="button"
+                      role="radio"
+                      aria-checked={on}
+                      aria-label={label}
+                      data-icon-option={faIconKey(name)}
+                      className={on ? "defs-icon defs-icon--on" : "defs-icon"}
+                      onClick={() => update({ icon: faIconKey(name), emoji: "", faText: "" })}
+                    >
+                      <GlyphSvg icon={icon} size={18} />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             <label className="defs-due">
               <span>Emoji</span>
               <input
@@ -677,7 +758,9 @@ function EditSheet({
                 aria-label="Emoji"
                 placeholder="e.g. 🐶"
                 value={draft.emoji}
-                onChange={(e) => update({ emoji: e.target.value, icon: emojiIconKey(e.target.value) })}
+                onChange={(e) =>
+                  update({ emoji: e.target.value, icon: emojiIconKey(e.target.value), faText: "" })
+                }
               />
             </label>
           </Field>

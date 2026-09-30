@@ -614,3 +614,32 @@
 .defs-emoji {
   line-height: 1;
 }
+
+/* Font Awesome search: glyph + label tiles, inline validation, paging */
+.defs-icon-grid--results {
+  grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+}
+
+.defs-icon-result {
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 4px;
+  font-family: inherit;
+}
+
+.defs-icon-label {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.defs-hint--error {
+  color: var(--nq-a-danger-strong);
+}
+
+.defs-show-more {
+  align-self: flex-start;
+}
