@@ -2,9 +2,10 @@
  * Offline generator for the shared quest-icon registry.
  *
  * Reads the curated names + labels in `curated-icons.json` (the one source of
- * truth), pulls each glyph's SVG path data from locally installed packages in
- * `admin/node_modules` (lucide-react and @fortawesome/free-solid-svg-icons —
- * no network), and writes the same TypeScript module into both bundles:
+ * truth for the quick-pick lists), pulls each glyph's SVG path data from
+ * locally installed packages in `admin/node_modules` (lucide-react and
+ * @fortawesome/free-solid-svg-icons — no network), and writes the same
+ * TypeScript module into both bundles:
  *
  *   admin/src/icons/registry.generated.ts
  *   frontend/src/icons/registry.generated.ts
@@ -14,6 +15,14 @@
  *
  * Lucide circles, rects and lines are converted to path `d` strings so every
  * glyph is plain `{ viewBox, paths }` data any renderer can draw.
+ *
+ * Besides the curated sets, the module embeds the complete Font Awesome Free
+ * Solid set (`FA_SOLID_ICONS`). Its source is the installed
+ * @fortawesome/free-solid-svg-icons package itself: every exported icon
+ * definition, de-duplicated by canonical `iconName` (the package also exports
+ * each legacy alias, e.g. faHome for `house`, as the same definition). The
+ * package carries no human labels, so each label is the kebab name in Title
+ * Case (`spray-can-sparkles` → "Spray Can Sparkles").
  */
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -89,6 +98,37 @@ function faExportName(name) {
   return "fa" + name.split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join("");
 }
 
+function faGlyph(definition, label) {
+  const { iconName: name } = definition;
+  const [width, height, , , pathData] = definition.icon;
+  const paths = Array.isArray(pathData) ? pathData.filter(Boolean) : [pathData];
+  return { kind: "fa", key: `fa:${name}`, name, label, viewBox: `0 0 ${width} ${height}`, paths };
+}
+
+function titleCase(name) {
+  return name.split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
+}
+
+/** Every Free Solid glyph, one per canonical name, sorted by name. */
+function allSolidGlyphs(faPackage) {
+  const byName = new Map();
+  for (const definition of Object.values(faPackage)) {
+    if (!definition || typeof definition !== "object" || !Array.isArray(definition.icon)) continue;
+    if (definition.prefix !== "fas") throw new Error(`fa ${definition.iconName}: unexpected prefix ${definition.prefix}`);
+    const name = definition.iconName;
+    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name)) throw new Error(`fa ${name}: not a kebab name`);
+    const seen = byName.get(name);
+    if (seen && JSON.stringify(seen.icon) !== JSON.stringify(definition.icon)) {
+      throw new Error(`fa ${name}: two exports disagree on the glyph`);
+    }
+    byName.set(name, definition);
+  }
+  if (byName.size === 0) throw new Error("fa: no icons found in @fortawesome/free-solid-svg-icons");
+  return [...byName.keys()]
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .map((name) => faGlyph(byName.get(name), titleCase(name)));
+}
+
 function checkCurated(list, namespace) {
   const seen = new Set();
   for (const { name, label } of list) {
@@ -116,11 +156,9 @@ async function buildEntries() {
   for (const { name, label } of curated.fa) {
     const definition = faPackage[faExportName(name)];
     if (!definition || definition.iconName !== name) throw new Error(`fa ${name}: not in @fortawesome/free-solid-svg-icons`);
-    const [width, height, , , pathData] = definition.icon;
-    const paths = Array.isArray(pathData) ? pathData.filter(Boolean) : [pathData];
-    fa.push({ kind: "fa", key: `fa:${name}`, name, label, viewBox: `0 0 ${width} ${height}`, paths });
+    fa.push(faGlyph(definition, label));
   }
-  return { lucide, fa };
+  return { lucide, fa, faSolid: allSolidGlyphs(faPackage) };
 }
 
 const RESOLVER = `
@@ -130,7 +168,10 @@ export const FALLBACK_ICON: FallbackIcon = { kind: "fallback", key: null };
 export const EMOJI_MAX_CODE_POINTS = 8;
 
 const LUCIDE_BY_NAME: ReadonlyMap<string, GlyphIcon> = new Map(LUCIDE_ICONS.map((icon) => [icon.name, icon]));
-const FA_BY_NAME: ReadonlyMap<string, GlyphIcon> = new Map(FA_ICONS.map((icon) => [icon.name, icon]));
+/** The full Free Solid set, with each curated entry (and its quick-pick label) taking precedence. */
+const FA_BY_NAME: ReadonlyMap<string, GlyphIcon> = new Map(
+  [...FA_SOLID_ICONS, ...FA_ICONS].map((icon) => [icon.name, icon]),
+);
 
 function isEmojiPayload(text: string): boolean {
   const codePoints = [...text];
@@ -142,7 +183,8 @@ function isEmojiPayload(text: string): boolean {
  * The renderable icon for a stored definition \`icon\` value.
  *
  * \`lucide:<name>\` and a legacy bare \`<name>\` resolve against the curated
- * Lucide set, \`fa:<name>\` against the curated Font Awesome set, and
+ * Lucide set, \`fa:<name>\` against the full Font Awesome Free Solid set
+ * (curated entries keep their quick-pick labels), and
  * \`emoji:<grapheme>\` to its text. Like the backend's
  * normalize_icon_for_read, nothing here throws: null, empty, an unknown
  * namespace or name, or a malformed emoji all resolve to FALLBACK_ICON.
@@ -162,7 +204,7 @@ export function resolveIcon(value: string | null | undefined): ResolvedIcon {
 
 /** The generated module's full text (identical for both bundles). */
 export async function renderRegistry() {
-  const { lucide, fa } = await buildEntries();
+  const { lucide, fa, faSolid } = await buildEntries();
   const source = relative(REPO_ROOT, SOURCE_PATH);
   return `// GENERATED by tools/icons/generate.mjs from ${source} — do not edit.
 // Regenerate with \`node tools/icons/generate.mjs\` (the drift tests fail if this
@@ -202,7 +244,13 @@ export type ResolvedIcon = GlyphIcon | EmojiIcon | FallbackIcon;
 
 export const LUCIDE_ICONS: readonly GlyphIcon[] = ${JSON.stringify(lucide, null, 2)};
 
+/** The curated Font Awesome quick-pick set. */
 export const FA_ICONS: readonly GlyphIcon[] = ${JSON.stringify(fa, null, 2)};
+
+/** Every Font Awesome Free Solid glyph (${faSolid.length}), sorted by name; one entry per line. */
+export const FA_SOLID_ICONS: readonly GlyphIcon[] = [
+${faSolid.map((icon) => JSON.stringify(icon)).join(",\n")}
+];
 ${RESOLVER}`;
 }
 
