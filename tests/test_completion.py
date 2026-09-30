@@ -834,7 +834,7 @@ def test_complete_instance_no_due_time_after_due_date_is_late(
 
 
 def test_complete_instance_ha_local_wall_clock_not_utc(tmp_path) -> None:
-    """HA-local 11:00 with due_time 12:00 is on time even when UTC is 19:00.
+    """Household-local 11:00, due 12:00, is on time even when UTC is 19:00.
 
     The helper's zone is UTC-8, so 11:00 local is 19:00 UTC.  Converting
     to UTC before comparing would mark this late.

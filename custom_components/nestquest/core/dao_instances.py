@@ -68,7 +68,7 @@ def _resolve_today(today: datetime.date | None) -> datetime.date:
     around midnight, so when the caller has already resolved the local
     date (``today``) that anchor is authoritative; ``None`` falls back to
     the host clock (:func:`_today`), which is exactly the previous
-    behavior for callers with no HA-local date.
+    behavior for callers with no household-local date.
     """
     return _today() if today is None else today
 
@@ -225,7 +225,7 @@ class QuestInstancesDao:
         - ``due_date`` must be TODAY or later: instances are never
           generated in the past (Feature 07).  The caller's
           materialization horizon is future-dated by definition.
-          ``today`` optionally pins the resolved HA-local date the
+          ``today`` optionally pins the resolved household-local date the
           guard compares against (falling back to the host clock when
           omitted) so a household time zone behind the host around
           midnight is not misread as "past".
@@ -248,7 +248,7 @@ class QuestInstancesDao:
         # check runs after the lock is acquired, because a caller can
         # wait on the lock across midnight — a date that was "today"
         # at call time may be "yesterday" by the time the INSERT runs.
-        # A caller-supplied ``today`` (HA-local) is used for BOTH
+        # A caller-supplied ``today`` (household-local) is used for BOTH
         # checks and never re-read, since it is already the anchor the
         # batch runs against.
         today_date = _resolve_today(today)
@@ -257,7 +257,7 @@ class QuestInstancesDao:
             async with self._database.transaction():
                 # Re-read "today" under the lock: this is the date the
                 # insert actually executes on, so the no-past rule
-                # holds across midnight rollovers.  A pinned HA-local
+                # holds across midnight rollovers.  A pinned household-local
                 # anchor is exempt from the re-read (see above).
                 if today is None:
                     today_date = _today()
@@ -364,7 +364,7 @@ class QuestInstancesDao:
         rather than raising, so the rest of the batch is unaffected.  The
         no-past rule (instances are never generated in the past) is
         preserved from :meth:`upsert` and still raises ValueError; ``today``
-        optionally pins the HA-local anchor it compares against.  An
+        optionally pins the household-local anchor it compares against.  An
         instance that ALREADY has a completion event is also skipped
         (returns ``None``) rather than raised: it is immutable, so the
         walk leaves it untouched instead of failing the batch — the
@@ -504,7 +504,7 @@ class QuestInstancesDao:
         append-only contract: an instance that was ever completed is
         never reported missed, even when later reversed — history keeps
         both rows and the sweep never mutates any).  The watermark is
-        the HA-local date the sweep last ran, and the window is
+        the household-local date the sweep last ran, and the window is
         ``[watermark, today)``: the nightly run entering day D+1 sweeps
         exactly day D's instances, so every day's quests are announced
         once — at the midnight after their due date — and a same-night
@@ -544,9 +544,10 @@ class QuestInstancesDao:
         rolling horizon from now), so a caller cannot use this to
         rewrite past open instances either — the day-rollover missed
         sweep (Feature 11) handles past-due instances instead.  ``today``
-        optionally pins the HA-local anchor the clamp compares against
-        (falling back to the host clock when omitted).  Any instance with
-        a completion event is never touched, regardless of its date.
+        optionally pins the household-local anchor the clamp compares
+        against (falling back to the host clock when omitted).  Any
+        instance with a completion event is never touched, regardless of
+        its date.
         Returns the number deleted.
         """
         _validate_date(cutoff_date, "cutoff_date")
@@ -581,8 +582,9 @@ class QuestInstancesDao:
         one transaction — an instance that gains a completion event
         mid-flight cannot be deleted.  The cutoff cannot be backdated below
         today, for the same reason as the definition-scoped method (see its
-        docstring).  ``today`` optionally pins the HA-local anchor the clamp
-        compares against (falling back to the host clock when omitted).
+        docstring).  ``today`` optionally pins the household-local anchor
+        the clamp compares against (falling back to the host clock when
+        omitted).
         Any instance with a completion event is never touched, regardless
         of its date.
 

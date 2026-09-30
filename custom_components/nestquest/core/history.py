@@ -153,7 +153,7 @@ def _validate_range(start_date: str, end_date: str) -> tuple[str, str]:
 
 
 def _resolve_today(today: datetime.date | None) -> datetime.date:
-    """Return the threaded HA-local date, or the host calendar date."""
+    """Return the threaded household-local date, or the host calendar date."""
     if today is None:
         return datetime.date.today()
     return today
@@ -283,7 +283,7 @@ async def query_history(
 
     Rows are ordered deterministically by ``due_date``, then instance,
     then event id (the per-instance append order, so a completion and
-    its reversal keep their order).  ``today`` pins the HA-local date
+    its reversal keep their order).  ``today`` pins the household-local date
     the missed derivation compares due dates against (the host calendar
     date when omitted).  The whole read runs under the task-reentrant
     connection lock — :func:`list_missed_for_child` re-enters it — so

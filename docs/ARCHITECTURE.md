@@ -99,6 +99,38 @@ A lone `home` pattern answers exactly as the old schedule did, so no
 child's presence changes. The drop is one-way and 0.7.1 refuses a
 version-9 database; see the rollback step in `deploy/RUNBOOK.md` §11.
 
+### Application timezone (manual, admin-set)
+
+The application timezone is set **manually by an admin from the admin
+app** — the Settings screen's timezone picker, which reads and writes the
+`timezone` field of `GET`/`PATCH /api/v1/admin/settings`. Nothing sets it
+automatically: there is no Home Assistant zone adoption, no browser-zone
+auto-detect, and no auto-save when a screen loads. Only an admin's `PATCH`
+ever changes the stored value.
+
+The stored value is the **single source of local-time truth for the whole
+application.** The API reads its one clock and re-expresses it in that zone
+(`NestQuestSettings.household_now`), so every local date and time comes
+from it:
+
+- the panel snapshot's today and overdue state, and both panel cards'
+  visible dates and clocks (the snapshot publishes the zone as `timezone`,
+  which the integration exposes on the household rollup sensor);
+- completion timestamps (the local completion date and the on-time check);
+- the missed-sweep scheduler's household rollover;
+- every admin read, and the admin app's local-time formatting.
+
+**Empty means the API host's local zone.** While `timezone` is empty the
+API reads its clock in the host's local time, and publishes that zone as
+the effective zone (`api/host_zone.py`: the `effective_timezone` field of
+the admin settings response and the snapshot's `timezone`) until an admin
+sets one. No code fills the empty value in.
+
+**A save re-plans the sweep.** An admin save that changes `timezone` or
+`day_rollover_time` notifies the running missed-sweep scheduler
+(`MissedSweepScheduler.settings_changed`, under its settings lock), which
+re-plans its next sweep for the new household rollover.
+
 ## 4. Authentication: two planes
 
 The kid panel and the admin PWA have opposite trust levels, so they use

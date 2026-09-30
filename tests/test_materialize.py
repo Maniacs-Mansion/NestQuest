@@ -940,14 +940,15 @@ def test_materialize_rejects_malformed_or_inverted_bounds(tmp_path) -> None:
 
 
 def test_materialize_accepts_ha_local_today_behind_host(tmp_path) -> None:
-    """The clamp and no-past guard compare against a caller-supplied HA-local today.
+    """The clamp and no-past guard compare against a caller-supplied today.
 
     A household time zone behind the host clock around midnight resolves a
-    HA-local "today" one calendar day earlier than the host's
+    household-local "today" one calendar day earlier than the host's
     ``date.today()``.  The walk clamps its start to that anchor: without
-    a pinned HA-local date the effective start is the host's today (one
-    day after ha_today), so the now-past day is skipped rather than
-    rejected, and only the host-today-onward days materialize.
+    a pinned household-local date the effective start is the host's
+    today (one day after ha_today), so the now-past day is skipped
+    rather than rejected, and only the host-today-onward days
+    materialize.
     """
     async def _body(database):
         children = ChildrenDao(database)
@@ -963,9 +964,9 @@ def test_materialize_accepts_ha_local_today_behind_host(tmp_path) -> None:
             ["morning"],
         )
 
-        # Without a pinned HA-local today, the walk clamps its start to the
-        # host's today (one day after ha_today); the past day is dropped and
-        # the 14 host-today-onward days materialize.
+        # Without a pinned household-local today, the walk clamps its start
+        # to the host's today (one day after ha_today); the past day is
+        # dropped and the 14 host-today-onward days materialize.
         without_pin = await materialize(database, start_iso, end_iso)
         assert without_pin == 14
 
