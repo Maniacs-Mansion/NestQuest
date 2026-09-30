@@ -1,5 +1,69 @@
 # NestQuest Release Notes
 
+## Version 0.9.8 — 2026-09-30
+
+### Scope
+
+Owner-directed change: the application's timezone is now **manual-only and
+admin-authoritative**. Nothing sets it automatically any more; an admin sets it
+from the admin app, and the saved value is the single source of local time for
+the whole application. This reverses the automatic Home Assistant zone adoption
+shipped in 0.9.6 and the admin app's browser-zone auto-set, and supersedes
+decision D-018 with D-019. (PRs #282, #283, #285, #286; feature
+`a3cd8e27` "Manual application timezone control".)
+
+### Behaviour
+
+- **No automatic timezone setting.** Removed: the API's adoption of Home
+  Assistant's reported zone (the `X-NestQuest-Timezone` request header and the
+  `adopt_reported_timezone` path), the integration's reporting of
+  `hass.config.time_zone`, the admin app's browser-zone auto-detect and
+  automatic save, and the `timezone_configured` marker.
+- **The admin sets it manually**, in the admin app's Preferences: a curated IANA
+  zone picker plus a free "Other IANA zone" entry, with an explicit choice for
+  empty ("API host local time"). Nothing is auto-filled or auto-saved.
+- **The saved value is authoritative across the whole application**: the panel
+  snapshot's overdue/today derivation, both panel cards' dates and clocks,
+  completion timestamps, the missed-sweep scheduler, and the admin reads all use
+  it. The API publishes the effective zone (`api/host_zone.effective_timezone`:
+  the saved value, else the API host's own zone) on the panel snapshot and the
+  admin settings response, so the panel and admin app render in the same zone.
+- **The kids' panel now follows the application zone, not the browser.** This
+  supersedes the panel-local overdue behaviour from 0.9.7; a quest is overdue
+  when the application clock says so, not when the panel device's clock does.
+- **An admin save of the timezone or the day-rollover time re-plans the running
+  missed-sweep scheduler.**
+- The integration tolerates an API snapshot without the timezone field, so the
+  integration and the API may be upgraded in either order.
+
+### Requirements
+
+- Home Assistant floor 2024.6.0 (unchanged).
+
+### Breaking changes
+
+- None to the database. The schema is unchanged at version 9: no migration and
+  no database backup is required for this release.
+- Behavioural reversal: if a timezone had been auto-set by 0.9.6–0.9.7, the
+  stored value persists after upgrading (it is simply no longer changed
+  automatically), so no action is needed unless a different zone is wanted.
+- With no timezone saved, the API host's local zone applies (UTC on the standard
+  deployment). Set the timezone in the admin Preferences for correct
+  household-local behaviour. A previously auto-set value counts as saved and
+  will be kept.
+
+### Known limitations
+
+- If no timezone has been saved, the API host zone applies; on the standard
+  UTC-host deployment, overdue and day boundaries will be wrong until an admin
+  sets the zone.
+- The admin app's timezone picker replaces any zone outside its curated list via
+  the "Other IANA zone" entry; the value is validated as an IANA name.
+
+### Rollback
+
+- No schema change: rolling back to 0.9.7 requires no database restore.
+
 ## Version 0.9.7 — 2026-09-29
 
 ### Scope

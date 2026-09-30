@@ -93,6 +93,7 @@ class FakeMonotonic:
 FIXTURE_SNAPSHOT = {
     "today_iso": _today_iso(),
     "cycle_day": 3,
+    "timezone": "",
     "children": [
         {
             "child_id": 1,
@@ -686,8 +687,8 @@ async def test_coordinator_configured_token_builds_real_client(
         hass, entry, session_factory=_session_factory
     )
     assert isinstance(real_client, NestQuestApiClient)
-    # Home Assistant's zone is reported to the API (task 6351b36d).
-    assert real_client._household_timezone == hass.config.time_zone
+    # Home Assistant's zone is not reported to the API (task 7f685179).
+    assert real_client._headers() == {"Authorization": "Bearer tok"}
 
     set_coordinator_client(entry, real_client)
     assert await async_setup_entry(hass, entry) is True
@@ -793,8 +794,37 @@ async def test_snapshot_from_api_payload_empty_household() -> None:
     """An empty household (no children) is a valid snapshot: empty
     children tuple, cycle day passes through."""
     snapshot = snapshot_from_api_payload(
-        {"today_iso": "2026-09-23", "cycle_day": 0, "children": []}
+        {
+            "today_iso": "2026-09-23",
+            "cycle_day": 0,
+            "timezone": "",
+            "children": [],
+        }
     )
     assert snapshot.children == ()
     assert snapshot.cycle_day == 0
     assert snapshot.today_iso == "2026-09-23"
+
+
+#: The panel snapshot exactly as an API from before the ``timezone`` field
+#: serves it: an integration upgraded ahead of its API still reads this.
+LEGACY_SNAPSHOT = {
+    key: value for key, value in FIXTURE_SNAPSHOT.items() if key != "timezone"
+}
+
+
+async def test_coordinator_reads_a_legacy_payload_without_timezone(
+    hass, make_entry
+) -> None:
+    """An older API omits ``timezone``: every refresh still builds the
+    snapshot (the cards then fall back to Home Assistant's zone)."""
+    assert "timezone" not in LEGACY_SNAPSHOT
+    client = StubSnapshotClient(LEGACY_SNAPSHOT)
+    _entry, coordinator = await _wire_entry(hass, make_entry, client)
+    assert coordinator.last_update_success is True
+
+    snapshot = await coordinator._async_update_data()
+    assert snapshot.timezone == ""
+    assert snapshot.cycle_day == 3
+    assert [child.child_name for child in snapshot.children] == ["Ada", "Bo"]
+    assert snapshot_from_api_payload(LEGACY_SNAPSHOT).timezone == ""

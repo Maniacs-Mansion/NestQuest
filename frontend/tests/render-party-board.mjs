@@ -3,13 +3,15 @@
  *
  * Usage: node render-party-board.mjs < spec.json
  *
- * The spec JSON carries {bundle, tag, config, hass, url?, click_plate?};
+ * The spec JSON carries {bundle, tag, config, hass, url?, click_plate?, now?};
  * stdout receives one JSON object {plates, tappable, location, html} where
  * plates is the ordered plate list the shadow DOM renders (name +
  * present/away/unknown kind), tappable the plate names rendered as tappable
  * <button> plates, and location the window pathname after the optional plate
- * tap. The Python panel tests drive this harness so the assertions run
- * against the exact bundle HACS ships.
+ * tap. With now: <ISO instant> the card's clock is pinned there
+ * (argument-less new Date() and Date.now() return it; the process TZ
+ * decides its local wall time). The Python panel tests drive this harness
+ * so the assertions run against the exact bundle HACS ships.
  */
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -38,6 +40,23 @@ globalThis.window = dom.window;
 // window; jsdom's EventTarget rejects Node's own global Event class, so the
 // jsdom Event must shadow it for the dispatched event to be delivered.
 globalThis.Event = dom.window.Event;
+
+// Pin the clock: argument-less construction and Date.now() read `pinned`,
+// every other Date use is the real class.
+if (spec.now !== undefined) {
+  const pinned = new Date(spec.now).getTime();
+  const RealDate = Date;
+  class PinnedDate extends RealDate {
+    constructor(...args) {
+      super(...(args.length === 0 ? [pinned] : args));
+    }
+    static now() {
+      return pinned;
+    }
+  }
+  globalThis.Date = PinnedDate;
+  dom.window.Date = PinnedDate;
+}
 
 await import(pathToFileURL(spec.bundle).href);
 

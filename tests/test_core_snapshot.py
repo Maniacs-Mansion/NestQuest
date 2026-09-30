@@ -136,7 +136,7 @@ async def test_build_snapshot_explicit_values(hass, make_entry, tmp_path) -> Non
 
     # Single clock read for the seed/snapshot anchor (no midnight skew);
     # the coordinator no longer owns a clock read (the API serves the
-    # snapshot), so the test resolves the HA-local zone directly.
+    # snapshot), so the test resolves its own local zone directly.
     time_zone = ZoneInfo(hass.config.time_zone)
     today = datetime.datetime.now(time_zone).date()
     # Pin the build instant at 12:00 local: past Ada's 10:00 due time
@@ -332,6 +332,7 @@ async def test_build_snapshot_explicit_values(hass, make_entry, tmp_path) -> Non
             return {
                 "today_iso": built.today_iso,
                 "cycle_day": built.cycle_day,
+                "timezone": built.timezone,
                 "children": [
                     {
                         "child_id": child.child_id,

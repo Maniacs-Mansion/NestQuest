@@ -20,15 +20,14 @@ export interface HouseholdSettings {
   /** IANA zone name (e.g. "America/New_York"); "" means the API host's local time. */
   timezone: string;
   /**
-   * True once the admin explicitly chose `timezone` (even ""); false on a
-   * fresh install, where the screen auto-sets the browser's zone. API-only:
-   * never shown in the form.
+   * Read-only: the zone the API reads its clock in — `timezone`, or the API
+   * host's own zone when that is "" ("" only when the host's zone has no name).
    */
-  timezone_configured: boolean;
+  effective_timezone: string;
 }
 
 /** Only the supplied fields are updated; the API answers with all of them. */
-export type SettingsChanges = Partial<HouseholdSettings>;
+export type SettingsChanges = Partial<Omit<HouseholdSettings, "effective_timezone">>;
 
 export const SETTINGS_PATH = "/api/v1/admin/settings";
 

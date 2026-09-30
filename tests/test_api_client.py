@@ -196,25 +196,27 @@ async def test_complete_instance_posts_body_and_headers() -> None:
     assert call["headers"]["Authorization"] == f"Bearer {TOKEN}"
 
 
-async def test_household_timezone_rides_every_request_header() -> None:
-    """Home Assistant's zone is reported so the API reads the household
-    clock (task 6351b36d); it is sent only when the client has one."""
+async def test_requests_carry_only_the_bearer_header() -> None:
+    """No timezone is reported to the API (task 7f685179): the Bearer
+    credential is the only header on every request."""
     transport = StubTransport(
         StubResponse(200, json.dumps(SNAPSHOT_PAYLOAD)),
         StubResponse(200, '{"status": "done"}'),
     )
-    client = NestQuestApiClient(
-        BASE_URL, TOKEN, transport, household_timezone="America/New_York"
-    )
+    client = make_client(transport)
 
     await client.get_snapshot()
     await client.complete_instance(42, 3)
 
     for call in transport.calls:
-        assert call["headers"] == {
-            "Authorization": f"Bearer {TOKEN}",
-            "X-NestQuest-Timezone": "America/New_York",
-        }
+        assert call["headers"] == {"Authorization": f"Bearer {TOKEN}"}
+
+
+def test_client_takes_no_household_timezone() -> None:
+    with pytest.raises(TypeError):
+        NestQuestApiClient(
+            BASE_URL, TOKEN, StubTransport(), household_timezone="UTC"
+        )
 
 
 async def test_base_url_trailing_slash_is_normalized() -> None:
@@ -413,20 +415,13 @@ def test_client_from_entry_reads_config_and_shared_session(monkeypatch) -> None:
         }
     )
 
-    hass = types.SimpleNamespace(
-        config=types.SimpleNamespace(time_zone="America/New_York")
-    )
-
-    client = api_client.client_from_entry(hass, entry)
+    # A bare object: building the client must not read hass.config.
+    client = api_client.client_from_entry(object(), entry)
 
     assert client._session is shared_session
     assert client._base_url == "http://panel.lan:8443"
     assert client._panel_token == "entry-token"
-    assert client._household_timezone == "America/New_York"
-
-
-#: A minimal hass stand-in carrying the configured time zone.
-_HASS_UTC = types.SimpleNamespace(config=types.SimpleNamespace(time_zone="UTC"))
+    assert client._headers() == {"Authorization": "Bearer entry-token"}
 
 
 def test_client_from_entry_unconfigured_token_raises_at_construction(
@@ -449,12 +444,12 @@ def test_client_from_entry_unconfigured_token_raises_at_construction(
     assert resolve_api_config(entry)[1] == DEFAULT_PANEL_TOKEN == ""
 
     with pytest.raises(ValueError, match="panel_token must be a non-empty"):
-        api_client.client_from_entry(_HASS_UTC, entry)
+        api_client.client_from_entry(object(), entry)
 
     # Same for a whitespace-only stored token: whitespace is not a token.
     entry_ws = make_config_entry(options={CONF_PANEL_TOKEN: "   "})
     with pytest.raises(ValueError, match="panel_token must be a non-empty"):
-        api_client.client_from_entry(_HASS_UTC, entry_ws)
+        api_client.client_from_entry(object(), entry_ws)
 
 
 async def test_client_logs_nothing() -> None:

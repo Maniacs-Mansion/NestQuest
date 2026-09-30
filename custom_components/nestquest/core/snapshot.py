@@ -18,7 +18,7 @@ the panel payload shaper (:func:`instance_payload`), and the async
 service's panel snapshot route share ONE implementation of both the
 snapshot assembly and the entity-facing attribute payload shape.
 Nothing here imports :mod:`homeassistant`; the builder takes the
-database, the settings object, and the HA-local ``now`` (a single
+database, the settings object, and the household-local ``now`` (a single
 clock read the caller already resolved, from which it derives
 ``today``) and returns the snapshot, mirroring exactly what the
 coordinator used to do inline.
@@ -96,6 +96,11 @@ class NestQuestSnapshot:
     today_iso: str
     children: tuple[ChildDaySnapshot, ...]
     cycle_day: int
+    #: The application timezone the admin stored (``""`` when unset —
+    #: the host's local time; the API publishes its effective zone in
+    #: its place, api/host_zone.py).  The panel cards format their
+    #: visible date and clock in it; it never re-resolves the day itself.
+    timezone: str = ""
 
 
 def _cycle_day(
@@ -182,7 +187,7 @@ async def build_snapshot(
     :func:`instance_payload` layer — this builder produces the shared
     shape both consumers read.
 
-    ``now`` is the HA-local timezone-aware datetime the caller already
+    ``now`` is the household-local timezone-aware datetime the caller already
     resolved (a SINGLE clock read); the overdue check compares
     ``now.time()`` against the instance's ``due_time`` for today's open
     instances.  The builder performs NO internal clock read — it never
@@ -319,4 +324,5 @@ async def build_snapshot(
         today_iso=today_iso,
         children=tuple(snapshots),
         cycle_day=_cycle_day(patterns, children, today),
+        timezone=settings.timezone,
     )

@@ -13,7 +13,8 @@ proven against the DATABASE the routes wrote, not a parallel copy.
 Proven per the done-condition, everything read back through the API:
 
 - ``GET /api/v1/admin/settings`` returns the current effective settings
-  — the twelve documented fields at their defaults on a fresh database.
+  — the eleven documented fields at their defaults on a fresh database,
+  with no ``timezone_configured`` marker.
 - ``PATCH /api/v1/admin/settings`` PERSISTS the supplied fields and the
   NEXT read reflects them; a later partial update merges onto the
   current effective settings (omitted fields keep their stored value),
@@ -40,6 +41,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from api import host_zone
 from tests.admin_jwt_harness import (
     ADMIN_KEY,
     KID,
@@ -59,9 +61,14 @@ _dao_meta = importlib.import_module("nestquest_core.dao_meta")
 #: independent of the core constant.
 SETTINGS_META_KEY = "settings"
 
+#: The API host's own zone, pinned for every test (:func:`settings_client`):
+#: the ``effective_timezone`` while no zone is stored.
+API_HOST_ZONE = "Australia/Perth"
+
 #: The all-defaults effective settings a fresh database reports — the
-#: documented twelve fields, asserted literally so the payload contract is
-#: pinned here, independent of the core constants.
+#: documented eleven fields plus the read-only ``effective_timezone``,
+#: asserted literally so the payload contract is pinned here, independent
+#: of the core constants.
 DEFAULT_SETTINGS = {
     "horizon_days": 14,
     "day_rollover_time": "00:00",
@@ -74,8 +81,17 @@ DEFAULT_SETTINGS = {
     "end_of_day_report_enabled": True,
     "celebration_enabled": True,
     "timezone": "",
-    "timezone_configured": False,
+    "effective_timezone": API_HOST_ZONE,
 }
+
+
+def _with_zone(zone: str) -> dict:
+    """The default settings with ``zone`` stored, as the API reports them."""
+    return {
+        **DEFAULT_SETTINGS,
+        "timezone": zone,
+        "effective_timezone": zone or API_HOST_ZONE,
+    }
 
 
 def _admin_headers() -> dict[str, str]:
@@ -84,13 +100,15 @@ def _admin_headers() -> dict[str, str]:
 
 
 @pytest.fixture
-async def settings_client(temp_db_path: str) -> SimpleNamespace:
+async def settings_client(temp_db_path: str, monkeypatch) -> SimpleNamespace:
     """An admin-plane app client plus its live database.
 
     The same runner the children tests use (stubbed JWKS, no network);
     the fixture also exposes the app's ONE database connection so tests
-    can read (or corrupt) the stored settings document itself.
+    can read (or corrupt) the stored settings document itself.  The API
+    host's zone is pinned to :data:`API_HOST_ZONE`.
     """
+    monkeypatch.setattr(host_zone, "host_timezone", lambda: API_HOST_ZONE)
     runner = AdminRunner(temp_db_path, jwks_for(ADMIN_KEY, KID))
     async with runner as client:
         yield SimpleNamespace(
@@ -105,7 +123,7 @@ async def settings_client(temp_db_path: str) -> SimpleNamespace:
 async def test_get_settings_returns_defaults_on_a_fresh_database(
     settings_client: SimpleNamespace,
 ) -> None:
-    """GET returns the twelve documented fields at their defaults."""
+    """GET returns the eleven documented fields at their defaults."""
     response = await settings_client.client.get(
         "/api/v1/admin/settings", headers=_admin_headers()
     )
@@ -147,7 +165,9 @@ async def test_update_persists_and_the_next_read_reflects_it(
         SETTINGS_META_KEY
     )
     assert raw is not None
-    assert json.loads(raw) == expected
+    stored = dict(expected)
+    del stored["effective_timezone"]  # derived on read, never stored
+    assert json.loads(raw) == stored
 
 
 async def test_partial_update_merges_onto_the_current_settings(
@@ -223,27 +243,38 @@ async def test_null_resets_a_field_to_its_default(
     assert reread.json()["horizon_days"] == 14
 
 
-async def test_timezone_configured_round_trips_with_an_explicit_empty_zone(
+async def test_default_settings_carry_no_timezone_configured_marker(
     settings_client: SimpleNamespace,
 ) -> None:
-    """An explicit empty (host-local) zone persists as configured.
+    """The removed auto-set marker is absent from the default response."""
+    response = await settings_client.client.get(
+        "/api/v1/admin/settings", headers=_admin_headers()
+    )
+    assert response.status_code == 200
+    assert "timezone_configured" not in response.json()
+    assert response.json()["timezone"] == ""
 
-    The admin clearing the zone PATCHes ``timezone: ""`` together with
-    ``timezone_configured: true``; the NEXT read — a reopened settings
-    screen — sees the marker, so the empty value is a persisted choice
-    rather than a fresh install to auto-set.
-    """
+
+@pytest.mark.parametrize("zone", ["America/New_York", ""])
+async def test_manual_timezone_patch_persists_and_is_returned(
+    settings_client: SimpleNamespace, zone: str
+) -> None:
+    """An admin's timezone PATCH is stored exactly as given and read back."""
     client = settings_client.client
-    fresh = await client.get("/api/v1/admin/settings", headers=_admin_headers())
-    assert fresh.json()["timezone_configured"] is False
+    seeded = await client.patch(
+        "/api/v1/admin/settings",
+        json={"timezone": "Europe/Dublin"},
+        headers=_admin_headers(),
+    )
+    assert seeded.status_code == 200
 
     patched = await client.patch(
         "/api/v1/admin/settings",
-        json={"timezone": "", "timezone_configured": True},
+        json={"timezone": zone},
         headers=_admin_headers(),
     )
     assert patched.status_code == 200
-    expected = {**DEFAULT_SETTINGS, "timezone_configured": True}
+    expected = _with_zone(zone)
     assert patched.json() == expected
 
     reread = await client.get(
@@ -254,7 +285,61 @@ async def test_timezone_configured_round_trips_with_an_explicit_empty_zone(
         SETTINGS_META_KEY
     )
     assert raw is not None
-    assert json.loads(raw)["timezone_configured"] is True
+    stored = json.loads(raw)
+    assert stored["timezone"] == zone
+    assert "timezone_configured" not in stored
+
+
+@pytest.mark.parametrize("zone", ["America/Los_Angeles", ""])
+async def test_timezone_alone_sticks_on_a_fresh_database(
+    settings_client: SimpleNamespace, zone: str
+) -> None:
+    """A lone ``timezone`` PATCH needs no other field to persist."""
+    client = settings_client.client
+    patched = await client.patch(
+        "/api/v1/admin/settings",
+        json={"timezone": zone},
+        headers=_admin_headers(),
+    )
+    assert patched.status_code == 200
+    reread = await client.get(
+        "/api/v1/admin/settings", headers=_admin_headers()
+    )
+    assert reread.json() == _with_zone(zone)
+
+
+async def test_timezone_configured_is_an_unknown_field(
+    settings_client: SimpleNamespace,
+) -> None:
+    """The removed marker is rejected like any unknown field; nothing is written."""
+    response = await settings_client.client.patch(
+        "/api/v1/admin/settings",
+        json={"timezone_configured": True},
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 422
+    assert "timezone_configured" in str(response.json()["detail"])
+    raw = await _dao_meta.MetaStateDao(settings_client.database).get(
+        SETTINGS_META_KEY
+    )
+    assert raw is None
+
+
+async def test_stored_legacy_timezone_configured_key_is_ignored(
+    settings_client: SimpleNamespace,
+) -> None:
+    """A document written before the marker was removed still loads."""
+    await _dao_meta.MetaStateDao(settings_client.database).set(
+        SETTINGS_META_KEY,
+        json.dumps(
+            {"timezone": "America/Chicago", "timezone_configured": True}
+        ),
+    )
+    response = await settings_client.client.get(
+        "/api/v1/admin/settings", headers=_admin_headers()
+    )
+    assert response.status_code == 200
+    assert response.json() == _with_zone("America/Chicago")
 
 
 # --- validation: rejected values never change the stored settings -------
@@ -273,8 +358,9 @@ async def test_timezone_configured_round_trips_with_an_explicit_empty_zone(
         ({"morning_summary_enabled": "yes"}, "morning_summary_enabled"),
         ({"celebration_enabled": 1}, "celebration_enabled"),
         ({"notify_target": 5}, "notify_target"),
-        ({"timezone_configured": "true"}, "timezone_configured"),
-        ({"timezone_configured": 1}, "timezone_configured"),
+        ({"timezone": "Mars/Olympus_Mons"}, "timezone"),
+        ({"timezone": "America/New York"}, "timezone"),
+        ({"timezone": 5}, "timezone"),
     ],
 )
 async def test_invalid_value_is_rejected_and_stored_settings_unchanged(
@@ -428,6 +514,13 @@ async def test_settings_routes_refuse_non_admin_and_absent_credentials(
         "/api/v1/admin/settings", json={"horizon_days": 7}
     )
     assert absent_patch.status_code == 401
+
+    forbidden_zone = await client.patch(
+        "/api/v1/admin/settings",
+        json={"timezone": "America/New_York"},
+        headers={"Authorization": f"Bearer {non_admin}"},
+    )
+    assert forbidden_zone.status_code == 403
 
     # No refused request changed anything: the settings are untouched.
     after = await client.get(

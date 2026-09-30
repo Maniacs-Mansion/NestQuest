@@ -49,7 +49,6 @@ from .const import (
     CONF_MORNING_SUMMARY_TIME,
     CONF_NOTIFY_TARGET,
     CONF_TIMEZONE,
-    CONF_TIMEZONE_CONFIGURED,
     DEFAULT_AFTERNOON_REMINDER_TIME,
     DEFAULT_AUTOMATION_ENABLED,
     DEFAULT_DAY_ROLLOVER_TIME,
@@ -57,7 +56,6 @@ from .const import (
     DEFAULT_HORIZON_DAYS,
     DEFAULT_MORNING_SUMMARY_TIME,
     DEFAULT_TIMEZONE,
-    DEFAULT_TIMEZONE_CONFIGURED,
     LOGGER,
     TIME_PATTERN,
 )
@@ -243,12 +241,6 @@ _FIELDS: tuple[tuple[str, str, Any, Callable[[Any], Any]], ...] = (
         _resolve_bool,
     ),
     ("timezone", CONF_TIMEZONE, DEFAULT_TIMEZONE, _resolve_timezone),
-    (
-        "timezone_configured",
-        CONF_TIMEZONE_CONFIGURED,
-        DEFAULT_TIMEZONE_CONFIGURED,
-        _resolve_bool,
-    ),
 )
 
 
@@ -279,10 +271,6 @@ class NestQuestSettings:
     end_of_day_report_enabled: bool = DEFAULT_AUTOMATION_ENABLED
     celebration_enabled: bool = DEFAULT_AUTOMATION_ENABLED
     timezone: str = DEFAULT_TIMEZONE
-    #: ``True`` once the admin explicitly chose :attr:`timezone` (even
-    #: the empty host-local value); ``False`` on a fresh install, where
-    #: the admin UI may auto-set the browser's zone.
-    timezone_configured: bool = DEFAULT_TIMEZONE_CONFIGURED
 
     def __post_init__(self) -> None:
         # Validate STRICTLY at construction so a hand-built instance
@@ -315,7 +303,6 @@ class NestQuestSettings:
             "afternoon_reminder_enabled",
             "end_of_day_report_enabled",
             "celebration_enabled",
-            "timezone_configured",
         ):
             value = getattr(self, name)
             if not isinstance(value, bool):
@@ -329,12 +316,11 @@ class NestQuestSettings:
 
         The API service does not run inside Home Assistant, so its one
         clock read (an aware host-local ``now``) is converted here: with
-        :attr:`timezone` set — the admin's choice, or else the zone the
-        integration reports from Home Assistant — the SAME instant is
-        re-expressed in that zone, so ``.date()`` and ``.time()`` are the
-        household's wall clock even when the host runs UTC.  With
-        :attr:`timezone` empty the instant is returned unchanged (the
-        host's local time).
+        :attr:`timezone` set — only ever by an admin, from the admin
+        app — the SAME instant is re-expressed in that zone, so
+        ``.date()`` and ``.time()`` are the household's wall clock even
+        when the host runs UTC.  With :attr:`timezone` empty the instant
+        is returned unchanged (the host's local time).
         """
         if not self.timezone:
             return instant
@@ -354,7 +340,7 @@ class NestQuestSettings:
         """Return the rolling horizon window ``[today, today + horizon_days]``.
 
         ``today`` is REQUIRED (there is no host-clock default): the
-        integration passes the HA-local ``hass.config.time_zone`` date so
+        API passes the household-local date (:meth:`household_now`) so
         the horizon tracks the household's own day, and a silent
         host-clock fallback would be a wrong-day footgun (a test or a
         caller that forgets to pass ``today`` would otherwise materialize

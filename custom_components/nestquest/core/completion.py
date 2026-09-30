@@ -10,7 +10,7 @@ un-completing (no-op if already open) is :func:`uncomplete_instance`.
 Instance current state is derived from the latest event via
 :func:`instance_state` (``open`` / ``done`` / ``missed``); there is
 no status column.  ``missed`` is derived for past-due open instances
-(``due_date`` before HA-local ``today``) and is never stored as an
+(``due_date`` before household-local ``today``) and is never stored as an
 event_type.
 
 Actor policy matches the schema CHECKs (D-008): ``actor_source`` is
@@ -71,10 +71,10 @@ def _completion_moment(
     now: datetime.datetime | None,
     today: datetime.date | None,
 ) -> tuple[datetime.date, datetime.time | None]:
-    """Return the HA-local completion date and optional wall-clock time.
+    """Return the household-local completion date and optional wall-clock time.
 
-    ``today`` is the HA-local calendar date when threaded (Feature 07
-    style).  ``now`` is a timezone-aware HA-local datetime; its wall
+    ``today`` is the household-local calendar date when threaded (Feature 07
+    style).  ``now`` is a timezone-aware household-local datetime; its wall
     clock is used as-is and is never converted to UTC.  When ``today``
     is omitted the date comes from ``now``.  When both are omitted the
     host calendar date is the Feature 07 fallback — never the UTC
@@ -98,7 +98,7 @@ def _completion_moment(
 
 
 def _resolve_today(today: datetime.date | None) -> datetime.date:
-    """Return the threaded HA-local date, or the host calendar date."""
+    """Return the threaded household-local date, or the host calendar date."""
     if today is None:
         return datetime.date.today()
     return today
@@ -138,7 +138,7 @@ def derive_state(
     Thin wrapper over :func:`_derived_state`: ``open``, ``done``, or
     ``missed`` from the latest event plus the due date (``missed`` is
     derived, never an event_type).  ``today`` is the caller-resolved
-    HA-local date.
+    household-local date.
     """
     return _derived_state(instance, latest, today)
 
@@ -345,7 +345,7 @@ async def instance_state(
     """Return ``open``, ``done``, or ``missed`` from the latest event.
 
     No events, or a latest event of uncompleted, is ``open`` unless
-    ``due_date`` is before ``today`` (HA-local, threaded), in which
+    ``due_date`` is before ``today`` (household-local, threaded), in which
     case it is ``missed``.  A latest event of completed is ``done``
     even when past due.  ``missed`` is never stored as an event_type.
     Unknown ``instance_id`` raises ValueError naming the field.
@@ -414,9 +414,9 @@ async def complete_instance(
     latest-event, and the append run under one connection lock so a
     concurrent complete cannot double-append.
 
-    ``was_on_time`` is computed from the HA-local completion moment
+    ``was_on_time`` is computed from the household-local completion moment
     (threaded ``now`` / ``today``) against the instance ``due_date``
-    and optional ``due_time``.  ``now`` is the timezone-aware HA-local
+    and optional ``due_time``.  ``now`` is the timezone-aware household-local
     datetime; its wall clock is never converted to UTC.  Same-day
     ``due_time`` comparison requires ``now``.
     """
@@ -471,7 +471,7 @@ async def uncomplete_instance(
     """Append an uncompleted event unless the instance is already open.
 
     Returns the derived state ``open``, or ``missed`` when the instance
-    is past due (``due_date`` before HA-local ``today``); ``appended``
+    is past due (``due_date`` before household-local ``today``); ``appended``
     reports whether THIS call appended (False on an already-open
     no-op).  Unknown ``instance_id`` raises ValueError naming the
     field.  Existence, latest-event, and the append run under one
@@ -529,7 +529,7 @@ async def list_missed_for_child(
     """Return the child's missed instances due in the closed date range.
 
     Missed means the latest event state is open and ``due_date`` is
-    before ``today`` (HA-local, threaded).  Uses
+    before ``today`` (household-local, threaded).  Uses
     :meth:`QuestInstancesDao.list_by_date_range` plus derived state.
     Never appends a missed event.  Instances and latest events are
     read inside the connection lock so the list is one snapshot.

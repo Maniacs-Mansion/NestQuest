@@ -39,10 +39,11 @@ ISO-8601 timestamp.  Completion payloads additionally carry
 ``was_on_time``.  No other personal data: names and titles are the
 household's own records, and nothing beyond them leaks.
 
-Timezone policy: the day-complete check needs the HA-local "today",
-which the caller passes in as a plain :class:`datetime.date`.  Nothing
-here reads ``hass.config.time_zone`` — the integration owns HA
-timezone, the core owns the calendar arithmetic.
+Timezone policy: the day-complete check needs the household-local
+"today", which the caller passes in as a plain :class:`datetime.date`.
+Nothing here reads a timezone — the API owns the clock (the
+admin-stored application timezone, or the API host's local zone when
+none is stored), the core owns the calendar arithmetic.
 """
 from __future__ import annotations
 
@@ -147,10 +148,10 @@ async def build_child_day_complete_event(
     completion of TODAY'S instance evaluates it: completing a
     back-dated or future instance must not announce a cleared day.
 
-    ``today`` is the HA-local calendar date the day-complete rule is
-    evaluated against; the integration reads it from
-    ``hass.config.time_zone`` and passes it in, so this module never
-    touches HA config.
+    ``today`` is the household-local calendar date the day-complete
+    rule is evaluated against; the API resolves it in the application
+    timezone and passes it in, so this module never reads a clock or a
+    timezone of its own.
     """
     # Only a completion of TODAY'S instance evaluates the day-complete
     # rule: completing a back-dated or future instance must not

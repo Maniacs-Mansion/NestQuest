@@ -5,9 +5,10 @@
  * household's child profiles. Every write refetches the list.
  *
  * Preferences: the household settings (planning horizon, day rollover,
- * timezone, notifications). Save patches only the changed fields. A timezone
- * the admin never chose is set once, on load, to the browser's own zone;
- * saving the timezone (even clearing it) marks it chosen, so it sticks.
+ * timezone, notifications). Save patches only the changed fields. The
+ * timezone — the application's source of local time — is only ever set by
+ * the admin picking or typing a zone here and saving it; every zone loaded
+ * or saved here is published app-wide (time/AppTimezone.tsx).
  *
  * One write at a time across both sections.
  */
@@ -35,6 +36,7 @@ import {
   type SettingsChanges,
 } from "../api/settings";
 import { FOCUSABLE, inertOutside } from "../schedule/OverrideEditor";
+import { usePublishAppTimezone } from "../time/AppTimezone";
 import { ArrowDownGlyph, ArrowUpGlyph, ChevronLeftGlyph, PlusGlyph } from "./glyphs";
 import "./SettingsScreen.css";
 
@@ -257,7 +259,7 @@ const HH_MM = /^([01]\d|2[0-3]):[0-5]\d$/;
 /** "UTC" or an IANA-looking "Area/Location" (the API checks it resolves). */
 const IANA_ZONE = /^(UTC|[A-Za-z]+(\/[A-Za-z0-9_+-]+)+)$/;
 
-/** The Timezone field's suggestions; any other IANA zone can be typed. */
+/** The Timezone picker's zones; any other IANA zone can be typed via "Other". */
 export const COMMON_TIMEZONES = [
   "UTC",
   "America/New_York",
@@ -291,18 +293,8 @@ export const COMMON_TIMEZONES = [
   "Pacific/Auckland",
 ];
 
-/**
- * The browser's own IANA zone — the location-derived default for an unset
- * household timezone — or "" when it is missing or not a usable zone name.
- */
-export function detectTimezone(): string {
-  try {
-    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    return typeof zone === "string" && zone !== "Etc/Unknown" && IANA_ZONE.test(zone) ? zone : "";
-  } catch {
-    return "";
-  }
-}
+/** The picker's "Other IANA zone…" option; never sent to the API. */
+const OTHER_ZONE = "__other__";
 
 /** The form's working copy: the number is text so it can be mid-edit. */
 type PreferencesDraft = Omit<HouseholdSettings, "horizon_days"> & { horizon_days: string };
@@ -342,9 +334,6 @@ function buildChanges(draft: PreferencesDraft, loaded: HouseholdSettings): Setti
   for (const key of Object.keys(loaded) as (keyof HouseholdSettings)[]) {
     if (next[key] !== loaded[key]) (changes as Record<string, unknown>)[key] = next[key];
   }
-  // An explicit choice — including "" (the API host's local time) — must
-  // persist, or the next load would auto-set the browser's zone over it.
-  if ("timezone" in changes) changes.timezone_configured = true;
   if (Object.keys(changes).length === 0) return "No changes to save.";
   return changes;
 }
@@ -365,6 +354,10 @@ function PreferencesForm({
 }) {
   const [draft, setDraft] = useState<PreferencesDraft>(() => preferencesDraft(settings));
   const update = (patch: Partial<PreferencesDraft>) => setDraft((d) => ({ ...d, ...patch }));
+  // A saved zone outside the curated list opens in the free-text entry.
+  const [otherZone, setOtherZone] = useState(
+    () => settings.timezone !== "" && !COMMON_TIMEZONES.includes(settings.timezone),
+  );
   const disabled = saving || locked;
 
   function submit(event: FormEvent) {
@@ -417,25 +410,49 @@ function PreferencesForm({
         />
       </label>
       {timeInput("day_rollover_time", "Day rollover")}
-      <label className="settings-field">
-        <span className="settings-label">Timezone</span>
-        <input
+      <div className="settings-field">
+        <label className="settings-label" htmlFor="settings-timezone">
+          Timezone
+        </label>
+        <select
+          id="settings-timezone"
           className="settings-input"
-          type="text"
-          list="settings-timezones"
-          placeholder="Host local time"
-          autoComplete="off"
-          spellCheck={false}
-          value={draft.timezone}
+          aria-describedby="settings-timezone-help"
+          value={otherZone ? OTHER_ZONE : draft.timezone}
           disabled={disabled}
-          onChange={(event) => update({ timezone: event.target.value })}
-        />
-      </label>
-      <datalist id="settings-timezones">
-        {COMMON_TIMEZONES.map((zone) => (
-          <option key={zone} value={zone} />
-        ))}
-      </datalist>
+          onChange={(event) => {
+            const choice = event.target.value;
+            setOtherZone(choice === OTHER_ZONE);
+            if (choice !== OTHER_ZONE) update({ timezone: choice });
+          }}
+        >
+          <option value="">API host local time (no zone set)</option>
+          {COMMON_TIMEZONES.map((zone) => (
+            <option key={zone} value={zone}>
+              {zone}
+            </option>
+          ))}
+          <option value={OTHER_ZONE}>Other IANA zone…</option>
+        </select>
+        {otherZone ? (
+          <input
+            className="settings-input"
+            type="text"
+            aria-label="Other timezone"
+            placeholder="Area/Location, e.g. America/Boise"
+            autoComplete="off"
+            spellCheck={false}
+            value={draft.timezone}
+            disabled={disabled}
+            onChange={(event) => update({ timezone: event.target.value })}
+          />
+        ) : null}
+        <p className="settings-hint" id="settings-timezone-help">
+          The application timezone: the source of local time for the panel, the scheduler and this
+          admin app. It changes only when you save it here; with no zone set, the API host&apos;s
+          local time is used.
+        </p>
+      </div>
       <label className="settings-field">
         <span className="settings-label">Notify target</span>
         <input
@@ -574,12 +591,11 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
   } | null>(null);
   // A ref, not state: two taps in one frame must not both see `busy === null`.
   const inFlight = useRef(false);
-  // The never-chosen-timezone auto-set fires at most once per screen.
-  const timezoneAutoSet = useRef(false);
   const screenRef = useRef<HTMLDivElement>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const addRef = useRef<HTMLButtonElement>(null);
   const formWasOpen = useRef(false);
+  const publishTimezone = usePublishAppTimezone();
 
   // Modal focus: move in on open, keep the background out of reach, and hand
   // focus back to the opener (the Settings button) on close.
@@ -620,29 +636,10 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
     let cancelled = false;
     setPreferences({ kind: "loading" });
     fetchSettings()
-      .then(async (settings) => {
+      .then((settings) => {
         if (cancelled) return;
-        // Never chosen: adopt the browser's zone before the form shows, so
-        // nothing the admin enters can be overwritten by it. An empty zone the
-        // admin chose (timezone_configured) is left alone.
-        const unchosen = settings.timezone === "" && !settings.timezone_configured;
-        const detected = unchosen ? detectTimezone() : "";
-        if (!detected || timezoneAutoSet.current) {
-          setPreferences({ kind: "ready", settings });
-          return;
-        }
-        timezoneAutoSet.current = true;
-        try {
-          const saved = await updateSettings({ timezone: detected, timezone_configured: true });
-          if (!cancelled) setPreferences({ kind: "ready", settings: saved });
-        } catch (error) {
-          if (cancelled) return;
-          setPreferences({ kind: "ready", settings });
-          setPreferencesMessage({
-            kind: "error",
-            text: errorMessage(error, `The timezone could not be set to ${detected}`),
-          });
-        }
+        setPreferences({ kind: "ready", settings });
+        publishTimezone(settings.effective_timezone);
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -736,6 +733,7 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
     try {
       const settings = await updateSettings(changes);
       setPreferences({ kind: "ready", settings });
+      publishTimezone(settings.effective_timezone);
       setPreferencesMessage({ kind: "info", text: "Preferences saved." });
     } catch (error) {
       setPreferencesMessage({

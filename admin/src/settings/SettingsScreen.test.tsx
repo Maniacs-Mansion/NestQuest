@@ -6,6 +6,7 @@ import SettingsScreen, { SCROLL_BOTTOM_PADDING } from "./SettingsScreen";
 import type { AdminChild } from "../api/definitions";
 import type { HouseholdSettings } from "../api/settings";
 import { storeTokens } from "../auth/oidc";
+import { AppTimezoneProvider, useAppTimezone } from "../time/AppTimezone";
 
 const CHILDREN_PATH = "/api/v1/admin/children";
 const REORDER_PATH = `${CHILDREN_PATH}/reorder`;
@@ -23,8 +24,16 @@ const DEFAULT_SETTINGS: HouseholdSettings = {
   end_of_day_report_enabled: true,
   celebration_enabled: false,
   timezone: "America/Chicago",
-  timezone_configured: true,
+  effective_timezone: "America/Chicago",
 };
+
+/** The API host's own zone: the effective zone while none is stored. */
+const API_HOST_ZONE = "Europe/London";
+
+/** The settings as the API answers: `effective_timezone` derived like the API's. */
+function settingsBody(): HouseholdSettings {
+  return { ...settings, effective_timezone: settings.timezone || API_HOST_ZONE };
+}
 
 function child(
   id: number,
@@ -83,10 +92,10 @@ async function routeFetch(url: string, init: RequestInit = {}): Promise<Response
     return respond();
   }
   if (path === CHILDREN_PATH && method === "GET") return jsonResponse({ children });
-  if (path === SETTINGS_PATH && method === "GET") return jsonResponse(settings);
+  if (path === SETTINGS_PATH && method === "GET") return jsonResponse(settingsBody());
   if (path === SETTINGS_PATH && method === "PATCH") {
     settings = { ...settings, ...body };
-    return jsonResponse(settings);
+    return jsonResponse(settingsBody());
   }
   if (path === CHILDREN_PATH && method === "POST") {
     const created = child(9, body.display_name, body.sort_order ?? 0, {
@@ -500,37 +509,37 @@ describe("SettingsScreen — preferences", () => {
     expect(writes()).toHaveLength(1);
   });
 
-  it("a changed timezone patches exactly the timezone", async () => {
+  it("a timezone picked from the list patches exactly the timezone", async () => {
     const { form } = await renderPreferences();
-    const input = field(form, "Timezone");
-    expect(input.getAttribute("list")).toBe("settings-timezones");
-    fireEvent.change(input, { target: { value: " Europe/London " } });
+    fireEvent.change(field(form, "Timezone"), { target: { value: "America/New_York" } });
     save(form);
     await screen.findByText("Preferences saved.");
     expect(writes()).toEqual([
-      { method: "PATCH", path: SETTINGS_PATH, body: { timezone: "Europe/London", timezone_configured: true } },
+      { method: "PATCH", path: SETTINGS_PATH, body: { timezone: "America/New_York" } },
     ]);
     const reloaded = screen.getByRole("form", { name: "Preferences" });
-    expect(field(reloaded, "Timezone").value).toBe("Europe/London");
+    expect(field(reloaded, "Timezone").value).toBe("America/New_York");
   });
 
   it.each(["New York", "America/New York", "EST5EDT?", "/Chicago"])(
-    "an invalid timezone %j is rejected before any request",
+    "an invalid other timezone %j is rejected before any request",
     async (value) => {
       const { form } = await renderPreferences();
-      fireEvent.change(field(form, "Timezone"), { target: { value } });
+      fireEvent.change(field(form, "Timezone"), { target: { value: "__other__" } });
+      fireEvent.change(field(form, "Other timezone"), { target: { value } });
       save(form);
       expect(screen.getByTestId("preferences-message").textContent).toBe(
         "Timezone must be an IANA zone like America/New_York, or UTC.",
       );
-      expect(field(form, "Timezone").value).toBe(value);
+      expect(field(form, "Other timezone").value).toBe(value);
       expect(writes()).toEqual([]);
     },
   );
 
   it("a 422 on an unknown timezone shows the API detail and keeps the edit", async () => {
     const { form } = await renderPreferences();
-    fireEvent.change(field(form, "Timezone"), { target: { value: "Mars/Olympus_Mons" } });
+    fireEvent.change(field(form, "Timezone"), { target: { value: "__other__" } });
+    fireEvent.change(field(form, "Other timezone"), { target: { value: "Mars/Olympus_Mons" } });
     writeResponse = () =>
       jsonResponse({ detail: "timezone must be an IANA time zone name such as 'America/New_York'" }, 422);
     save(form);
@@ -538,8 +547,9 @@ describe("SettingsScreen — preferences", () => {
     expect(message.textContent).toBe(
       "The preferences could not be saved: timezone must be an IANA time zone name such as 'America/New_York'",
     );
-    expect(field(form, "Timezone").value).toBe("Mars/Olympus_Mons");
-    expect(field(form, "Timezone").disabled).toBe(false);
+    expect(field(form, "Other timezone").value).toBe("Mars/Olympus_Mons");
+    expect(field(form, "Other timezone").disabled).toBe(false);
+    expect(settings.timezone).toBe("America/Chicago");
   });
 
   it("a failed load shows the reason and Try again refetches", async () => {
@@ -559,7 +569,7 @@ describe("SettingsScreen — preferences", () => {
   });
 });
 
-describe("SettingsScreen — timezone auto-set", () => {
+describe("SettingsScreen — no timezone auto-set", () => {
   let zoneSpy: ReturnType<typeof vi.spyOn> | null;
 
   function mockBrowserZone(timeZone: string | undefined) {
@@ -575,8 +585,8 @@ describe("SettingsScreen — timezone auto-set", () => {
     sessionStorage.clear();
     storeTokens({ access_token: "at-123", expires_in: 600 });
     children = [child(1, "Declan", 1)];
-    // A fresh install: no zone, and the admin never chose one.
-    settings = { ...DEFAULT_SETTINGS, timezone: "", timezone_configured: false };
+    // A fresh install: no zone stored.
+    settings = { ...DEFAULT_SETTINGS, timezone: "" };
     writeResponse = null;
     zoneSpy = null;
     fetchMock = vi.fn(async (url: string, init?: RequestInit) => routeFetch(url, init));
@@ -595,25 +605,15 @@ describe("SettingsScreen — timezone auto-set", () => {
     return screen.findByRole("form", { name: "Preferences" });
   }
 
-  it("an unset timezone is set once, on load, to the browser's zone and shown", async () => {
+  it("an empty timezone stays empty on load and nothing is written", async () => {
     mockBrowserZone("America/New_York");
     const form = await renderForm();
-    expect(field(form, "Timezone").value).toBe("America/New_York");
-    expect(writes()).toEqual([
-      { method: "PATCH", path: SETTINGS_PATH, body: { timezone: "America/New_York", timezone_configured: true } },
-    ]);
-    expect(settings.timezone).toBe("America/New_York");
-    expect(settings.timezone_configured).toBe(true);
-
-    // A later save of another field does not re-send the timezone.
-    fireEvent.change(field(form, "Planning horizon (days)"), { target: { value: "21" } });
-    fireEvent.click(within(form).getByRole("button", { name: "Save preferences" }));
-    await screen.findByText("Preferences saved.");
-    expect(writes()).toHaveLength(2);
-    expect(writes()[1].body).toEqual({ horizon_days: 21 });
+    expect(field(form, "Timezone").value).toBe("");
+    expect(writes()).toEqual([]);
+    expect(settings.timezone).toBe("");
   });
 
-  it("StrictMode's doubled effects still auto-set exactly once", async () => {
+  it("StrictMode's doubled effects write nothing either", async () => {
     mockBrowserZone("America/New_York");
     render(
       <StrictMode>
@@ -621,70 +621,223 @@ describe("SettingsScreen — timezone auto-set", () => {
       </StrictMode>,
     );
     const form = await screen.findByRole("form", { name: "Preferences" });
-    expect(field(form, "Timezone").value).toBe("America/New_York");
-    expect(writes()).toEqual([
-      { method: "PATCH", path: SETTINGS_PATH, body: { timezone: "America/New_York", timezone_configured: true } },
-    ]);
-  });
-
-  it("an admin clearing the timezone is not re-set by the browser zone, even after a reopen", async () => {
-    mockBrowserZone("America/New_York");
-    const form = await renderForm();
-    fireEvent.change(field(form, "Timezone"), { target: { value: "" } });
-    fireEvent.click(within(form).getByRole("button", { name: "Save preferences" }));
-    await screen.findByText("Preferences saved.");
-    expect(writes().map((w) => w.body)).toEqual([
-      { timezone: "America/New_York", timezone_configured: true },
-      { timezone: "", timezone_configured: true },
-    ]);
-    const reloaded = screen.getByRole("form", { name: "Preferences" });
-    expect(field(reloaded, "Timezone").value).toBe("");
-
-    // Close and reopen: the screen re-fetches "" but the choice persisted.
-    cleanup();
-    const reopened = await renderForm();
-    expect(field(reopened, "Timezone").value).toBe("");
-    expect(writes()).toHaveLength(2);
-  });
-
-  it("an empty timezone the admin chose is never auto-set", async () => {
-    mockBrowserZone("America/New_York");
-    settings = { ...settings, timezone_configured: true };
-    const form = await renderForm();
     expect(field(form, "Timezone").value).toBe("");
     expect(writes()).toEqual([]);
   });
 
-  it("a set timezone is shown and never overwritten by the browser zone", async () => {
+  it("a stored timezone is shown as stored, never replaced by the browser zone", async () => {
     mockBrowserZone("America/New_York");
-    settings = { ...DEFAULT_SETTINGS, timezone: "Europe/Dublin", timezone_configured: false };
+    settings = { ...DEFAULT_SETTINGS, timezone: "Europe/Dublin" };
     const form = await renderForm();
     expect(field(form, "Timezone").value).toBe("Europe/Dublin");
     expect(writes()).toEqual([]);
   });
 
-  it.each([
-    ["nothing", undefined],
-    ["an empty zone", ""],
-    ["an unknown zone", "Etc/Unknown"],
-    ["a non-IANA zone", "not a zone"],
-  ])("detection returning %s leaves the field empty and sends nothing", async (_case, zone) => {
-    mockBrowserZone(zone);
+  it("saving another field sends only that field, never a timezone", async () => {
+    mockBrowserZone("America/New_York");
     const form = await renderForm();
-    expect(field(form, "Timezone").value).toBe("");
-    expect(screen.queryByTestId("preferences-message")).toBeNull();
+    fireEvent.change(field(form, "Planning horizon (days)"), { target: { value: "21" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save preferences" }));
+    await screen.findByText("Preferences saved.");
+    expect(writes().map((w) => w.body)).toEqual([{ horizon_days: 21 }]);
+    expect(settings.timezone).toBe("");
+  });
+
+  it("an admin clearing the timezone saves exactly the empty zone", async () => {
+    mockBrowserZone("America/New_York");
+    settings = { ...DEFAULT_SETTINGS, timezone: "Europe/Dublin" };
+    const form = await renderForm();
+    fireEvent.change(field(form, "Timezone"), { target: { value: "" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save preferences" }));
+    await screen.findByText("Preferences saved.");
+    expect(writes().map((w) => w.body)).toEqual([{ timezone: "" }]);
+    expect(field(screen.getByRole("form", { name: "Preferences" }), "Timezone").value).toBe("");
+  });
+});
+
+describe("SettingsScreen — manual timezone control", () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+    children = [child(1, "Declan", 1)];
+    settings = { ...DEFAULT_SETTINGS, timezone: "" };
+    writeResponse = null;
+    fetchMock = vi.fn(async (url: string, init?: RequestInit) => routeFetch(url, init));
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  async function renderForm() {
+    render(<SettingsScreen onClose={vi.fn()} />);
+    await screen.findByTestId("settings-child-1");
+    return screen.findByRole("form", { name: "Preferences" });
+  }
+
+  function save(form: HTMLElement) {
+    fireEvent.click(within(form).getByRole("button", { name: "Save preferences" }));
+  }
+
+  /** The Timezone control, which must be a real select, not a free-text box. */
+  function picker(form: HTMLElement): HTMLSelectElement {
+    const control = within(form).getByRole("combobox", { name: "Timezone" });
+    expect(control).toBeInstanceOf(HTMLSelectElement);
+    return control as HTMLSelectElement;
+  }
+
+  it("is a picker of curated zones with host-local and other-zone choices", async () => {
+    const form = await renderForm();
+    const select = picker(form);
+    const values = Array.from(select.options).map((o) => o.value);
+    expect(values[0]).toBe("");
+    expect(select.options[0].textContent).toBe("API host local time (no zone set)");
+    for (const zone of [
+      "UTC",
+      "America/New_York",
+      "America/Chicago",
+      "America/Denver",
+      "America/Phoenix",
+      "America/Los_Angeles",
+      "America/Anchorage",
+      "Pacific/Honolulu",
+    ]) {
+      expect(values).toContain(zone);
+    }
+    expect(select.options[select.options.length - 1].textContent).toBe("Other IANA zone…");
+    expect(select.value).toBe("");
+    expect(within(form).queryByLabelText("Other timezone")).toBeNull();
+  });
+
+  it("explains that it is the application timezone for every surface", async () => {
+    const form = await renderForm();
+    const help = document.getElementById(picker(form).getAttribute("aria-describedby") ?? "");
+    expect(help?.textContent).toMatch(/application timezone/);
+    expect(help?.textContent).toMatch(/panel, the scheduler and this admin app/);
+    expect(help?.textContent).toMatch(/API host's local time/);
+  });
+
+  it("a picked zone saves via PATCH and is shown after a reload", async () => {
+    const form = await renderForm();
+    expect(writes()).toEqual([]);
+    fireEvent.change(picker(form), { target: { value: "America/New_York" } });
+    save(form);
+    await screen.findByText("Preferences saved.");
+    expect(writes()).toEqual([
+      { method: "PATCH", path: SETTINGS_PATH, body: { timezone: "America/New_York" } },
+    ]);
+    cleanup();
+    const reloaded = await renderForm();
+    expect(picker(reloaded).value).toBe("America/New_York");
+    expect(writes()).toHaveLength(1);
+  });
+
+  it("an other zone typed by hand saves via PATCH and is shown after a reload", async () => {
+    const form = await renderForm();
+    fireEvent.change(picker(form), { target: { value: "__other__" } });
+    const entry = within(form).getByLabelText("Other timezone") as HTMLInputElement;
+    expect(entry.value).toBe("");
+    fireEvent.change(entry, { target: { value: " America/Boise " } });
+    save(form);
+    await screen.findByText("Preferences saved.");
+    expect(writes()).toEqual([
+      { method: "PATCH", path: SETTINGS_PATH, body: { timezone: "America/Boise" } },
+    ]);
+    cleanup();
+    const reloaded = await renderForm();
+    expect(picker(reloaded).value).toBe("__other__");
+    expect((within(reloaded).getByLabelText("Other timezone") as HTMLInputElement).value).toBe(
+      "America/Boise",
+    );
+  });
+
+  it("a saved zone outside the list is shown in the other-zone entry on load", async () => {
+    settings = { ...DEFAULT_SETTINGS, timezone: "Asia/Kathmandu" };
+    const form = await renderForm();
+    expect(picker(form).value).toBe("__other__");
+    expect((within(form).getByLabelText("Other timezone") as HTMLInputElement).value).toBe(
+      "Asia/Kathmandu",
+    );
     expect(writes()).toEqual([]);
   });
 
-  it("a rejected auto-set shows why and leaves the field empty for manual entry", async () => {
-    mockBrowserZone("America/New_York");
-    writeResponse = () => jsonResponse({ detail: "timezone is not known" }, 422);
+  it("choosing API host local time clears the zone and persists after a reload", async () => {
+    settings = { ...DEFAULT_SETTINGS, timezone: "America/Denver" };
     const form = await renderForm();
-    expect(field(form, "Timezone").value).toBe("");
-    expect(field(form, "Timezone").disabled).toBe(false);
-    expect(screen.getByTestId("preferences-message").textContent).toBe(
-      "The timezone could not be set to America/New_York: timezone is not known",
+    expect(picker(form).value).toBe("America/Denver");
+    fireEvent.change(picker(form), { target: { value: "" } });
+    save(form);
+    await screen.findByText("Preferences saved.");
+    expect(writes().map((w) => w.body)).toEqual([{ timezone: "" }]);
+    cleanup();
+    const reloaded = await renderForm();
+    expect(picker(reloaded).value).toBe("");
+  });
+
+  it("picking a zone and then the saved one again sends nothing", async () => {
+    settings = { ...DEFAULT_SETTINGS, timezone: "UTC" };
+    const form = await renderForm();
+    fireEvent.change(picker(form), { target: { value: "Europe/Paris" } });
+    fireEvent.change(picker(form), { target: { value: "UTC" } });
+    save(form);
+    expect(screen.getByTestId("preferences-message").textContent).toBe("No changes to save.");
+    expect(writes()).toEqual([]);
+  });
+
+  it("never sends a timezone_configured field", async () => {
+    const form = await renderForm();
+    fireEvent.change(picker(form), { target: { value: "America/Los_Angeles" } });
+    save(form);
+    await screen.findByText("Preferences saved.");
+    const again = screen.getByRole("form", { name: "Preferences" });
+    fireEvent.change(picker(again), { target: { value: "" } });
+    save(again);
+    await waitFor(() => expect(writes()).toHaveLength(2));
+    for (const write of writes()) {
+      expect(Object.keys(write.body as object)).toEqual(["timezone"]);
+      expect(write.body).not.toHaveProperty("timezone_configured");
+    }
+  });
+});
+
+describe("SettingsScreen — the saved zone applies app-wide", () => {
+  function ZoneProbe() {
+    return <output data-testid="app-zone">{useAppTimezone() || "(browser)"}</output>;
+  }
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+    children = [child(1, "Declan", 1)];
+    settings = { ...DEFAULT_SETTINGS, timezone: "" };
+    writeResponse = null;
+    fetchMock = vi.fn(async (url: string, init?: RequestInit) => routeFetch(url, init));
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("a saved zone becomes the application timezone at once", async () => {
+    render(
+      <AppTimezoneProvider>
+        <ZoneProbe />
+        <SettingsScreen onClose={vi.fn()} />
+      </AppTimezoneProvider>,
     );
-    expect(writes()).toHaveLength(1);
+    const form = await screen.findByRole("form", { name: "Preferences" });
+    // No zone stored: the application runs in the API host's zone.
+    expect(screen.getByTestId("app-zone").textContent).toBe(API_HOST_ZONE);
+
+    fireEvent.change(within(form).getByRole("combobox", { name: "Timezone" }), {
+      target: { value: "America/New_York" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Save preferences" }));
+    await screen.findByText("Preferences saved.");
+    expect(screen.getByTestId("app-zone").textContent).toBe("America/New_York");
   });
 });

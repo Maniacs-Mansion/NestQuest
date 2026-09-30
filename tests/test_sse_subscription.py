@@ -151,7 +151,12 @@ DOCUMENTED_FIELDS = {
 
 #: A minimal panel snapshot payload for the full-setup wiring tests
 #: (the shape ``snapshot_from_api_payload`` consumes; no children).
-MINIMAL_SNAPSHOT = {"today_iso": "2026-09-23", "cycle_day": 1, "children": []}
+MINIMAL_SNAPSHOT = {
+    "today_iso": "2026-09-23",
+    "cycle_day": 1,
+    "timezone": "",
+    "children": [],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -349,24 +354,6 @@ async def test_stream_events_yields_documented_frames_and_sends_bearer() -> None
     assert call["url"] == f"{BASE_URL}/api/v1/panel/events"
     assert call["headers"] == {"Authorization": f"Bearer {TOKEN}"}
     assert call["json"] is None
-
-
-async def test_stream_events_reports_household_timezone() -> None:
-    """The SSE GET carries Home Assistant's zone beside the Bearer token
-    (task 6351b36d), like the snapshot and completion requests."""
-    frame = _frame_text(*DOCUMENTED_FRAMES[0])
-    transport = _StreamTransport(_StreamingResponse(200, [frame]))
-    client = NestQuestApiClient(
-        BASE_URL, TOKEN, transport, household_timezone="America/New_York"
-    )
-
-    frames = [frame async for frame in client.stream_events()]
-
-    assert frames == [DOCUMENTED_FRAMES[0]]
-    assert transport.calls[0]["headers"] == {
-        "Authorization": f"Bearer {TOKEN}",
-        "X-NestQuest-Timezone": "America/New_York",
-    }
 
 
 async def test_stream_events_buffers_lines_across_chunks_and_joins_data() -> None:

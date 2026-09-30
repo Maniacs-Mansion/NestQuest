@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import ScheduleTab from "./ScheduleTab";
 import type { AdminChild } from "../api/definitions";
 import type { PresenceOverride, PresencePattern } from "../api/presence";
 import { storeTokens } from "../auth/oidc";
+import { AppTimezoneProvider } from "../time/AppTimezone";
 import { cycleWeekIndex, monthDates, weekdayOf } from "./cycle";
 
 function child(id: number, display_name: string, sort_order: number, is_active = true): AdminChild {
@@ -653,5 +654,57 @@ describe("ScheduleTab", () => {
     expect(error.textContent).toContain("could not be loaded");
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByTestId("pattern-1")).toBeTruthy();
+  });
+});
+
+describe("ScheduleTab today in the stored application timezone", () => {
+  async function renderWithZone(timezone: string, effective_timezone = timezone) {
+    fetchMock = vi.fn(async (url: string, init?: RequestInit) =>
+      String(url).endsWith("/api/v1/admin/settings")
+        ? jsonResponse({ timezone, effective_timezone })
+        : routeFetch(url, init),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <AppTimezoneProvider>
+        <ScheduleTab />
+      </AppTimezoneProvider>,
+    );
+    await screen.findByTestId("pattern-1");
+  }
+
+  beforeAll(() => {
+    vi.stubEnv("TZ", "UTC");
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+  });
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+    patterns = { 1: [DECLAN_HOME], 2: [MAEVE_THU_FRI, MAEVE_WEEKENDS], 3: [] };
+    writeFailure = null;
+    // 13:00 UTC on Sep 23 is already 01:00 on Sep 24 in Auckland.
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-09-23T13:00:00Z") });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("marks today in the stored zone", async () => {
+    await renderWithZone("Pacific/Auckland");
+    expect(day("2026-09-24").className).toContain("schedule-day--today");
+    expect(day("2026-09-23").className).not.toContain("schedule-day--today");
+  });
+
+  it("an empty stored zone marks today in the API host's published zone", async () => {
+    await renderWithZone("", "Pacific/Auckland");
+    expect(day("2026-09-24").className).toContain("schedule-day--today");
+    expect(day("2026-09-23").className).not.toContain("schedule-day--today");
   });
 });

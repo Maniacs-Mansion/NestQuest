@@ -910,6 +910,7 @@ def coordinator_client_from_test_override():
             {
                 "today_iso": datetime.date.today().isoformat(),
                 "cycle_day": 0,
+                "timezone": "",
                 "children": [],
             }
         )
@@ -1016,8 +1017,8 @@ def make_hass() -> tuple:
     hass.bus = EventBus()
     hass.http = HttpRegistry()
     hass.extra_js_urls: list[str] = []
-    # A valid IANA time zone (the day-rollover listener reads it to
-    # compute "today" in HA local time).
+    # A valid IANA time zone for the fake Home Assistant config (the
+    # NestQuest application timezone is the admin-set setting, not this).
     hass.config.time_zone = "UTC"
 
     # The minimal entity registry: entities self-register through
