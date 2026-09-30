@@ -8,7 +8,13 @@
  * and a legacy bare `<kebab-name>` still names the same Lucide entry.
  */
 import { GlyphSvg } from "../icons/GlyphSvg";
-import { FA_ICONS, LUCIDE_ICONS, resolveIcon, type GlyphIcon } from "../icons/registry.generated";
+import {
+  FA_ICONS,
+  FA_SOLID_ICONS,
+  LUCIDE_ICONS,
+  resolveIcon,
+  type GlyphIcon,
+} from "../icons/registry.generated";
 import { TaskGlyph } from "./glyphs";
 
 export type DefinitionIconEntry = GlyphIcon;
@@ -56,6 +62,41 @@ export function normalizeDefinitionIconName(value: string | null): string | null
 /** The Font Awesome name an `fa:<name>` value refers to; anything else gives null. */
 export function faIconName(value: string | null): string | null {
   return value?.startsWith(FA_PREFIX) ? value.slice(FA_PREFIX.length) : null;
+}
+
+/**
+ * The Font Awesome Free Solid icons whose name or label contains `query`
+ * (trimmed, case-insensitive): an exact name first, then name-prefix
+ * matches, then the rest, each in registry (name) order. An empty query
+ * gives no results — the curated quick picks cover that case.
+ */
+export function searchFaIcons(query: string): DefinitionIconEntry[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const rank = (icon: DefinitionIconEntry) => (icon.name === q ? 0 : icon.name.startsWith(q) ? 1 : 2);
+  return FA_SOLID_ICONS.filter(
+    (icon) => icon.name.includes(q) || icon.label.toLowerCase().includes(q),
+  ).sort((a, b) => rank(a) - rank(b));
+}
+
+/**
+ * The stored key for a typed Font Awesome name, e.g. `Dog` → `fa:dog`: the
+ * trimmed, lower-cased text must be the exact name of a Free Solid icon,
+ * else null (a misspelling, a partial search, or a Pro/Brands name).
+ */
+export function faTypedIconKey(text: string): string | null {
+  const key = faIconKey(text.trim().toLowerCase());
+  return resolveIcon(key).kind === "fa" ? key : null;
+}
+
+/**
+ * Why Font Awesome search text cannot be saved as it stands: it matches
+ * icons but names none of them, or it matches nothing in the Free Solid set.
+ */
+export function faTextProblem(text: string): string {
+  return searchFaIcons(text).length > 0
+    ? "Select a Font Awesome icon from the results, or type its full name."
+    : `“${text.trim()}” is not a Font Awesome Free Solid icon.`;
 }
 
 /** The emoji text an `emoji:<grapheme>` value holds; anything else gives "". */
