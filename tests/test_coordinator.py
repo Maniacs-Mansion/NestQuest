@@ -804,3 +804,27 @@ async def test_snapshot_from_api_payload_empty_household() -> None:
     assert snapshot.children == ()
     assert snapshot.cycle_day == 0
     assert snapshot.today_iso == "2026-09-23"
+
+
+#: The panel snapshot exactly as an API from before the ``timezone`` field
+#: serves it: an integration upgraded ahead of its API still reads this.
+LEGACY_SNAPSHOT = {
+    key: value for key, value in FIXTURE_SNAPSHOT.items() if key != "timezone"
+}
+
+
+async def test_coordinator_reads_a_legacy_payload_without_timezone(
+    hass, make_entry
+) -> None:
+    """An older API omits ``timezone``: every refresh still builds the
+    snapshot (the cards then fall back to Home Assistant's zone)."""
+    assert "timezone" not in LEGACY_SNAPSHOT
+    client = StubSnapshotClient(LEGACY_SNAPSHOT)
+    _entry, coordinator = await _wire_entry(hass, make_entry, client)
+    assert coordinator.last_update_success is True
+
+    snapshot = await coordinator._async_update_data()
+    assert snapshot.timezone == ""
+    assert snapshot.cycle_day == 3
+    assert [child.child_name for child in snapshot.children] == ["Ada", "Bo"]
+    assert snapshot_from_api_payload(LEGACY_SNAPSHOT).timezone == ""

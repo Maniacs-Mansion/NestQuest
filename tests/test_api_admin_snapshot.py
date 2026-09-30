@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from api import routes_admin, routes_panel
+from api import host_zone, routes_admin, routes_panel
 from api.nestquest_core import core_snapshot
 from tests.admin_jwt_harness import (
     ADMIN_KEY,
@@ -101,6 +101,8 @@ async def snapshot_household(
 
     monkeypatch.setattr(routes_admin, "_local_now", _admin_now)
     monkeypatch.setattr(routes_panel, "_local_now", lambda: pinned_now)
+    # The API host runs UTC, the zone of the pinned clock.
+    monkeypatch.setattr(host_zone, "host_timezone", lambda: "UTC")
     runner = AdminRunner(temp_db_path, jwks_for(ADMIN_KEY, KID))
     async with runner as client:
         yield SimpleNamespace(
@@ -166,8 +168,9 @@ async def test_admin_jwt_returns_documented_snapshot(
     Every field is asserted as an explicit literal, with ONE clock
     read for the request.  With no missed view in the real snapshot,
     the admin body equals the panel body for the same household — the
-    panel body additionally carries the stored ``timezone`` its cards
-    format the visible date and clock in (unset here).
+    panel body additionally carries the effective ``timezone`` its cards
+    format the visible date and clock in (none stored here: the UTC
+    host's own zone).
     """
     client = snapshot_household.client
     seed = snapshot_household.seed
@@ -243,7 +246,7 @@ async def test_admin_jwt_returns_documented_snapshot(
         "/api/v1/panel/snapshot", headers=_panel_headers()
     )
     assert panel.status_code == 200
-    assert panel.json() == {**body, "timezone": ""}
+    assert panel.json() == {**body, "timezone": "UTC"}
 
 
 async def test_admin_keeps_missed_instance_panel_omits_it(

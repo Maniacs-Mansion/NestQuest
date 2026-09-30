@@ -409,11 +409,11 @@ describe("TodayTab Undo and live updates", () => {
 });
 
 describe("TodayTab in the stored application timezone", () => {
-  function renderWithZone(timezone: string) {
+  function renderWithZone(timezone: string, effective_timezone = timezone) {
     fetchMock.mockImplementation((url: string) =>
       Promise.resolve(
         String(url).endsWith("/api/v1/admin/settings")
-          ? jsonResponse({ timezone })
+          ? jsonResponse({ timezone, effective_timezone })
           : jsonResponse(SNAPSHOT),
       ),
     );
@@ -454,8 +454,14 @@ describe("TodayTab in the stored application timezone", () => {
     expect(screen.getByText("Wednesday, September 23 · cycle day 5 of 14")).toBeTruthy();
   });
 
-  it("an empty stored zone keeps the browser's local clock", async () => {
-    renderWithZone("");
+  it("an empty stored zone shows the clock in the API host's published zone", async () => {
+    renderWithZone("", "Pacific/Auckland");
+    const completed = await screen.findByTestId("attention-12");
+    expect(within(completed).getByText("Completed 11:04 PM")).toBeTruthy();
+  });
+
+  it("only an API that publishes no zone leaves the browser's local clock", async () => {
+    renderWithZone("", "");
     const completed = await screen.findByTestId("attention-12");
     expect(within(completed).getByText("Completed 11:04 AM")).toBeTruthy();
   });

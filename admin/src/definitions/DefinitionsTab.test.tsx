@@ -1726,13 +1726,16 @@ describe("DefinitionsTab start date", () => {
 });
 
 describe("DefinitionsTab start date in the stored application timezone", () => {
-  async function newSheetStartDate(timezone: string): Promise<string> {
+  async function newSheetStartDate(
+    timezone: string,
+    effective_timezone = timezone,
+  ): Promise<string> {
     api = fakeApi([BRUSH]);
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
         String(input).endsWith("/api/v1/admin/settings")
-          ? Promise.resolve(jsonResponse({ timezone }))
+          ? Promise.resolve(jsonResponse({ timezone, effective_timezone }))
           : api.fetchMock(input, init),
       ),
     );
@@ -1771,7 +1774,7 @@ describe("DefinitionsTab start date in the stored application timezone", () => {
     expect(await newSheetStartDate("Pacific/Auckland")).toBe("2026-09-24");
   });
 
-  it("an empty stored zone defaults to the browser's local today", async () => {
-    expect(await newSheetStartDate("")).toBe("2026-09-23");
+  it("an empty stored zone defaults to today in the API host's published zone", async () => {
+    expect(await newSheetStartDate("", "Pacific/Auckland")).toBe("2026-09-24");
   });
 });

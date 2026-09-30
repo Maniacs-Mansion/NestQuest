@@ -1243,10 +1243,12 @@ const Te = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", Ee = "M50 3 44.5 2
       </div>
     `;
   }
-  /** The zone the visible date and clock render in: the application
-   *  timezone the admin stored (published on the household rollup by
-   *  custom_components/nestquest/sensor.py — ``timezone``).  Only when
-   *  none is stored does Home Assistant's zone (or the browser's) apply. */
+  /** The zone the visible date and clock render in: the API's effective
+   *  application timezone — the stored zone, or the API host's when none
+   *  is stored (published on the household rollup by
+   *  custom_components/nestquest/sensor.py — ``timezone``).  Only when the
+   *  rollup carries none does Home Assistant's zone (or the browser's)
+   *  apply. */
   _timeZone() {
     const e = this._state("sensor.nestquest_household_quests_due_today")?.attributes?.timezone;
     return typeof e == "string" && e.trim() ? e.trim() : kt(this.hass);
@@ -3732,10 +3734,12 @@ const Ue = "polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%)", yn = "polygon(50% 
       </div>
     `;
   }
-  /** The zone the visible date and clock render in: the application
-   *  timezone the admin stored (published on the household rollup by
-   *  custom_components/nestquest/sensor.py — ``timezone``).  Only when
-   *  none is stored does Home Assistant's zone (or the browser's) apply. */
+  /** The zone the visible date and clock render in: the API's effective
+   *  application timezone — the stored zone, or the API host's when none
+   *  is stored (published on the household rollup by
+   *  custom_components/nestquest/sensor.py — ``timezone``).  Only when the
+   *  rollup carries none does Home Assistant's zone (or the browser's)
+   *  apply. */
   _timeZone() {
     const e = this._state("sensor.nestquest_household_quests_due_today")?.attributes?.timezone;
     return typeof e == "string" && e.trim() ? e.trim() : rn(this.hass);

@@ -1,5 +1,7 @@
 /**
- * The stored application timezone, loaded once per signed-in shell.
+ * The effective application timezone, loaded once per signed-in shell: the
+ * API's `effective_timezone` — the stored zone, or the API host's own zone
+ * when none is stored — so every screen's local time matches the API's.
  *
  * <AppTimezoneProvider> fetches the household settings and renders its
  * screens only once the zone is known (a failed load says so and offers a
@@ -35,7 +37,7 @@ export function AppTimezoneProvider({ children }: { children: ReactNode }) {
     setState({ kind: "loading" });
     fetchSettings()
       .then((settings) => {
-        if (!cancelled) setState({ kind: "ready", timeZone: settings.timezone });
+        if (!cancelled) setState({ kind: "ready", timeZone: settings.effective_timezone });
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -79,12 +81,12 @@ export function AppTimezoneProvider({ children }: { children: ReactNode }) {
   return <AppTimezoneContext.Provider value={hub}>{children}</AppTimezoneContext.Provider>;
 }
 
-/** The stored application timezone: an IANA name, or "" (browser-local). */
+/** The effective application timezone: an IANA name, or "" (browser-local). */
 export function useAppTimezone(): string {
   return useContext(AppTimezoneContext)?.timeZone ?? "";
 }
 
-/** Publish a zone just loaded or saved; a no-op without a provider. */
+/** Publish an effective zone just loaded or saved; a no-op without a provider. */
 export function usePublishAppTimezone(): (timeZone: string) => void {
   const hub = useContext(AppTimezoneContext);
   return (timeZone) => hub?.publish(timeZone);

@@ -41,6 +41,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from api import host_zone
 from tests.admin_jwt_harness import (
     ADMIN_KEY,
     KID,
@@ -60,9 +61,14 @@ _dao_meta = importlib.import_module("nestquest_core.dao_meta")
 #: independent of the core constant.
 SETTINGS_META_KEY = "settings"
 
+#: The API host's own zone, pinned for every test (:func:`settings_client`):
+#: the ``effective_timezone`` while no zone is stored.
+API_HOST_ZONE = "Australia/Perth"
+
 #: The all-defaults effective settings a fresh database reports — the
-#: documented eleven fields, asserted literally so the payload contract is
-#: pinned here, independent of the core constants.
+#: documented eleven fields plus the read-only ``effective_timezone``,
+#: asserted literally so the payload contract is pinned here, independent
+#: of the core constants.
 DEFAULT_SETTINGS = {
     "horizon_days": 14,
     "day_rollover_time": "00:00",
@@ -75,7 +81,17 @@ DEFAULT_SETTINGS = {
     "end_of_day_report_enabled": True,
     "celebration_enabled": True,
     "timezone": "",
+    "effective_timezone": API_HOST_ZONE,
 }
+
+
+def _with_zone(zone: str) -> dict:
+    """The default settings with ``zone`` stored, as the API reports them."""
+    return {
+        **DEFAULT_SETTINGS,
+        "timezone": zone,
+        "effective_timezone": zone or API_HOST_ZONE,
+    }
 
 
 def _admin_headers() -> dict[str, str]:
@@ -84,13 +100,15 @@ def _admin_headers() -> dict[str, str]:
 
 
 @pytest.fixture
-async def settings_client(temp_db_path: str) -> SimpleNamespace:
+async def settings_client(temp_db_path: str, monkeypatch) -> SimpleNamespace:
     """An admin-plane app client plus its live database.
 
     The same runner the children tests use (stubbed JWKS, no network);
     the fixture also exposes the app's ONE database connection so tests
-    can read (or corrupt) the stored settings document itself.
+    can read (or corrupt) the stored settings document itself.  The API
+    host's zone is pinned to :data:`API_HOST_ZONE`.
     """
+    monkeypatch.setattr(host_zone, "host_timezone", lambda: API_HOST_ZONE)
     runner = AdminRunner(temp_db_path, jwks_for(ADMIN_KEY, KID))
     async with runner as client:
         yield SimpleNamespace(
@@ -147,7 +165,9 @@ async def test_update_persists_and_the_next_read_reflects_it(
         SETTINGS_META_KEY
     )
     assert raw is not None
-    assert json.loads(raw) == expected
+    stored = dict(expected)
+    del stored["effective_timezone"]  # derived on read, never stored
+    assert json.loads(raw) == stored
 
 
 async def test_partial_update_merges_onto_the_current_settings(
@@ -254,7 +274,7 @@ async def test_manual_timezone_patch_persists_and_is_returned(
         headers=_admin_headers(),
     )
     assert patched.status_code == 200
-    expected = {**DEFAULT_SETTINGS, "timezone": zone}
+    expected = _with_zone(zone)
     assert patched.json() == expected
 
     reread = await client.get(
@@ -285,7 +305,7 @@ async def test_timezone_alone_sticks_on_a_fresh_database(
     reread = await client.get(
         "/api/v1/admin/settings", headers=_admin_headers()
     )
-    assert reread.json() == {**DEFAULT_SETTINGS, "timezone": zone}
+    assert reread.json() == _with_zone(zone)
 
 
 async def test_timezone_configured_is_an_unknown_field(
@@ -319,7 +339,7 @@ async def test_stored_legacy_timezone_configured_key_is_ignored(
         "/api/v1/admin/settings", headers=_admin_headers()
     )
     assert response.status_code == 200
-    assert response.json() == {**DEFAULT_SETTINGS, "timezone": "America/Chicago"}
+    assert response.json() == _with_zone("America/Chicago")
 
 
 # --- validation: rejected values never change the stored settings -------

@@ -111,8 +111,9 @@ def snapshot_from_api_payload(payload: dict[str, Any]) -> NestQuestSnapshot:
       through verbatim;
     - ``present`` and ``next_present`` pass through verbatim (the API
       resolved them through the same presence engine server-side);
-    - ``timezone`` (the stored application timezone, ``""`` when unset)
-      passes through verbatim for the cards' date and clock;
+    - ``timezone`` (the API's effective application timezone) passes
+      through verbatim for the cards' date and clock; an API older than
+      the field omits it, which reads as ``""`` (the cards' fallback);
     - the instance list is rebuilt IN ORDER, so the panel payload the
       sensors emit matches the route's order byte for byte.
 
@@ -163,7 +164,7 @@ def snapshot_from_api_payload(payload: dict[str, Any]) -> NestQuestSnapshot:
         today_iso=payload["today_iso"],
         children=tuple(children),
         cycle_day=payload["cycle_day"],
-        timezone=payload["timezone"],
+        timezone=payload.get("timezone", ""),
     )
 
 

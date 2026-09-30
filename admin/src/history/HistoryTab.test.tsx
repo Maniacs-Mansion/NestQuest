@@ -654,11 +654,11 @@ describe("HistoryTab in the stored application timezone", () => {
       .filter((url) => url.pathname === "/api/v1/admin/history");
   }
 
-  async function renderWithZone(timezone: string) {
+  async function renderWithZone(timezone: string, effective_timezone = timezone) {
     fetchMock = vi.fn((url: string) => {
       const parsed = new URL(url, "http://x");
       if (parsed.pathname.endsWith("/api/v1/admin/settings")) {
-        return Promise.resolve(jsonResponse({ timezone }));
+        return Promise.resolve(jsonResponse({ timezone, effective_timezone }));
       }
       const filter = parsed.searchParams.get("filter");
       const rows = filter === "all" ? [EVENING_NZ, LATE_NZ] : [];
@@ -707,8 +707,11 @@ describe("HistoryTab in the stored application timezone", () => {
     vi.unstubAllGlobals();
   });
 
-  it("today, day grouping, clock and lateness follow the stored zone", async () => {
-    await renderWithZone("Pacific/Auckland");
+  it.each([
+    ["the stored zone", "Pacific/Auckland"],
+    ["the API host's published zone when none is stored", ""],
+  ])("today, day grouping, clock and lateness follow %s", async (_label, stored) => {
+    await renderWithZone(stored, "Pacific/Auckland");
 
     for (const url of historyRequests()) {
       expect(url.searchParams.get("end")).toBe("2026-09-24");
@@ -724,8 +727,8 @@ describe("HistoryTab in the stored application timezone", () => {
     expect(times(yesterday)).toEqual(["10:00 PM"]);
   });
 
-  it("an empty stored zone keeps the browser's local day and clock", async () => {
-    await renderWithZone("");
+  it("only an API that publishes no zone leaves the browser's local day and clock", async () => {
+    await renderWithZone("", "");
 
     for (const url of historyRequests()) {
       expect(url.searchParams.get("end")).toBe("2026-09-23");

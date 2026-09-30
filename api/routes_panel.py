@@ -47,8 +47,10 @@ active children ``ORDER BY sort_order, id``); ``state`` is the
 documented panel spelling ``open`` | ``completed`` (§1 of
 design/ENTITIES-AND-SERVICES.md); ``cycle_day`` is today's 1-based day
 in the first scheduled child's custody cycle (0 when no child has one);
-``timezone`` is the application timezone the admin stored (``""`` when
-unset), which the panel cards format their visible date and clock in.
+``timezone`` is the effective application timezone — the zone the admin
+stored, or the API host's own zone when none is (``""`` only when the
+host's zone cannot be named; :mod:`api.host_zone`) — which the panel
+cards format their visible date and clock in.
 The same :class:`PanelSnapshotResponse` Pydantic model is the route's
 ``response_model``, so the OpenAPI document carries the shape too.
 """
@@ -69,6 +71,7 @@ from api.nestquest_core import (
     core_settings_store,
     core_snapshot,
 )
+from api import host_zone
 from api import transitions as api_transitions
 from api.sse import transition_event_stream
 
@@ -129,9 +132,9 @@ class PanelSnapshotResponse(BaseModel):
 
     ``today_iso`` anchors the payload's day; ``cycle_day`` is today's
     1-based day in the first scheduled child's custody cycle (0 when no
-    child has a schedule); ``timezone`` is the stored application
-    timezone (``""`` when unset); ``children`` is in the household's
-    sort order.
+    child has a schedule); ``timezone`` is the effective application
+    timezone (:func:`api.host_zone.effective_timezone`); ``children`` is
+    in the household's sort order.
     """
 
     today_iso: str
@@ -223,7 +226,7 @@ async def panel_snapshot(request: Request) -> PanelSnapshotResponse:
     return PanelSnapshotResponse(
         today_iso=snapshot.today_iso,
         cycle_day=snapshot.cycle_day,
-        timezone=snapshot.timezone,
+        timezone=host_zone.effective_timezone(snapshot.timezone),
         children=[
             PanelChildPayload(
                 child_id=child.child_id,

@@ -13,7 +13,8 @@ let settingsResponse: () => Promise<Response>;
 
 describe("NestQuest Admin shell", () => {
   beforeEach(() => {
-    settingsResponse = () => Promise.resolve(jsonResponse({ timezone: "" }));
+    settingsResponse = () =>
+      Promise.resolve(jsonResponse({ timezone: "", effective_timezone: "Europe/London" }));
     // The shell loads the stored application timezone; every tab's own
     // requests stay pending so the shell tests remain offline.
     vi.stubGlobal(
@@ -78,7 +79,10 @@ describe("NestQuest Admin shell", () => {
     await screen.findByTestId("timezone-error");
     expect(screen.queryByRole("heading", { name: "Today" })).toBeNull();
 
-    settingsResponse = () => Promise.resolve(jsonResponse({ timezone: "Pacific/Auckland" }));
+    settingsResponse = () =>
+      Promise.resolve(
+        jsonResponse({ timezone: "Pacific/Auckland", effective_timezone: "Pacific/Auckland" }),
+      );
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
 
     expect(await screen.findByRole("heading", { name: "Today" })).toBeTruthy();

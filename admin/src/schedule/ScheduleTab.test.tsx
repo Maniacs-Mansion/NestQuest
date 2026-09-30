@@ -658,10 +658,10 @@ describe("ScheduleTab", () => {
 });
 
 describe("ScheduleTab today in the stored application timezone", () => {
-  async function renderWithZone(timezone: string) {
+  async function renderWithZone(timezone: string, effective_timezone = timezone) {
     fetchMock = vi.fn(async (url: string, init?: RequestInit) =>
       String(url).endsWith("/api/v1/admin/settings")
-        ? jsonResponse({ timezone })
+        ? jsonResponse({ timezone, effective_timezone })
         : routeFetch(url, init),
     );
     vi.stubGlobal("fetch", fetchMock);
@@ -702,9 +702,9 @@ describe("ScheduleTab today in the stored application timezone", () => {
     expect(day("2026-09-23").className).not.toContain("schedule-day--today");
   });
 
-  it("an empty stored zone marks the browser's local today", async () => {
-    await renderWithZone("");
-    expect(day("2026-09-23").className).toContain("schedule-day--today");
-    expect(day("2026-09-24").className).not.toContain("schedule-day--today");
+  it("an empty stored zone marks today in the API host's published zone", async () => {
+    await renderWithZone("", "Pacific/Auckland");
+    expect(day("2026-09-24").className).toContain("schedule-day--today");
+    expect(day("2026-09-23").className).not.toContain("schedule-day--today");
   });
 });

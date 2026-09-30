@@ -639,7 +639,7 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
       .then((settings) => {
         if (cancelled) return;
         setPreferences({ kind: "ready", settings });
-        publishTimezone(settings.timezone);
+        publishTimezone(settings.effective_timezone);
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -733,7 +733,7 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
     try {
       const settings = await updateSettings(changes);
       setPreferences({ kind: "ready", settings });
-      publishTimezone(settings.timezone);
+      publishTimezone(settings.effective_timezone);
       setPreferencesMessage({ kind: "info", text: "Preferences saved." });
     } catch (error) {
       setPreferencesMessage({

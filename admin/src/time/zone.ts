@@ -2,12 +2,14 @@
  * Local time in the application timezone.
  *
  * The admin-saved zone (settings `timezone`, an IANA name) is the single
- * source of local-time truth for the whole application. "" means no zone is
- * stored, and only then does the browser's own zone apply. Every helper takes
+ * source of local-time truth for the whole application; the API publishes it
+ * as `effective_timezone`, naming its host's own zone when none is stored.
+ * "" means the API published no zone, and only then does the browser's own
+ * zone apply. Every helper takes
  * that stored value as-is; an invalid zone name throws (Intl's RangeError).
  */
 
-/** The `timeZone` option for Intl: the stored zone, or undefined (browser) for "". */
+/** The `timeZone` option for Intl: the zone, or undefined (browser) for "". */
 export function zoneOption(timeZone: string): string | undefined {
   return timeZone === "" ? undefined : timeZone;
 }

@@ -24,7 +24,16 @@ const DEFAULT_SETTINGS: HouseholdSettings = {
   end_of_day_report_enabled: true,
   celebration_enabled: false,
   timezone: "America/Chicago",
+  effective_timezone: "America/Chicago",
 };
+
+/** The API host's own zone: the effective zone while none is stored. */
+const API_HOST_ZONE = "Europe/London";
+
+/** The settings as the API answers: `effective_timezone` derived like the API's. */
+function settingsBody(): HouseholdSettings {
+  return { ...settings, effective_timezone: settings.timezone || API_HOST_ZONE };
+}
 
 function child(
   id: number,
@@ -83,10 +92,10 @@ async function routeFetch(url: string, init: RequestInit = {}): Promise<Response
     return respond();
   }
   if (path === CHILDREN_PATH && method === "GET") return jsonResponse({ children });
-  if (path === SETTINGS_PATH && method === "GET") return jsonResponse(settings);
+  if (path === SETTINGS_PATH && method === "GET") return jsonResponse(settingsBody());
   if (path === SETTINGS_PATH && method === "PATCH") {
     settings = { ...settings, ...body };
-    return jsonResponse(settings);
+    return jsonResponse(settingsBody());
   }
   if (path === CHILDREN_PATH && method === "POST") {
     const created = child(9, body.display_name, body.sort_order ?? 0, {
@@ -821,7 +830,8 @@ describe("SettingsScreen — the saved zone applies app-wide", () => {
       </AppTimezoneProvider>,
     );
     const form = await screen.findByRole("form", { name: "Preferences" });
-    expect(screen.getByTestId("app-zone").textContent).toBe("(browser)");
+    // No zone stored: the application runs in the API host's zone.
+    expect(screen.getByTestId("app-zone").textContent).toBe(API_HOST_ZONE);
 
     fireEvent.change(within(form).getByRole("combobox", { name: "Timezone" }), {
       target: { value: "America/New_York" },

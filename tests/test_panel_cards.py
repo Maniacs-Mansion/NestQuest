@@ -1245,7 +1245,8 @@ def test_quest_log_overdue_follows_the_api_snapshot_not_the_panel_clock() -> Non
 def test_panel_date_and_clock_follow_the_stored_application_timezone() -> None:
     """The stored application timezone is the single source of local-time
     truth for the panel's visible date and clock too: the household rollup
-    publishes it (``timezone``) and both cards format in it — the party
+    publishes it (``timezone`` — the API's effective zone) and both cards
+    format in it — the party
     board's kicker and dock date and clock, the quest log's header date —
     even though Home Assistant's zone and the panel browser's zone are both
     UTC.  At 2026-09-29T23:30Z it is still Tuesday 11:30 PM in UTC but
@@ -1292,8 +1293,9 @@ def test_panel_date_and_clock_follow_the_stored_application_timezone() -> None:
     assert sub is not None, log
     assert sub.group(1) == "Wednesday, Sep 30"
 
-    # With no stored zone the documented fallback applies: Home
-    # Assistant's zone (UTC here) formats the same instant.
+    # With no zone stored the API publishes its host's own zone, so the
+    # rollup always carries one; only a rollup without it (an API older
+    # than the field) falls back to Home Assistant's zone (UTC here).
     del states["sensor.nestquest_household_quests_due_today"]["attributes"][
         "timezone"
     ]

@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from api import routes_admin, routes_panel
+from api import host_zone, routes_admin, routes_panel
 from api import scheduler as scheduler_module
 from api.database import _executor
 from api.scheduler import MissedSweepScheduler, _delay_seconds
@@ -632,22 +632,45 @@ async def test_admin_saved_zone_is_authoritative_across_surfaces(
     assert delays[1] == pytest.approx(299)
 
 
-async def test_panel_snapshot_publishes_the_stored_zone(
-    household: SimpleNamespace,
+async def test_empty_zone_publishes_the_api_host_zone_to_panel_and_admin(
+    household: SimpleNamespace, monkeypatch
 ) -> None:
-    """The panel snapshot carries the stored application zone verbatim so
-    the cards format their visible date and clock in it — ``""`` until the
-    admin saves one, then exactly the saved zone."""
-    async def panel_zone() -> str:
-        response = await household.client.get(
-            "/api/v1/panel/snapshot", headers=_panel_headers()
-        )
-        assert response.status_code == 200
-        return response.json()["timezone"]
+    """With no zone stored, the API reads the host's local time — and the
+    panel snapshot and the admin settings both publish that host's own
+    zone, so the cards and the admin app format in the API's zone, never
+    Home Assistant's or the browser's.
 
-    assert await panel_zone() == ""
-    await _set_zone(household, "Pacific/Auckland")
-    assert await panel_zone() == "Pacific/Auckland"
+    The host runs Pacific/Auckland: 12:30 UTC on the 26th is already
+    00:30 on the 27th there, so the API's household day is the 27th while
+    a UTC Home Assistant or browser would still read the 26th.  Once the
+    admin saves a zone, both publish exactly that zone.
+    """
+    host = "Pacific/Auckland"
+    monkeypatch.setattr(host_zone, "host_timezone", lambda: host)
+    household.clock["now"] = _utc(12, 30).astimezone(ZoneInfo(host))
+
+    panel = await household.client.get(
+        "/api/v1/panel/snapshot", headers=_panel_headers()
+    )
+    assert panel.status_code == 200
+    settings = await _admin_settings(household)
+    assert settings["timezone"] == ""
+    assert panel.json()["timezone"] == settings["effective_timezone"] == host
+    # The published zone reproduces the API's own household day.
+    assert panel.json()["today_iso"] == "2026-09-27"
+    assert (
+        _utc(12, 30).astimezone(ZoneInfo(host)).date().isoformat()
+        == panel.json()["today_iso"]
+    )
+
+    await _set_zone(household, "America/Chicago")
+    panel = await household.client.get(
+        "/api/v1/panel/snapshot", headers=_panel_headers()
+    )
+    settings = await _admin_settings(household)
+    assert settings["timezone"] == "America/Chicago"
+    assert panel.json()["timezone"] == settings["effective_timezone"]
+    assert settings["effective_timezone"] == "America/Chicago"
 
 
 # --- settings writes are serialised with planning and sweeping (TZ-003) ------
