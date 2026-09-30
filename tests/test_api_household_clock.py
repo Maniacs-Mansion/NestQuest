@@ -92,6 +92,7 @@ async def household(temp_db_path: str, monkeypatch) -> SimpleNamespace:
             seed=seed,
             clock=clock,
             database=runner.app.state.db.database,
+            app=runner.app,
         )
 
 
@@ -530,6 +531,105 @@ async def test_scheduler_rechecks_settings_before_sweeping(
         ]
     finally:
         await database.close()
+
+
+# --- the admin settings route is the scheduler's writer (task 7e173881) ------
+#
+# ``PATCH /api/v1/admin/settings`` is the only settings writer: it holds
+# the scheduler's settings lock across the write and tells the scheduler,
+# so a saved zone or rollover re-plans a sleeping scheduler.
+
+
+async def _sleeping_scheduler(household: SimpleNamespace):
+    """Swap in a scheduler on the pinned clock; return it and its delays.
+
+    Waits until it sleeps on its first plan.
+    """
+    await household.app.state.sweep_scheduler.stop()
+    delays: list[float] = []
+    slept = asyncio.Condition()
+
+    async def sleep_stub(seconds: float) -> None:
+        async with slept:
+            delays.append(seconds)
+            slept.notify_all()
+        await asyncio.Event().wait()
+
+    scheduler = MissedSweepScheduler(
+        household.database,
+        clock=lambda: household.clock["now"],
+        sleep=sleep_stub,
+    )
+    household.app.state.sweep_scheduler = scheduler
+    scheduler.start()
+
+    async def wait_for_sleeps(count: int) -> None:
+        async with slept:
+            await asyncio.wait_for(
+                slept.wait_for(lambda: len(delays) == count), timeout=5
+            )
+
+    await wait_for_sleeps(1)
+    return scheduler, delays, wait_for_sleeps
+
+
+@pytest.mark.parametrize(
+    ("changes", "replanned_delay"),
+    [
+        # 13:00 UTC is 09:00 EDT: New York midnight is 15 hours away.
+        ({"timezone": HOUSEHOLD_ZONE}, _NEW_YORK_MIDNIGHT_DELAY),
+        # Still UTC: 13:00 to a 14:30 rollover is 90 minutes.
+        ({"day_rollover_time": "14:30"}, 90 * 60),
+    ],
+    ids=["timezone", "day_rollover_time"],
+)
+async def test_admin_settings_patch_replans_a_sleeping_scheduler(
+    household: SimpleNamespace, changes: dict, replanned_delay: float
+) -> None:
+    household.clock["now"] = _utc(13, 0)
+    scheduler, delays, wait_for_sleeps = await _sleeping_scheduler(household)
+    try:
+        response = await household.client.patch(
+            "/api/v1/admin/settings", json=changes, headers=_admin_headers()
+        )
+        assert response.status_code == 200
+        await wait_for_sleeps(2)
+    finally:
+        await scheduler.stop()
+    assert delays == [
+        pytest.approx(_UTC_MIDNIGHT_DELAY),
+        pytest.approx(replanned_delay),
+    ]
+
+
+async def test_admin_saved_zone_is_authoritative_across_surfaces(
+    household: SimpleNamespace,
+) -> None:
+    """ONE instant, read by every surface in exactly the admin's zone.
+
+    Asia/Kolkata (UTC+05:30) matches neither the UTC host nor any other
+    zone in play.  04:30:01 UTC is 10:00:01 there: the 10:00 quest is
+    overdue on both snapshots (it would not be in UTC, 04:30), the
+    household day is the 26th, and the scheduler sleeps the 299 s to a
+    10:05 rollover (UTC would be 5h35m).
+    """
+    household.clock["now"] = _utc(4, 30, 1)
+    scheduler, delays, wait_for_sleeps = await _sleeping_scheduler(household)
+    try:
+        response = await household.client.patch(
+            "/api/v1/admin/settings",
+            json={"timezone": "Asia/Kolkata", "day_rollover_time": "10:05"},
+            headers=_admin_headers(),
+        )
+        assert response.status_code == 200
+        await wait_for_sleeps(2)
+        for plane in ("panel", "admin"):
+            today_iso, instance = await _pack_bag(household, plane)
+            assert today_iso == TODAY.isoformat(), plane
+            assert instance["overdue"] is True, plane
+    finally:
+        await scheduler.stop()
+    assert delays[1] == pytest.approx(299)
 
 
 # --- settings writes are serialised with planning and sweeping (TZ-003) ------

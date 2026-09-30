@@ -1102,13 +1102,12 @@ def test_quest_log_meta_line_keeps_its_meta_class() -> None:
     ``meta ${late ? "late" : nothing}``, Lit dropped the whole class
     attribute for every quest that was not late, leaving the due line
     unstyled. The rendered markup must carry ``class="meta"`` on time and
-    ``class="meta late"`` overdue — overdue by the panel's pinned clock
-    (07:15 local: the 07:00 quest is late, the 08:15 one is not)."""
+    ``class="meta late"`` overdue — overdue as the API snapshot says."""
     generated = _generate_dashboard(
         {}, _three_child_states(), url="http://homeassistant.local/nestquest"
     )
 
-    def quest(instance_id: int, title: str, due_time: str) -> dict:
+    def quest(instance_id: int, title: str, overdue: bool) -> dict:
         return {
             "id": instance_id,
             "definition_id": instance_id,
@@ -1116,9 +1115,9 @@ def test_quest_log_meta_line_keeps_its_meta_class() -> None:
             "title": title,
             "icon": None,
             "window": "morning",
-            "due_time": due_time,
+            "due_time": "08:15",
             "state": "open",
-            "overdue": False,
+            "overdue": overdue,
             "completed_at": None,
             "on_time": None,
         }
@@ -1131,8 +1130,8 @@ def test_quest_log_meta_line_keeps_its_meta_class() -> None:
             child_id=1,
             present=True,
             instances=[
-                quest(41, "Make Bed", "08:15"),
-                quest(42, "Brush Teeth", "07:00"),
+                quest(41, "Make Bed", overdue=False),
+                quest(42, "Brush Teeth", overdue=True),
             ],
         ),
     }
@@ -1140,8 +1139,6 @@ def test_quest_log_meta_line_keeps_its_meta_class() -> None:
         generated["views"][1]["cards"][0],
         states,
         url="http://homeassistant.local/nestquest/ada",
-        now="2026-09-29T11:15:00Z",
-        tz="America/New_York",
     )
     metas = {}
     for card in result["html"].split('data-instance-id="')[1:]:
@@ -1175,19 +1172,22 @@ def _quest_metas(html: str) -> dict[str, tuple[str, str]]:
     return metas
 
 
-def test_quest_log_overdue_follows_the_panel_local_clock() -> None:
-    """Overdue is decided by the panel's own local clock, not the API's
-    ``overdue`` flag.  The owner saw 8:15 AM quests read OVERDUE at 7:15 AM
-    America/New_York: the API's flag had been computed on a UTC wall clock
-    (11:15).  Here the API still says ``overdue: true`` and Home
-    Assistant reports ``time_zone`` UTC, yet at 07:15 local the 08:15 quest
-    is due, at 08:15 (and 08:16, via the card's own clock tick) it is
-    overdue, and a quest with no due time is never overdue."""
+def test_quest_log_overdue_follows_the_api_snapshot_not_the_panel_clock() -> None:
+    """The stored application timezone is the single source of local-time
+    truth: the API computes each instance's ``overdue`` in that zone and
+    the card renders exactly that, whatever the panel browser's own clock
+    or zone says.  Here the browser runs in Pacific/Auckland and its clock
+    is pinned (and later ticked) to instants where every due time has, or
+    has not yet, arrived on its local wall clock — the card must still
+    show the snapshot's state: the ``overdue: true`` 08:15 quest reads
+    OVERDUE even though the browser reads long before 08:15, and the
+    ``overdue: false`` 07:00 quest stays due even though the browser reads
+    long after 07:00."""
     generated = _generate_dashboard(
         {}, _three_child_states(), url="http://homeassistant.local/nestquest"
     )
 
-    def quest(instance_id: int, title: str, due_time: str | None) -> dict:
+    def quest(instance_id: int, title: str, due_time: str, overdue: bool) -> dict:
         return {
             "id": instance_id,
             "definition_id": instance_id,
@@ -1197,7 +1197,7 @@ def test_quest_log_overdue_follows_the_panel_local_clock() -> None:
             "window": "morning",
             "due_time": due_time,
             "state": "open",
-            "overdue": True,
+            "overdue": overdue,
             "completed_at": None,
             "on_time": None,
         }
@@ -1210,29 +1210,29 @@ def test_quest_log_overdue_follows_the_panel_local_clock() -> None:
             child_id=1,
             present=True,
             instances=[
-                quest(42, "Brush Teeth", "08:15"),
-                quest(43, "Feed Fish", None),
+                quest(42, "Brush Teeth", "08:15", overdue=True),
+                quest(43, "Feed Fish", "07:00", overdue=False),
             ],
         ),
     }
+    # 2026-09-29T17:00Z is 06:00 NZDT on the 30th: before both due times.
+    # 2026-09-29T23:00Z is 12:00 NZDT: after both.
     result = _render_quest_log(
         generated["views"][1]["cards"][0],
         states,
         url="http://homeassistant.local/nestquest/ada",
-        now="2026-09-29T11:15:00Z",
-        advance_to=["2026-09-29T12:15:00Z", "2026-09-29T12:16:00Z"],
-        tz="America/New_York",
+        now="2026-09-29T17:00:00Z",
+        advance_to=["2026-09-29T23:00:00Z"],
+        tz="Pacific/Auckland",
     )
-    due_by = ('class="meta"', "Due by 8:15 AM")
     overdue = ('class="meta late"', "Overdue · due 8:15 AM")
-    not_due = ('class="meta"', "Due today")
-    at_0715, at_0815, at_0816 = (
+    due_by = ('class="meta"', "Due by 7:00 AM")
+    before, (after,) = (
         _quest_metas(result["html"]),
-        *(_quest_metas(tick["html"]) for tick in result["ticks"]),
+        [_quest_metas(tick["html"]) for tick in result["ticks"]],
     )
-    assert at_0715 == {"42": due_by, "43": not_due}, at_0715
-    assert at_0815 == {"42": overdue, "43": not_due}, at_0815
-    assert at_0816 == {"42": overdue, "43": not_due}, at_0816
+    assert before == {"42": overdue, "43": due_by}, before
+    assert after == {"42": overdue, "43": due_by}, after
 
 
 def test_quest_log_crest_matches_the_spec_geometry() -> None:

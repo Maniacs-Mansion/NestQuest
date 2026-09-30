@@ -2330,12 +2330,25 @@ async def admin_update_settings(
     every value has validated — so a rejected update never changes the
     stored settings.  Every core ``ValueError`` is 422
     (:func:`_raise_settings_error`); anything else re-raises.
+
+    The write holds the missed-sweep scheduler's ``settings_lock`` and
+    then tells it (:meth:`~api.scheduler.MissedSweepScheduler.settings_changed`),
+    so a saved ``timezone`` or ``day_rollover_time`` re-plans a sleeping
+    scheduler (an app without one — no lifespan — just writes).
     """
     state: DatabaseState = request.app.state.db
+    scheduler = getattr(request.app.state, "sweep_scheduler", None)
     try:
-        settings = await core_settings_store.update_settings(
-            state.database, changes
-        )
+        if scheduler is None:
+            settings = await core_settings_store.update_settings(
+                state.database, changes
+            )
+        else:
+            async with scheduler.settings_lock:
+                settings = await core_settings_store.update_settings(
+                    state.database, changes
+                )
+                scheduler.settings_changed(settings)
     except ValueError as error:
         _raise_settings_error(error)
     return _settings_response(settings)
