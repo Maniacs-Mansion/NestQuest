@@ -9,9 +9,8 @@ this router inherits the check).
 The snapshot route is a thin adapter over the bundled core: it performs
 NO business logic.  It reads the live database off ``app.state.db``,
 resolves ONE timezone-aware ``now`` (the host clock re-expressed in the
-household ``timezone`` — the API host may run UTC while the household
-does not; until the admin chooses a zone it is the Home Assistant zone
-the integration reports in :data:`PANEL_TIMEZONE_HEADER`), calls the pure
+household ``timezone`` the admin stored — the API host may run UTC
+while the household does not), calls the pure
 :func:`nestquest_core.snapshot.build_snapshot`, shapes each child's
 instances through :func:`nestquest_core.snapshot.instance_payload` with
 ``include_missed=False`` (D-009: missed instances are OMITTED from the
@@ -54,7 +53,6 @@ from __future__ import annotations
 
 import datetime
 import importlib
-import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -64,19 +62,12 @@ from api.database import DatabaseState
 from api.dependencies import require_panel_token
 from api.nestquest_core import (
     core_completion,
-    core_const,
     core_events,
     core_settings_store,
     core_snapshot,
 )
 from api import transitions as api_transitions
 from api.sse import transition_event_stream
-
-LOGGER = logging.getLogger(__name__)
-
-#: The request header the integration reports Home Assistant's
-#: configured IANA ``time_zone`` in.
-PANEL_TIMEZONE_HEADER = core_const.PANEL_TIMEZONE_HEADER
 
 #: The instance DAO, imported on the app's core copy for the
 #: child-mismatch guard on the complete route.
@@ -188,42 +179,17 @@ def _local_now() -> datetime.datetime:
 
 
 async def _household_clock(
-    database: object, request: Request
+    database: object,
 ) -> tuple[object, datetime.datetime]:
-    """Return the settings and ONE household-local clock read.
+    """Return the stored settings and ONE household-local clock read.
 
     The API host may run UTC while the household does not, so the one
-    :func:`_local_now` read is re-expressed in the settings' ``timezone``
-    (:meth:`NestQuestSettings.household_now`).  The integration reports
-    Home Assistant's ``time_zone`` in :data:`PANEL_TIMEZONE_HEADER`;
-    until the admin chooses a zone it is adopted and persisted
-    (:func:`nestquest_core.settings_store.adopt_reported_timezone`), so
-    the admin plane follows it too, and the already-sleeping missed-sweep
-    scheduler is told (:meth:`MissedSweepScheduler.settings_changed`) so
-    it re-plans for the household rollover — under the scheduler's
-    ``settings_lock``, so the adoption never lands between its settings
-    check and its sweep.  An invalid
-    reported zone is logged and ignored — the panel keeps serving on
-    the stored settings.
+    :func:`_local_now` read is re-expressed in the stored settings'
+    ``timezone`` (:meth:`NestQuestSettings.household_now`).  The zone
+    comes from the stored settings ONLY — nothing the request carries
+    can change it.
     """
-    reported = request.headers.get(PANEL_TIMEZONE_HEADER, "").strip()
-    if reported:
-        scheduler = request.app.state.sweep_scheduler
-        try:
-            async with scheduler.settings_lock:
-                settings = await core_settings_store.adopt_reported_timezone(
-                    database, reported
-                )
-                scheduler.settings_changed(settings)
-        except ValueError:
-            LOGGER.warning(
-                "Ignoring invalid %s header value %r",
-                PANEL_TIMEZONE_HEADER,
-                reported,
-            )
-            settings = await core_settings_store.load_settings(database)
-    else:
-        settings = await core_settings_store.load_settings(database)
+    settings = await core_settings_store.load_settings(database)
     return settings, settings.household_now(_local_now())
 
 
@@ -245,7 +211,7 @@ async def panel_snapshot(request: Request) -> PanelSnapshotResponse:
     :class:`PanelSnapshotResponse`.
     """
     state: DatabaseState = request.app.state.db
-    settings, now = await _household_clock(state.database, request)
+    settings, now = await _household_clock(state.database)
     snapshot = await core_snapshot.build_snapshot(
         state.database, settings, now
     )
@@ -332,7 +298,7 @@ async def panel_complete_instance(
             detail="Quest instance not found for this child",
         )
 
-    _settings, now = await _household_clock(database, request)
+    _settings, now = await _household_clock(database)
     try:
         result = await core_completion.complete_instance(
             database,

@@ -19,6 +19,8 @@ container's zone) and sets the household zone through the real admin
 
 An unset zone keeps the historical host-local behaviour, and the
 missed-sweep scheduler waits for the rollover in household time.
+Nothing sets the zone automatically: a timezone header on a panel
+request never changes the stored settings (task 7f685179).
 """
 from __future__ import annotations
 
@@ -47,6 +49,7 @@ _settings = importlib.import_module("nestquest_core.settings")
 _settings_store = importlib.import_module("nestquest_core.settings_store")
 _core_db = importlib.import_module("nestquest_core.db")
 _core_migrations = importlib.import_module("nestquest_core.migrations")
+_dao_meta = importlib.import_module("nestquest_core.dao_meta")
 
 #: The panel service token the admin harness app is configured with.
 HARNESS_PANEL_TOKEN = "admin-test-panel-token"
@@ -84,7 +87,12 @@ async def household(temp_db_path: str, monkeypatch) -> SimpleNamespace:
     monkeypatch.setattr(routes_panel, "_local_now", lambda: clock["now"])
     runner = AdminRunner(temp_db_path, jwks_for(ADMIN_KEY, KID))
     async with runner as client:
-        yield SimpleNamespace(client=client, seed=seed, clock=clock)
+        yield SimpleNamespace(
+            client=client,
+            seed=seed,
+            clock=clock,
+            database=runner.app.state.db.database,
+        )
 
 
 async def _set_zone(household: SimpleNamespace, zone: str) -> None:
@@ -237,23 +245,14 @@ def test_from_options_reads_and_resiliently_defaults_timezone() -> None:
     )
 
 
-def test_settings_timezone_configured_defaults_false_and_is_strict() -> None:
-    assert _settings.NestQuestSettings().timezone_configured is False
-    assert _settings.NestQuestSettings.from_options({}).timezone_configured is False
-    assert (
-        _settings.NestQuestSettings.from_options(
-            {"timezone_configured": True}
-        ).timezone_configured
-        is True
-    )
-    for value in ("true", 1, None):
-        with pytest.raises(ValueError, match="timezone_configured"):
-            _settings.NestQuestSettings(timezone_configured=value)
-        if value is not None:
-            with pytest.raises(ValueError):
-                _settings.NestQuestSettings.from_options(
-                    {"timezone_configured": value}
-                )
+def test_settings_have_no_timezone_configured_marker() -> None:
+    assert not hasattr(_settings.NestQuestSettings(), "timezone_configured")
+    with pytest.raises(TypeError):
+        _settings.NestQuestSettings(timezone_configured=True)
+    # A stored document still carrying the removed key loads harmlessly.
+    assert _settings.NestQuestSettings.from_options_resilient(
+        {"timezone": HOUSEHOLD_ZONE, "timezone_configured": True}
+    ) == _settings.NestQuestSettings(timezone=HOUSEHOLD_ZONE)
 
 
 # --- the missed-sweep scheduler ----------------------------------------------
@@ -329,37 +328,29 @@ def test_delay_seconds_is_true_elapsed_time_across_dst(
     assert _delay_seconds(target, now) == expected
 
 
-# --- the Home Assistant-reported zone (task 6351b36d) ------------------------
+# --- nothing sets the zone automatically (task 7f685179) --------------------
 #
-# The deployed household never set ``timezone``, so the UTC API host marked
-# morning quests overdue.  The integration reports Home Assistant's
-# ``time_zone`` on every panel request; while the admin has not chosen a
-# zone the API adopts it (persisted, so the scheduler and the admin plane
-# follow too), and an explicit admin choice still wins.
+# The zone is only ever set by an admin's explicit settings update.  A
+# timezone header on a panel request — the one Home Assistant used to
+# report, or any look-alike — is ignored, and no read writes settings.
+
+#: Timezone-looking request headers a panel request might carry.
+_TIMEZONE_HEADERS = [
+    {"X-NestQuest-Timezone": HOUSEHOLD_ZONE},
+    {"X-NestQuest-Time-Zone": HOUSEHOLD_ZONE},
+    {"X-Timezone": HOUSEHOLD_ZONE},
+    {"Time-Zone": HOUSEHOLD_ZONE},
+]
 
 
-def _reporting_panel_headers(zone: str) -> dict[str, str]:
-    return {**_panel_headers(), "X-NestQuest-Timezone": zone}
-
-
-async def _panel_pack_bag(
-    household: SimpleNamespace, zone: str
-) -> tuple[str, dict]:
-    response = await household.client.get(
-        "/api/v1/panel/snapshot", headers=_reporting_panel_headers(zone)
+async def _stored_document(household: SimpleNamespace) -> str | None:
+    """The raw stored settings document (``None`` when never written)."""
+    return await _dao_meta.MetaStateDao(household.database).get(
+        _settings_store.SETTINGS_META_KEY
     )
-    assert response.status_code == 200
-    body = response.json()
-    ada = next(
-        child
-        for child in body["children"]
-        if child["child_id"] == household.seed.ada.id
-    )
-    (instance,) = ada["instances"]
-    return body["today_iso"], instance
 
 
-async def _stored_settings(household: SimpleNamespace) -> dict:
+async def _admin_settings(household: SimpleNamespace) -> dict:
     response = await household.client.get(
         "/api/v1/admin/settings", headers=_admin_headers()
     )
@@ -367,137 +358,73 @@ async def _stored_settings(household: SimpleNamespace) -> dict:
     return response.json()
 
 
-async def test_unset_zone_adopts_reported_zone_for_overdue(
-    household: SimpleNamespace,
+@pytest.mark.parametrize("extra", _TIMEZONE_HEADERS)
+async def test_panel_timezone_header_never_changes_settings(
+    household: SimpleNamespace, extra: dict[str, str]
 ) -> None:
-    """09:59:59 EDT on a UTC host, zone never set: NOT overdue."""
+    """09:59:59 EDT on a UTC host, zone unset: the header is ignored."""
     household.clock["now"] = _utc(13, 59, 59)
-    today_iso, instance = await _panel_pack_bag(household, HOUSEHOLD_ZONE)
-    assert today_iso == TODAY.isoformat()
-    assert instance["overdue"] is False
-    # Persisted as the automatic (not admin-chosen) household zone, so
-    # the admin plane and the missed-sweep scheduler read it too.
-    stored = await _stored_settings(household)
-    assert stored["timezone"] == HOUSEHOLD_ZONE
-    assert stored["timezone_configured"] is False
-    _today, admin_instance = await _pack_bag(household, "admin")
-    assert admin_instance["overdue"] is False
-
-
-async def test_unset_zone_adopts_reported_zone_for_today(
-    household: SimpleNamespace,
-) -> None:
-    """23:30 EDT is tomorrow in UTC; the household day is still today."""
-    household.clock["now"] = _utc(3, 30, day=27)
-    today_iso, _instance = await _panel_pack_bag(household, HOUSEHOLD_ZONE)
-    assert today_iso == TODAY.isoformat()
-
-
-async def test_reported_zone_completion_is_on_time(
-    household: SimpleNamespace,
-) -> None:
-    """A 09:30 EDT tap with the zone never set is on time."""
-    household.clock["now"] = _utc(13, 30)
+    headers = {**_panel_headers(), **extra}
+    snapshot = await household.client.get(
+        "/api/v1/panel/snapshot", headers=headers
+    )
+    assert snapshot.status_code == 200
     seed = household.seed
-    response = await household.client.post(
+    completed = await household.client.post(
         f"/api/v1/panel/instances/{seed.pack_bag_instance.id}/complete",
-        headers=_reporting_panel_headers(HOUSEHOLD_ZONE),
+        headers=headers,
         json={"actor_child_id": seed.ada.id},
     )
-    assert response.status_code == 200
+    assert completed.status_code == 200
+    # Nothing was written, and the clock stayed host local (UTC): the
+    # 10:00 quest was overdue and the 13:59 UTC completion was late.
+    assert await _stored_document(household) is None
+    assert (await _admin_settings(household))["timezone"] == ""
     _today_iso, instance = await _pack_bag(household, "admin")
-    assert instance["on_time"] is True
+    assert instance["on_time"] is False
 
 
-async def test_reported_zone_follows_home_assistant_changes(
-    household: SimpleNamespace,
+@pytest.mark.parametrize("extra", _TIMEZONE_HEADERS)
+async def test_panel_timezone_header_never_replaces_the_stored_zone(
+    household: SimpleNamespace, extra: dict[str, str]
 ) -> None:
-    """An automatically adopted zone tracks a later Home Assistant change."""
-    await _panel_pack_bag(household, "America/Chicago")
-    await _panel_pack_bag(household, HOUSEHOLD_ZONE)
-    assert (await _stored_settings(household))["timezone"] == HOUSEHOLD_ZONE
-
-
-async def _adopt_new_york(household: SimpleNamespace) -> None:
-    """Prove automatic adoption first, so later assertions can't pass
-    on code that ignores the reported zone altogether."""
-    await _panel_pack_bag(household, HOUSEHOLD_ZONE)
-    stored = await _stored_settings(household)
-    assert stored["timezone"] == HOUSEHOLD_ZONE
-    assert stored["timezone_configured"] is False
-
-
-@pytest.mark.parametrize("chosen", ["America/Los_Angeles", ""])
-async def test_admin_chosen_zone_wins_over_reported_zone(
-    household: SimpleNamespace, chosen: str
-) -> None:
-    await _adopt_new_york(household)
-    response = await household.client.patch(
-        "/api/v1/admin/settings",
-        json={"timezone": chosen, "timezone_configured": True},
-        headers=_admin_headers(),
+    """A stored zone stays exactly as the admin saved it."""
+    await _set_zone(household, "America/Los_Angeles")
+    before = await _stored_document(household)
+    household.clock["now"] = _utc(16, 59, 59)  # 09:59:59 PDT, 12:59:59 EDT
+    response = await household.client.get(
+        "/api/v1/panel/snapshot",
+        headers={**_panel_headers(), **extra},
     )
     assert response.status_code == 200
-    # A conflicting report is no longer adopted.
-    await _panel_pack_bag(household, "America/Chicago")
-    stored = await _stored_settings(household)
-    assert stored["timezone"] == chosen
-    assert stored["timezone_configured"] is True
-
-
-# --- a timezone-only admin update is an explicit choice (task 45243478) ------
-
-
-@pytest.mark.parametrize("chosen", ["America/Los_Angeles", ""])
-async def test_timezone_only_admin_update_is_an_explicit_choice(
-    household: SimpleNamespace, chosen: str
-) -> None:
-    """``PATCH {"timezone": ...}`` alone marks the zone admin-chosen."""
-    await _adopt_new_york(household)
-    response = await household.client.patch(
-        "/api/v1/admin/settings",
-        json={"timezone": chosen},
-        headers=_admin_headers(),
-    )
-    assert response.status_code == 200
-    assert response.json()["timezone_configured"] is True
-    # A conflicting report is no longer adopted.
-    await _panel_pack_bag(household, "America/Chicago")
-    stored = await _stored_settings(household)
-    assert stored["timezone"] == chosen
-    assert stored["timezone_configured"] is True
-
-
-async def test_explicit_timezone_configured_false_is_respected(
-    household: SimpleNamespace,
-) -> None:
-    """A supplied ``timezone_configured`` is persisted exactly as given."""
-    response = await household.client.patch(
-        "/api/v1/admin/settings",
-        json={"timezone": "America/Chicago", "timezone_configured": False},
-        headers=_admin_headers(),
-    )
-    assert response.status_code == 200
-    assert response.json()["timezone_configured"] is False
-    await _panel_pack_bag(household, HOUSEHOLD_ZONE)
-    assert (await _stored_settings(household))["timezone"] == HOUSEHOLD_ZONE
-
-
-async def test_invalid_reported_zone_is_ignored(
-    household: SimpleNamespace,
-) -> None:
-    await _adopt_new_york(household)
-    household.clock["now"] = _utc(13, 59, 59)
-    _today_iso, instance = await _panel_pack_bag(household, "Mars/Olympus_Mons")
-    # Still read in the adopted zone: 09:59:59 EDT is not overdue.
+    assert await _stored_document(household) == before
+    _today_iso, instance = await _pack_bag(household, "panel")
     assert instance["overdue"] is False
-    assert (await _stored_settings(household))["timezone"] == HOUSEHOLD_ZONE
 
 
-# --- the scheduler follows an adopted zone (task 6351b36d) -------------------
+async def test_fresh_install_zone_stays_empty_across_reads(
+    household: SimpleNamespace,
+) -> None:
+    """Repeated panel and admin reads never write the settings document."""
+    for hour in (3, 13, 23):
+        household.clock["now"] = _utc(hour, 0)
+        for extra in _TIMEZONE_HEADERS:
+            response = await household.client.get(
+                "/api/v1/panel/snapshot",
+                headers={**_panel_headers(), **extra},
+            )
+            assert response.status_code == 200
+        await _pack_bag(household, "admin")
+        settings = await _admin_settings(household)
+        assert settings["timezone"] == ""
+        assert "timezone_configured" not in settings
+    assert await _stored_document(household) is None
+
+
+# --- the scheduler follows a changed zone (task 6351b36d) --------------------
 #
 # On a UTC host with no stored zone the scheduler first plans for UTC
-# midnight; a zone adopted while it sleeps must move the sweep to the
+# midnight; a zone stored while it sleeps must move the sweep to the
 # household's midnight rather than sweep at 20:00 EDT.
 
 #: 13:00 UTC (09:00 EDT) to UTC midnight.
@@ -506,11 +433,20 @@ _UTC_MIDNIGHT_DELAY = 11 * 3600
 _NEW_YORK_MIDNIGHT_DELAY = 15 * 3600
 
 
-async def test_scheduler_replans_when_panel_adopts_zone_while_sleeping(
+async def _store_zone(scheduler, database, zone: str) -> None:
+    """Store ``zone`` the way a settings writer must: under the lock."""
+    async with scheduler.settings_lock:
+        settings = await _settings_store.update_settings(
+            database, {"timezone": zone}
+        )
+        scheduler.settings_changed(settings)
+
+
+async def test_scheduler_replans_when_zone_changes_while_sleeping(
     temp_db_path: str,
 ) -> None:
     runner = AdminRunner(temp_db_path, jwks_for(ADMIN_KEY, KID))
-    async with runner as client:
+    async with runner:
         app_state = runner.app.state
         await app_state.sweep_scheduler.stop()
         delays: list[float] = []
@@ -532,11 +468,9 @@ async def test_scheduler_replans_when_panel_adopts_zone_while_sleeping(
                 await asyncio.wait_for(
                     slept.wait_for(lambda: len(delays) == 1), timeout=5
                 )
-            response = await client.get(
-                "/api/v1/panel/snapshot",
-                headers=_reporting_panel_headers(HOUSEHOLD_ZONE),
+            await _store_zone(
+                scheduler, app_state.db.database, HOUSEHOLD_ZONE
             )
-            assert response.status_code == 200
             async with slept:
                 await asyncio.wait_for(
                     slept.wait_for(lambda: len(delays) == 2), timeout=5
@@ -574,8 +508,8 @@ async def test_scheduler_rechecks_settings_before_sweeping(
             if len(delays) == 1:
                 # The UTC rollover "arrives" after the zone was stored
                 # behind the scheduler's back.
-                await _settings_store.adopt_reported_timezone(
-                    database, HOUSEHOLD_ZONE
+                await _settings_store.update_settings(
+                    database, {"timezone": HOUSEHOLD_ZONE}
                 )
                 return
             replanned.set()
@@ -598,12 +532,12 @@ async def test_scheduler_rechecks_settings_before_sweeping(
         await database.close()
 
 
-# --- adoption is serialised with planning and sweeping (TZ-003) --------------
+# --- settings writes are serialised with planning and sweeping (TZ-003) ------
 #
-# An adoption racing the loop's own settings reads must never leave a
+# A zone write racing the loop's own settings reads must never leave a
 # stale plan behind.  Each test holds the loop at one of its reads and
-# issues a real panel adoption there; when the scheduler's settings lock
-# is held at that point the adoption provably cannot commit until the
+# issues a locked zone write there; when the scheduler's settings lock
+# is held at that point the write provably cannot commit until the
 # loop moves on, otherwise it is awaited to commit inside the window.
 
 
@@ -626,24 +560,12 @@ def _hold_scheduler_read(monkeypatch, scheduler, nth: int, during):
     return real_load
 
 
-async def _adopt_via(client, zone: str) -> None:
-    response = await client.get(
-        "/api/v1/panel/snapshot", headers=_reporting_panel_headers(zone)
-    )
-    assert response.status_code == 200
-
-
-async def _adopt_inside_read(client, scheduler, zone: str) -> asyncio.Task:
-    """Start a panel adoption of ``zone``; let it commit unless serialised."""
-    adoption = asyncio.create_task(
-        client.get(
-            "/api/v1/panel/snapshot", headers=_reporting_panel_headers(zone)
-        )
-    )
-    lock = getattr(scheduler, "settings_lock", None)
-    if lock is None or not lock.locked():
-        await adoption
-    return adoption
+async def _store_inside_read(scheduler, database, zone: str) -> asyncio.Task:
+    """Start a locked write of ``zone``; let it commit unless serialised."""
+    write = asyncio.create_task(_store_zone(scheduler, database, zone))
+    if not scheduler.settings_lock.locked():
+        await write
+    return write
 
 
 async def test_scheduler_follows_successive_zone_changes(
@@ -651,8 +573,9 @@ async def test_scheduler_follows_successive_zone_changes(
 ) -> None:
     """New York -> UTC -> New York while the re-plan read is in flight."""
     runner = AdminRunner(temp_db_path, jwks_for(ADMIN_KEY, KID))
-    async with runner as client:
+    async with runner:
         app_state = runner.app.state
+        database = app_state.db.database
         await app_state.sweep_scheduler.stop()
         delays: list[float] = []
         slept = asyncio.Condition()
@@ -664,15 +587,15 @@ async def test_scheduler_follows_successive_zone_changes(
             await asyncio.Event().wait()
 
         scheduler = MissedSweepScheduler(
-            app_state.db.database, clock=lambda: _utc(13, 0), sleep=sleep_stub
+            database, clock=lambda: _utc(13, 0), sleep=sleep_stub
         )
         app_state.sweep_scheduler = scheduler
-        await _adopt_via(client, HOUSEHOLD_ZONE)
-        adoptions: list[asyncio.Task] = []
+        await _store_zone(scheduler, database, HOUSEHOLD_ZONE)
+        writes: list[asyncio.Task] = []
 
         async def back_to_new_york(_settings) -> None:
-            adoptions.append(
-                await _adopt_inside_read(client, scheduler, HOUSEHOLD_ZONE)
+            writes.append(
+                await _store_inside_read(scheduler, database, HOUSEHOLD_ZONE)
             )
 
         # Read 1 plans New York; read 2 is the re-plan after UTC.
@@ -683,16 +606,16 @@ async def test_scheduler_follows_successive_zone_changes(
                 await asyncio.wait_for(
                     slept.wait_for(lambda: len(delays) == 1), timeout=5
                 )
-            await _adopt_via(client, "UTC")
+            await _store_zone(scheduler, database, "UTC")
             async with slept:
                 await asyncio.wait_for(
                     slept.wait_for(lambda: len(delays) == 3), timeout=5
                 )
-            (adoption,) = adoptions
-            assert (await adoption).status_code == 200
+            (write,) = writes
+            await write
         finally:
             await scheduler.stop()
-    # The in-flight read planned UTC; the New York adoption that followed
+    # The in-flight read planned UTC; the New York write that followed
     # it woke the wait, so the scheduler sleeps on New York midnight.
     assert delays == [
         pytest.approx(_NEW_YORK_MIDNIGHT_DELAY),
@@ -701,12 +624,12 @@ async def test_scheduler_follows_successive_zone_changes(
     ]
 
 
-async def test_adoption_after_presweep_check_cannot_precede_the_sweep(
+async def test_zone_write_after_presweep_check_cannot_precede_the_sweep(
     temp_db_path: str, monkeypatch
 ) -> None:
-    """No sweep runs once an adoption has replaced its plan."""
+    """No sweep runs once a zone write has replaced its plan."""
     runner = AdminRunner(temp_db_path, jwks_for(ADMIN_KEY, KID))
-    async with runner as client:
+    async with runner:
         app_state = runner.app.state
         await app_state.sweep_scheduler.stop()
         delays: list[float] = []
@@ -723,16 +646,18 @@ async def test_adoption_after_presweep_check_cannot_precede_the_sweep(
             app_state.db.database, clock=lambda: _utc(13, 0), sleep=sleep_stub
         )
         app_state.sweep_scheduler = scheduler
-        adoptions: list[asyncio.Task] = []
+        writes: list[asyncio.Task] = []
 
-        async def adopt_new_york(_settings) -> None:
-            adoptions.append(
-                await _adopt_inside_read(client, scheduler, HOUSEHOLD_ZONE)
+        async def store_new_york(_settings) -> None:
+            writes.append(
+                await _store_inside_read(
+                    scheduler, app_state.db.database, HOUSEHOLD_ZONE
+                )
             )
 
         # Read 1 plans UTC; read 2 is the pre-sweep re-check.
         real_load = _hold_scheduler_read(
-            monkeypatch, scheduler, 2, adopt_new_york
+            monkeypatch, scheduler, 2, store_new_york
         )
         swept_under: list[str] = []
 
@@ -746,12 +671,12 @@ async def test_adoption_after_presweep_check_cannot_precede_the_sweep(
         scheduler.start()
         try:
             await asyncio.wait_for(replanned.wait(), timeout=5)
-            (adoption,) = adoptions
-            assert (await adoption).status_code == 200
+            (write,) = writes
+            await write
         finally:
             await scheduler.stop()
     # The sweep ran for the UTC plan with UTC still stored, never after
-    # New York had been adopted; the next plan is New York midnight.
+    # New York had been stored; the next plan is New York midnight.
     assert swept_under == [""]
     assert delays == [
         pytest.approx(_UTC_MIDNIGHT_DELAY),

@@ -33,12 +33,8 @@ after the first update:
   booleans,
 - ``timezone`` — ``""`` (the API host's local time) or an IANA time
   zone name such as ``America/New_York``.  A document stored before
-  this field existed simply lacks it and resolves to ``""``,
-- ``timezone_configured`` — a real boolean: ``True`` once the admin
-  explicitly chose ``timezone`` (including the empty host-local value),
-  so neither Home Assistant's reported zone
-  (:func:`adopt_reported_timezone`) nor the admin UI changes it again.  A document stored before
-  this field existed lacks it and resolves to ``False``.
+  this field existed simply lacks it and resolves to ``""``.  Only an
+  admin's explicit update ever writes it; nothing sets it automatically.
 
 Only values whose core validators ACCEPTED are ever written, so a
 stored document always round-trips through the core's option builders.
@@ -180,15 +176,10 @@ async def update_settings(
     update can never leave a half-applied document behind.
 
     The validated changes are merged onto the current effective
-    settings and the merged (complete, twelve-field) document is persisted
+    settings and the merged (complete, eleven-field) document is persisted
     in one atomic upsert; the updated settings are returned.  The whole
     read → merge → write span runs inside the per-database settings
     lock, so concurrent updates queue instead of interleaving.
-
-    Supplying ``timezone`` without ``timezone_configured`` records the
-    zone as the admin's explicit choice (``timezone_configured`` is
-    persisted ``True`` in the same write); an explicitly supplied
-    ``timezone_configured`` is kept exactly as given.
     """
     if not isinstance(changes, Mapping):
         raise ValueError(
@@ -204,35 +195,9 @@ async def update_settings(
         raise ValueError(
             f"unknown settings field(s): {listed}; known fields: {known}"
         )
-    if "timezone" in changes and "timezone_configured" not in changes:
-        # An admin-supplied zone is an explicit choice, so Home
-        # Assistant's reported zone must no longer replace it.
-        changes = {**changes, "timezone_configured": True}
     async with _settings_lock(database):
         current = await load_settings(database)
         return await _write_merged(database, current, changes)
-
-
-async def adopt_reported_timezone(
-    database: NestQuestDatabase, zone: str
-) -> NestQuestSettings:
-    """Adopt Home Assistant's reported ``zone`` unless the admin chose one.
-
-    While ``timezone_configured`` is ``False`` the stored ``timezone``
-    follows the zone the integration reports, so the API's clock is the
-    household's without any manual setup; ``timezone_configured`` stays
-    ``False`` (the value is automatic, not an admin choice).  Once the
-    admin has chosen — including an explicitly-chosen empty zone — the
-    stored settings are returned untouched.  The check and the write
-    share the settings lock, so a concurrent admin choice is never
-    overwritten.  An invalid ``zone`` raises a ``ValueError`` naming
-    ``timezone`` and writes nothing.
-    """
-    async with _settings_lock(database):
-        current = await load_settings(database)
-        if current.timezone_configured or current.timezone == zone:
-            return current
-        return await _write_merged(database, current, {"timezone": zone})
 
 
 async def _write_merged(

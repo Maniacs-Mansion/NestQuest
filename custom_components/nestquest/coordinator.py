@@ -372,10 +372,7 @@ def coordinator_client_from_entry(
         return _UnconfiguredApiClient()
     if session_factory is not None:
         return NestQuestApiClient(
-            base_url,
-            panel_token,
-            session_factory(hass),
-            household_timezone=hass.config.time_zone,
+            base_url, panel_token, session_factory(hass)
         )
     from custom_components.nestquest.api_client import client_from_entry
 
