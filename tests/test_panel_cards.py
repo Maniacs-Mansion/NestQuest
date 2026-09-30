@@ -1431,6 +1431,26 @@ def test_open_quest_tile_falls_back_to_the_star() -> None:
         assert tile["icon"] is None
 
 
+def test_open_quest_tile_renders_any_free_solid_icon() -> None:
+    """A Font Awesome Free Solid name outside the curated quick-pick list
+    still renders its glyph from the shipped bundle; an unknown ``fa:`` name
+    keeps the star."""
+    tiles = _quest_log_tiles(
+        [
+            _quest_row(1, "fa:rocket"),
+            _quest_row(2, "fa:mug-hot"),
+            _quest_row(3, "fa:definitely-not-an-icon"),
+        ]
+    )
+    for instance_id, key in ((1, "fa:rocket"), (2, "fa:mug-hot")):
+        assert tiles[instance_id]["icon"] == key
+        assert tiles[instance_id]["fill"] == "currentColor"
+        assert tiles[instance_id]["paths"] > 0
+        assert not tiles[instance_id]["star"]
+    assert tiles[3]["star"]
+    assert tiles[3]["icon"] is None
+
+
 def test_sealed_quest_tile_keeps_the_star() -> None:
     """A sealed card keeps its star tile (and its wax seal) whatever the
     definition's icon; only the open card shows the quest's icon."""
