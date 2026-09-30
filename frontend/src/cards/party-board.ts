@@ -937,8 +937,18 @@ export class NestQuestPartyBoardCard extends LitElement {
     `;
   }
 
+  /** The zone the visible date and clock render in: the API's effective
+   *  application timezone — the stored zone, or the API host's when none
+   *  is stored (published on the household rollup by
+   *  custom_components/nestquest/sensor.py — ``timezone``).  Only when the
+   *  rollup carries none does Home Assistant's zone (or the browser's)
+   *  apply. */
   private _timeZone(): string | undefined {
-    return hassTimeZone(this.hass);
+    const stored = this._state("sensor.nestquest_household_quests_due_today")
+      ?.attributes?.timezone;
+    return typeof stored === "string" && stored.trim()
+      ? stored.trim()
+      : hassTimeZone(this.hass);
   }
 
   private _state(entityId: string): StateObject | null {

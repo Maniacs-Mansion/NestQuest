@@ -19,10 +19,15 @@ export interface HouseholdSettings {
   celebration_enabled: boolean;
   /** IANA zone name (e.g. "America/New_York"); "" means the API host's local time. */
   timezone: string;
+  /**
+   * Read-only: the zone the API reads its clock in — `timezone`, or the API
+   * host's own zone when that is "" ("" only when the host's zone has no name).
+   */
+  effective_timezone: string;
 }
 
 /** Only the supplied fields are updated; the API answers with all of them. */
-export type SettingsChanges = Partial<HouseholdSettings>;
+export type SettingsChanges = Partial<Omit<HouseholdSettings, "effective_timezone">>;
 
 export const SETTINGS_PATH = "/api/v1/admin/settings";
 

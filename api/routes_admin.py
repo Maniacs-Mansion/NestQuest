@@ -170,7 +170,10 @@ are deliberately not unified here:
   notify target, the three notification times, the four enable
   toggles, and the ``timezone`` — the IANA household zone the
   household-local dates derive from, empty meaning host local; only an
-  admin's ``PATCH`` ever sets it) — the defaults on a fresh database.
+  admin's ``PATCH`` ever sets it) — the defaults on a fresh database —
+  plus the read-only ``effective_timezone`` (:mod:`api.host_zone`): the
+  zone the API actually reads its clock in, which the admin app formats
+  local time in.
 - ``PATCH /settings`` updates ONLY the supplied fields: the body is a
   JSON object of settings field names to new values, passed STRAIGHT
   to :func:`nestquest_core.settings_store.update_settings` — the
@@ -349,6 +352,7 @@ from pydantic import (
     model_validator,
 )
 
+from api import host_zone
 from api import transitions as api_transitions
 from api.auth import require_admin
 from api.database import DatabaseState
@@ -920,9 +924,14 @@ class AdminSettingsResponse(BaseModel):
     afternoon_reminder_enabled: bool
     end_of_day_report_enabled: bool
     celebration_enabled: bool
-    #: The household IANA time zone the API reads its clock in; ``""``
-    #: means the API host's local time.
+    #: The household IANA time zone the admin stored; ``""`` means the
+    #: API host's local time.
     timezone: str
+    #: The zone the API actually reads its clock in — ``timezone``, or
+    #: the API host's own zone when that is ``""`` (``""`` only when the
+    #: host's zone cannot be named).  Read-only; the admin app formats
+    #: local time in it.
+    effective_timezone: str
 
 
 class AdminMissedSweepResponse(BaseModel):
@@ -2179,8 +2188,9 @@ def _settings_response(
     """Serialize one core NestQuestSettings into the documented payload.
 
     Explicit field-by-field (not ``dataclasses.asdict``) so the payload
-    stays pinned to the eleven documented fields even if the core
-    dataclass later grows another one.
+    stays pinned to the eleven documented fields (plus the read-only
+    ``effective_timezone``) even if the core dataclass later grows
+    another one.
     """
     return AdminSettingsResponse(
         horizon_days=settings.horizon_days,
@@ -2194,6 +2204,7 @@ def _settings_response(
         end_of_day_report_enabled=settings.end_of_day_report_enabled,
         celebration_enabled=settings.celebration_enabled,
         timezone=settings.timezone,
+        effective_timezone=host_zone.effective_timezone(settings.timezone),
     )
 
 
@@ -2330,12 +2341,25 @@ async def admin_update_settings(
     every value has validated — so a rejected update never changes the
     stored settings.  Every core ``ValueError`` is 422
     (:func:`_raise_settings_error`); anything else re-raises.
+
+    The write holds the missed-sweep scheduler's ``settings_lock`` and
+    then tells it (:meth:`~api.scheduler.MissedSweepScheduler.settings_changed`),
+    so a saved ``timezone`` or ``day_rollover_time`` re-plans a sleeping
+    scheduler (an app without one — no lifespan — just writes).
     """
     state: DatabaseState = request.app.state.db
+    scheduler = getattr(request.app.state, "sweep_scheduler", None)
     try:
-        settings = await core_settings_store.update_settings(
-            state.database, changes
-        )
+        if scheduler is None:
+            settings = await core_settings_store.update_settings(
+                state.database, changes
+            )
+        else:
+            async with scheduler.settings_lock:
+                settings = await core_settings_store.update_settings(
+                    state.database, changes
+                )
+                scheduler.settings_changed(settings)
     except ValueError as error:
         _raise_settings_error(error)
     return _settings_response(settings)

@@ -22,7 +22,8 @@ it planned with has moved, and the loop re-reads the settings before
 sweeping and re-plans instead if they no longer match its plan.
 
 Guarantee: no sweep runs for a plan a committed settings write has
-replaced.  A settings writer holds :attr:`MissedSweepScheduler.settings_lock`
+replaced.  The settings writer — the admin ``PATCH /api/v1/admin/settings``
+route, the only one — holds :attr:`MissedSweepScheduler.settings_lock`
 across its write AND its :meth:`~MissedSweepScheduler.settings_changed`
 call; the loop holds the same lock across its plan read (read, record
 the plan, clear the wake flag) and across the pre-sweep re-read plus

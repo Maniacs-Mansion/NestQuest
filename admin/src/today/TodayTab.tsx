@@ -13,6 +13,7 @@ import { ApiRequestError } from "../api/definitions";
 import { uncompleteInstance } from "../api/instances";
 import { useTransitions } from "../api/useTransitions";
 import SettingsScreen from "../settings/SettingsScreen";
+import { useAppTimezone } from "../time/AppTimezone";
 import {
   formatClockTime,
   formatDueTime,
@@ -165,6 +166,7 @@ function AttentionRow({ item, undo }: { item: AttentionItem; undo: UndoControl }
   const { instance, childName } = item;
   const overdue = isOverdueOpen(instance);
   const undoing = undo.pendingId === instance.id;
+  const timeZone = useAppTimezone();
   // TODO(e57facc2): wire "Mark done". The admin plane has no complete route
   // yet, so that action is inert here.
   return (
@@ -187,7 +189,7 @@ function AttentionRow({ item, undo }: { item: AttentionItem; undo: UndoControl }
         ) : (
           // The snapshot carries no completion actor, so "from panel" is not printed.
           <div className="today-event-meta">
-            Completed {formatClockTime(instance.completed_at as string)}
+            Completed {formatClockTime(instance.completed_at as string, timeZone)}
           </div>
         )}
       </div>

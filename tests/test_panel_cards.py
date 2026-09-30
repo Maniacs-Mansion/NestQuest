@@ -567,6 +567,8 @@ def _render_party_board(
     states: dict,
     url: str | None = None,
     click_plate: str | None = None,
+    now: str | None = None,
+    tz: str | None = None,
 ) -> dict:
     """Render the built bundle's party board and return its plates.
 
@@ -575,7 +577,9 @@ def _render_party_board(
     mounts the card with the given config and hass snapshot, optionally
     taps the named plate, and prints the ordered plates its shadow DOM
     renders, which of them are tappable buttons, and the pathname after
-    the optional tap.
+    the optional tap.  ``now`` pins the card's clock to an ISO instant
+    and ``tz`` sets the node process's ``TZ`` — the panel browser's
+    local zone.
     """
     assert BUNDLE_PATH.is_file(), "bundle missing: run cd frontend && npm run build"
     assert RENDER_HARNESS.is_file()
@@ -589,12 +593,15 @@ def _render_party_board(
         spec["url"] = url
     if click_plate is not None:
         spec["click_plate"] = click_plate
+    if now is not None:
+        spec["now"] = now
     completed = subprocess.run(
         ["node", str(RENDER_HARNESS)],
         input=json.dumps(spec),
         capture_output=True,
         text=True,
         timeout=120,
+        env={**os.environ, "TZ": tz} if tz is not None else None,
     )
     assert completed.returncode == 0, (
         f"render harness failed: {completed.stderr}"
@@ -1102,13 +1109,12 @@ def test_quest_log_meta_line_keeps_its_meta_class() -> None:
     ``meta ${late ? "late" : nothing}``, Lit dropped the whole class
     attribute for every quest that was not late, leaving the due line
     unstyled. The rendered markup must carry ``class="meta"`` on time and
-    ``class="meta late"`` overdue — overdue by the panel's pinned clock
-    (07:15 local: the 07:00 quest is late, the 08:15 one is not)."""
+    ``class="meta late"`` overdue — overdue as the API snapshot says."""
     generated = _generate_dashboard(
         {}, _three_child_states(), url="http://homeassistant.local/nestquest"
     )
 
-    def quest(instance_id: int, title: str, due_time: str) -> dict:
+    def quest(instance_id: int, title: str, overdue: bool) -> dict:
         return {
             "id": instance_id,
             "definition_id": instance_id,
@@ -1116,9 +1122,9 @@ def test_quest_log_meta_line_keeps_its_meta_class() -> None:
             "title": title,
             "icon": None,
             "window": "morning",
-            "due_time": due_time,
+            "due_time": "08:15",
             "state": "open",
-            "overdue": False,
+            "overdue": overdue,
             "completed_at": None,
             "on_time": None,
         }
@@ -1131,8 +1137,8 @@ def test_quest_log_meta_line_keeps_its_meta_class() -> None:
             child_id=1,
             present=True,
             instances=[
-                quest(41, "Make Bed", "08:15"),
-                quest(42, "Brush Teeth", "07:00"),
+                quest(41, "Make Bed", overdue=False),
+                quest(42, "Brush Teeth", overdue=True),
             ],
         ),
     }
@@ -1140,8 +1146,6 @@ def test_quest_log_meta_line_keeps_its_meta_class() -> None:
         generated["views"][1]["cards"][0],
         states,
         url="http://homeassistant.local/nestquest/ada",
-        now="2026-09-29T11:15:00Z",
-        tz="America/New_York",
     )
     metas = {}
     for card in result["html"].split('data-instance-id="')[1:]:
@@ -1175,19 +1179,22 @@ def _quest_metas(html: str) -> dict[str, tuple[str, str]]:
     return metas
 
 
-def test_quest_log_overdue_follows_the_panel_local_clock() -> None:
-    """Overdue is decided by the panel's own local clock, not the API's
-    ``overdue`` flag.  The owner saw 8:15 AM quests read OVERDUE at 7:15 AM
-    America/New_York: the API's flag had been computed on a UTC wall clock
-    (11:15).  Here the API still says ``overdue: true`` and Home
-    Assistant reports ``time_zone`` UTC, yet at 07:15 local the 08:15 quest
-    is due, at 08:15 (and 08:16, via the card's own clock tick) it is
-    overdue, and a quest with no due time is never overdue."""
+def test_quest_log_overdue_follows_the_api_snapshot_not_the_panel_clock() -> None:
+    """The stored application timezone is the single source of local-time
+    truth: the API computes each instance's ``overdue`` in that zone and
+    the card renders exactly that, whatever the panel browser's own clock
+    or zone says.  Here the browser runs in Pacific/Auckland and its clock
+    is pinned (and later ticked) to instants where every due time has, or
+    has not yet, arrived on its local wall clock — the card must still
+    show the snapshot's state: the ``overdue: true`` 08:15 quest reads
+    OVERDUE even though the browser reads long before 08:15, and the
+    ``overdue: false`` 07:00 quest stays due even though the browser reads
+    long after 07:00."""
     generated = _generate_dashboard(
         {}, _three_child_states(), url="http://homeassistant.local/nestquest"
     )
 
-    def quest(instance_id: int, title: str, due_time: str | None) -> dict:
+    def quest(instance_id: int, title: str, due_time: str, overdue: bool) -> dict:
         return {
             "id": instance_id,
             "definition_id": instance_id,
@@ -1197,7 +1204,7 @@ def test_quest_log_overdue_follows_the_panel_local_clock() -> None:
             "window": "morning",
             "due_time": due_time,
             "state": "open",
-            "overdue": True,
+            "overdue": overdue,
             "completed_at": None,
             "on_time": None,
         }
@@ -1210,29 +1217,96 @@ def test_quest_log_overdue_follows_the_panel_local_clock() -> None:
             child_id=1,
             present=True,
             instances=[
-                quest(42, "Brush Teeth", "08:15"),
-                quest(43, "Feed Fish", None),
+                quest(42, "Brush Teeth", "08:15", overdue=True),
+                quest(43, "Feed Fish", "07:00", overdue=False),
             ],
         ),
     }
+    # 2026-09-29T17:00Z is 06:00 NZDT on the 30th: before both due times.
+    # 2026-09-29T23:00Z is 12:00 NZDT: after both.
     result = _render_quest_log(
         generated["views"][1]["cards"][0],
         states,
         url="http://homeassistant.local/nestquest/ada",
-        now="2026-09-29T11:15:00Z",
-        advance_to=["2026-09-29T12:15:00Z", "2026-09-29T12:16:00Z"],
-        tz="America/New_York",
+        now="2026-09-29T17:00:00Z",
+        advance_to=["2026-09-29T23:00:00Z"],
+        tz="Pacific/Auckland",
     )
-    due_by = ('class="meta"', "Due by 8:15 AM")
     overdue = ('class="meta late"', "Overdue · due 8:15 AM")
-    not_due = ('class="meta"', "Due today")
-    at_0715, at_0815, at_0816 = (
+    due_by = ('class="meta"', "Due by 7:00 AM")
+    before, (after,) = (
         _quest_metas(result["html"]),
-        *(_quest_metas(tick["html"]) for tick in result["ticks"]),
+        [_quest_metas(tick["html"]) for tick in result["ticks"]],
     )
-    assert at_0715 == {"42": due_by, "43": not_due}, at_0715
-    assert at_0815 == {"42": overdue, "43": not_due}, at_0815
-    assert at_0816 == {"42": overdue, "43": not_due}, at_0816
+    assert before == {"42": overdue, "43": due_by}, before
+    assert after == {"42": overdue, "43": due_by}, after
+
+
+def test_panel_date_and_clock_follow_the_stored_application_timezone() -> None:
+    """The stored application timezone is the single source of local-time
+    truth for the panel's visible date and clock too: the household rollup
+    publishes it (``timezone`` — the API's effective zone) and both cards
+    format in it — the party
+    board's kicker and dock date and clock, the quest log's header date —
+    even though Home Assistant's zone and the panel browser's zone are both
+    UTC.  At 2026-09-29T23:30Z it is still Tuesday 11:30 PM in UTC but
+    already Wednesday 12:30 PM in Pacific/Auckland (NZDT)."""
+    generated = _generate_dashboard(
+        {}, _three_child_states(), url="http://homeassistant.local/nestquest"
+    )
+    states = _three_child_states()
+    states["sensor.nestquest_household_quests_due_today"]["attributes"][
+        "timezone"
+    ] = "Pacific/Auckland"
+    now = "2026-09-29T23:30:00Z"
+
+    def text(html: str) -> str:
+        return re.sub(r"<!--.*?-->", "", html).replace("\u202f", " ")
+
+    def board_date_and_clock(html: str) -> tuple[str, str, str]:
+        found = re.search(
+            r'<p class="kicker">The Party · (.*?)</p>.*?'
+            r'<span class="date">(.*?)</span>.*?<span class="clock">(.*?)</span>',
+            text(html),
+            re.DOTALL,
+        )
+        assert found is not None, html
+        return found.group(1), found.group(2), found.group(3)
+
+    board = _render_party_board(
+        generated["views"][0]["cards"][0], states, now=now, tz="UTC"
+    )["html"]
+    assert board_date_and_clock(board) == (
+        "Wednesday, Sep 30",
+        "Wednesday, Sep 30",
+        "12:30 PM",
+    )
+
+    log = _render_quest_log(
+        generated["views"][1]["cards"][0],
+        states,
+        url="http://homeassistant.local/nestquest/ada",
+        now=now,
+        tz="UTC",
+    )["html"]
+    sub = re.search(r'<p class="sub">\s*(.*?) ·', text(log), re.DOTALL)
+    assert sub is not None, log
+    assert sub.group(1) == "Wednesday, Sep 30"
+
+    # With no zone stored the API publishes its host's own zone, so the
+    # rollup always carries one; only a rollup without it (an API older
+    # than the field) falls back to Home Assistant's zone (UTC here).
+    del states["sensor.nestquest_household_quests_due_today"]["attributes"][
+        "timezone"
+    ]
+    fallback = _render_party_board(
+        generated["views"][0]["cards"][0], states, now=now, tz="UTC"
+    )["html"]
+    assert board_date_and_clock(fallback) == (
+        "Tuesday, Sep 29",
+        "Tuesday, Sep 29",
+        "11:30 PM",
+    )
 
 
 def test_quest_log_crest_matches_the_spec_geometry() -> None:

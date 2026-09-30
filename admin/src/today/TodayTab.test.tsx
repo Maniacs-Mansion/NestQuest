@@ -5,6 +5,7 @@ import type { AdminSnapshot, SnapshotInstance } from "../api/snapshot";
 import { TransitionsProvider } from "../api/useTransitions";
 import { frame, testStream, type TestStream } from "../api/testStream";
 import { storeTokens } from "../auth/oidc";
+import { AppTimezoneProvider } from "../time/AppTimezone";
 
 function instance(overrides: Partial<SnapshotInstance>): SnapshotInstance {
   return {
@@ -404,5 +405,64 @@ describe("TodayTab Undo and live updates", () => {
     unmount();
     expect(signal.aborted).toBe(true);
     await waitFor(() => expect(streams[0].cancelled()).toBe(true));
+  });
+});
+
+describe("TodayTab in the stored application timezone", () => {
+  function renderWithZone(timezone: string, effective_timezone = timezone) {
+    fetchMock.mockImplementation((url: string) =>
+      Promise.resolve(
+        String(url).endsWith("/api/v1/admin/settings")
+          ? jsonResponse({ timezone, effective_timezone })
+          : jsonResponse(SNAPSHOT),
+      ),
+    );
+    render(
+      <AppTimezoneProvider>
+        <TodayTab />
+      </AppTimezoneProvider>,
+    );
+  }
+
+  beforeAll(() => {
+    // The browser runs in UTC; the household lives in Auckland (UTC+12 on Sep 23).
+    vi.stubEnv("TZ", "UTC");
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+  });
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the completion clock in the stored zone, not the browser's", async () => {
+    renderWithZone("Pacific/Auckland");
+    const completed = await screen.findByTestId("attention-12");
+    // 11:04 UTC is 11:04 PM in Auckland.
+    expect(within(completed).getByText("Completed 11:04 PM")).toBeTruthy();
+    // The header's day is the API's household-local today_iso, as-is.
+    expect(screen.getByText("Wednesday, September 23 · cycle day 5 of 14")).toBeTruthy();
+  });
+
+  it("an empty stored zone shows the clock in the API host's published zone", async () => {
+    renderWithZone("", "Pacific/Auckland");
+    const completed = await screen.findByTestId("attention-12");
+    expect(within(completed).getByText("Completed 11:04 PM")).toBeTruthy();
+  });
+
+  it("only an API that publishes no zone leaves the browser's local clock", async () => {
+    renderWithZone("", "");
+    const completed = await screen.findByTestId("attention-12");
+    expect(within(completed).getByText("Completed 11:04 AM")).toBeTruthy();
   });
 });

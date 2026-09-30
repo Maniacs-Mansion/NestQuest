@@ -76,6 +76,7 @@ def _payload(children) -> dict:
     return {
         "today_iso": _today_iso(),
         "cycle_day": 0,
+        "timezone": "",
         "children": list(children),
     }
 
@@ -567,6 +568,22 @@ async def test_household_due_sensor_publishes_the_ordered_child_roster(
         str(BO): 1,
         str(CORY): 0,
     }
+
+
+async def test_household_due_sensor_publishes_the_stored_zone(
+    hass, make_entry
+) -> None:
+    """The rollup carries the snapshot's stored application zone verbatim
+    (the panel cards format their date and clock in it); ``""`` — no zone
+    stored — passes through unchanged for the cards' documented fallback."""
+    zoned = {**_seeded_payload(), "timezone": "Pacific/Auckland"}
+    entry, coordinator, _client = await _setup_entry(
+        hass, make_entry, zoned, _seeded_payload()
+    )
+    rollup = hass.entities["nestquest_household_quests_due_today"]
+    assert rollup.extra_state_attributes["timezone"] == "Pacific/Auckland"
+    await coordinator.async_refresh()
+    assert rollup.extra_state_attributes["timezone"] == ""
 
 
 async def test_household_roster_tracks_the_snapshot_on_refresh(

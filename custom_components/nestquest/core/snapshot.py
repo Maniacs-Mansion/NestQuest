@@ -96,6 +96,11 @@ class NestQuestSnapshot:
     today_iso: str
     children: tuple[ChildDaySnapshot, ...]
     cycle_day: int
+    #: The application timezone the admin stored (``""`` when unset —
+    #: the host's local time; the API publishes its effective zone in
+    #: its place, api/host_zone.py).  The panel cards format their
+    #: visible date and clock in it; it never re-resolves the day itself.
+    timezone: str = ""
 
 
 def _cycle_day(
@@ -319,4 +324,5 @@ async def build_snapshot(
         today_iso=today_iso,
         children=tuple(snapshots),
         cycle_day=_cycle_day(patterns, children, today),
+        timezone=settings.timezone,
     )

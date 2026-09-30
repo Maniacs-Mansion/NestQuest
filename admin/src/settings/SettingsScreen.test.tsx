@@ -6,6 +6,7 @@ import SettingsScreen, { SCROLL_BOTTOM_PADDING } from "./SettingsScreen";
 import type { AdminChild } from "../api/definitions";
 import type { HouseholdSettings } from "../api/settings";
 import { storeTokens } from "../auth/oidc";
+import { AppTimezoneProvider, useAppTimezone } from "../time/AppTimezone";
 
 const CHILDREN_PATH = "/api/v1/admin/children";
 const REORDER_PATH = `${CHILDREN_PATH}/reorder`;
@@ -23,7 +24,16 @@ const DEFAULT_SETTINGS: HouseholdSettings = {
   end_of_day_report_enabled: true,
   celebration_enabled: false,
   timezone: "America/Chicago",
+  effective_timezone: "America/Chicago",
 };
+
+/** The API host's own zone: the effective zone while none is stored. */
+const API_HOST_ZONE = "Europe/London";
+
+/** The settings as the API answers: `effective_timezone` derived like the API's. */
+function settingsBody(): HouseholdSettings {
+  return { ...settings, effective_timezone: settings.timezone || API_HOST_ZONE };
+}
 
 function child(
   id: number,
@@ -82,10 +92,10 @@ async function routeFetch(url: string, init: RequestInit = {}): Promise<Response
     return respond();
   }
   if (path === CHILDREN_PATH && method === "GET") return jsonResponse({ children });
-  if (path === SETTINGS_PATH && method === "GET") return jsonResponse(settings);
+  if (path === SETTINGS_PATH && method === "GET") return jsonResponse(settingsBody());
   if (path === SETTINGS_PATH && method === "PATCH") {
     settings = { ...settings, ...body };
-    return jsonResponse(settings);
+    return jsonResponse(settingsBody());
   }
   if (path === CHILDREN_PATH && method === "POST") {
     const created = child(9, body.display_name, body.sort_order ?? 0, {
@@ -789,5 +799,45 @@ describe("SettingsScreen — manual timezone control", () => {
       expect(Object.keys(write.body as object)).toEqual(["timezone"]);
       expect(write.body).not.toHaveProperty("timezone_configured");
     }
+  });
+});
+
+describe("SettingsScreen — the saved zone applies app-wide", () => {
+  function ZoneProbe() {
+    return <output data-testid="app-zone">{useAppTimezone() || "(browser)"}</output>;
+  }
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+    children = [child(1, "Declan", 1)];
+    settings = { ...DEFAULT_SETTINGS, timezone: "" };
+    writeResponse = null;
+    fetchMock = vi.fn(async (url: string, init?: RequestInit) => routeFetch(url, init));
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("a saved zone becomes the application timezone at once", async () => {
+    render(
+      <AppTimezoneProvider>
+        <ZoneProbe />
+        <SettingsScreen onClose={vi.fn()} />
+      </AppTimezoneProvider>,
+    );
+    const form = await screen.findByRole("form", { name: "Preferences" });
+    // No zone stored: the application runs in the API host's zone.
+    expect(screen.getByTestId("app-zone").textContent).toBe(API_HOST_ZONE);
+
+    fireEvent.change(within(form).getByRole("combobox", { name: "Timezone" }), {
+      target: { value: "America/New_York" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Save preferences" }));
+    await screen.findByText("Preferences saved.");
+    expect(screen.getByTestId("app-zone").textContent).toBe("America/New_York");
   });
 });

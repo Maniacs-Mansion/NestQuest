@@ -74,6 +74,10 @@ async function routeFetch(url: string, init: RequestInit = {}): Promise<Response
     overrides = overrides.filter((o) => o.id !== Number(deleteMatch[1]));
     return jsonResponse({ status: "ok" });
   }
+  // The shell loads the application timezone first ("" = none published).
+  if (path.endsWith("/admin/settings")) {
+    return jsonResponse({ timezone: "", effective_timezone: "" });
+  }
   if (path.endsWith("/admin/children")) return jsonResponse({ children: CHILDREN });
   const patternsMatch = /\/children\/(\d+)\/presence-patterns$/.exec(path);
   if (patternsMatch) {

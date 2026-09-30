@@ -21,6 +21,7 @@ panel payload), and returns the documented JSON shape:
     {
       "today_iso": "2026-09-22",
       "cycle_day": 2,
+      "timezone": "Pacific/Auckland",
       "children": [
         {
           "child_id": 1,
@@ -45,7 +46,11 @@ panel payload), and returns the documented JSON shape:
 active children ``ORDER BY sort_order, id``); ``state`` is the
 documented panel spelling ``open`` | ``completed`` (§1 of
 design/ENTITIES-AND-SERVICES.md); ``cycle_day`` is today's 1-based day
-in the first scheduled child's custody cycle (0 when no child has one).
+in the first scheduled child's custody cycle (0 when no child has one);
+``timezone`` is the effective application timezone — the zone the admin
+stored, or the API host's own zone when none is (``""`` only when the
+host's zone cannot be named; :mod:`api.host_zone`) — which the panel
+cards format their visible date and clock in.
 The same :class:`PanelSnapshotResponse` Pydantic model is the route's
 ``response_model``, so the OpenAPI document carries the shape too.
 """
@@ -66,6 +71,7 @@ from api.nestquest_core import (
     core_settings_store,
     core_snapshot,
 )
+from api import host_zone
 from api import transitions as api_transitions
 from api.sse import transition_event_stream
 
@@ -126,12 +132,14 @@ class PanelSnapshotResponse(BaseModel):
 
     ``today_iso`` anchors the payload's day; ``cycle_day`` is today's
     1-based day in the first scheduled child's custody cycle (0 when no
-    child has a schedule); ``children`` is in the household's sort
-    order.
+    child has a schedule); ``timezone`` is the effective application
+    timezone (:func:`api.host_zone.effective_timezone`); ``children`` is
+    in the household's sort order.
     """
 
     today_iso: str
     cycle_day: int
+    timezone: str
     children: list[PanelChildPayload]
 
 
@@ -218,6 +226,7 @@ async def panel_snapshot(request: Request) -> PanelSnapshotResponse:
     return PanelSnapshotResponse(
         today_iso=snapshot.today_iso,
         cycle_day=snapshot.cycle_day,
+        timezone=host_zone.effective_timezone(snapshot.timezone),
         children=[
             PanelChildPayload(
                 child_id=child.child_id,

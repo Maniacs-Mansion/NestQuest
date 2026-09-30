@@ -55,13 +55,6 @@ export function cycleWeekIndex(anchorDate: string, date: string, cycleLengthWeek
   return mod(Math.floor(days / 7), cycleLengthWeeks);
 }
 
-/** The viewer's local calendar date. */
-export function localTodayIso(now: Date = new Date()): string {
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${now.getFullYear()}-${month}-${day}`;
-}
-
 /** "YYYY-MM-01" of the month containing `iso`, shifted by `delta` months. */
 export function monthStart(iso: string, delta = 0): string {
   const [year, month] = iso.split("-").map(Number);

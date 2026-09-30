@@ -910,6 +910,7 @@ def coordinator_client_from_test_override():
             {
                 "today_iso": datetime.date.today().isoformat(),
                 "cycle_day": 0,
+                "timezone": "",
                 "children": [],
             }
         )

@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from api import routes_admin, routes_panel
+from api import host_zone, routes_admin, routes_panel
 from api import scheduler as scheduler_module
 from api.database import _executor
 from api.scheduler import MissedSweepScheduler, _delay_seconds
@@ -92,6 +92,7 @@ async def household(temp_db_path: str, monkeypatch) -> SimpleNamespace:
             seed=seed,
             clock=clock,
             database=runner.app.state.db.database,
+            app=runner.app,
         )
 
 
@@ -530,6 +531,146 @@ async def test_scheduler_rechecks_settings_before_sweeping(
         ]
     finally:
         await database.close()
+
+
+# --- the admin settings route is the scheduler's writer (task 7e173881) ------
+#
+# ``PATCH /api/v1/admin/settings`` is the only settings writer: it holds
+# the scheduler's settings lock across the write and tells the scheduler,
+# so a saved zone or rollover re-plans a sleeping scheduler.
+
+
+async def _sleeping_scheduler(household: SimpleNamespace):
+    """Swap in a scheduler on the pinned clock; return it and its delays.
+
+    Waits until it sleeps on its first plan.
+    """
+    await household.app.state.sweep_scheduler.stop()
+    delays: list[float] = []
+    slept = asyncio.Condition()
+
+    async def sleep_stub(seconds: float) -> None:
+        async with slept:
+            delays.append(seconds)
+            slept.notify_all()
+        await asyncio.Event().wait()
+
+    scheduler = MissedSweepScheduler(
+        household.database,
+        clock=lambda: household.clock["now"],
+        sleep=sleep_stub,
+    )
+    household.app.state.sweep_scheduler = scheduler
+    scheduler.start()
+
+    async def wait_for_sleeps(count: int) -> None:
+        async with slept:
+            await asyncio.wait_for(
+                slept.wait_for(lambda: len(delays) == count), timeout=5
+            )
+
+    await wait_for_sleeps(1)
+    return scheduler, delays, wait_for_sleeps
+
+
+@pytest.mark.parametrize(
+    ("changes", "replanned_delay"),
+    [
+        # 13:00 UTC is 09:00 EDT: New York midnight is 15 hours away.
+        ({"timezone": HOUSEHOLD_ZONE}, _NEW_YORK_MIDNIGHT_DELAY),
+        # Still UTC: 13:00 to a 14:30 rollover is 90 minutes.
+        ({"day_rollover_time": "14:30"}, 90 * 60),
+    ],
+    ids=["timezone", "day_rollover_time"],
+)
+async def test_admin_settings_patch_replans_a_sleeping_scheduler(
+    household: SimpleNamespace, changes: dict, replanned_delay: float
+) -> None:
+    household.clock["now"] = _utc(13, 0)
+    scheduler, delays, wait_for_sleeps = await _sleeping_scheduler(household)
+    try:
+        response = await household.client.patch(
+            "/api/v1/admin/settings", json=changes, headers=_admin_headers()
+        )
+        assert response.status_code == 200
+        await wait_for_sleeps(2)
+    finally:
+        await scheduler.stop()
+    assert delays == [
+        pytest.approx(_UTC_MIDNIGHT_DELAY),
+        pytest.approx(replanned_delay),
+    ]
+
+
+async def test_admin_saved_zone_is_authoritative_across_surfaces(
+    household: SimpleNamespace,
+) -> None:
+    """ONE instant, read by every surface in exactly the admin's zone.
+
+    Asia/Kolkata (UTC+05:30) matches neither the UTC host nor any other
+    zone in play.  04:30:01 UTC is 10:00:01 there: the 10:00 quest is
+    overdue on both snapshots (it would not be in UTC, 04:30), the
+    household day is the 26th, and the scheduler sleeps the 299 s to a
+    10:05 rollover (UTC would be 5h35m).
+    """
+    household.clock["now"] = _utc(4, 30, 1)
+    scheduler, delays, wait_for_sleeps = await _sleeping_scheduler(household)
+    try:
+        response = await household.client.patch(
+            "/api/v1/admin/settings",
+            json={"timezone": "Asia/Kolkata", "day_rollover_time": "10:05"},
+            headers=_admin_headers(),
+        )
+        assert response.status_code == 200
+        await wait_for_sleeps(2)
+        for plane in ("panel", "admin"):
+            today_iso, instance = await _pack_bag(household, plane)
+            assert today_iso == TODAY.isoformat(), plane
+            assert instance["overdue"] is True, plane
+    finally:
+        await scheduler.stop()
+    assert delays[1] == pytest.approx(299)
+
+
+async def test_empty_zone_publishes_the_api_host_zone_to_panel_and_admin(
+    household: SimpleNamespace, monkeypatch
+) -> None:
+    """With no zone stored, the API reads the host's local time — and the
+    panel snapshot and the admin settings both publish that host's own
+    zone, so the cards and the admin app format in the API's zone, never
+    Home Assistant's or the browser's.
+
+    The host runs Pacific/Auckland: 12:30 UTC on the 26th is already
+    00:30 on the 27th there, so the API's household day is the 27th while
+    a UTC Home Assistant or browser would still read the 26th.  Once the
+    admin saves a zone, both publish exactly that zone.
+    """
+    host = "Pacific/Auckland"
+    monkeypatch.setattr(host_zone, "host_timezone", lambda: host)
+    household.clock["now"] = _utc(12, 30).astimezone(ZoneInfo(host))
+
+    panel = await household.client.get(
+        "/api/v1/panel/snapshot", headers=_panel_headers()
+    )
+    assert panel.status_code == 200
+    settings = await _admin_settings(household)
+    assert settings["timezone"] == ""
+    assert panel.json()["timezone"] == settings["effective_timezone"] == host
+    # The published zone reproduces the API's own household day.
+    assert panel.json()["today_iso"] == "2026-09-27"
+    assert (
+        _utc(12, 30).astimezone(ZoneInfo(host)).date().isoformat()
+        == panel.json()["today_iso"]
+    )
+
+    await _set_zone(household, "America/Chicago")
+    panel = await household.client.get(
+        "/api/v1/panel/snapshot", headers=_panel_headers()
+    )
+    settings = await _admin_settings(household)
+    assert settings["timezone"] == "America/Chicago"
+    assert panel.json()["timezone"] == settings["effective_timezone"]
+    assert settings["effective_timezone"] == "America/Chicago"
 
 
 # --- settings writes are serialised with planning and sweeping (TZ-003) ------

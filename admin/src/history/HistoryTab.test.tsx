@@ -5,6 +5,7 @@ import type { HistoryFilter, HistoryRow } from "../api/history";
 import { storeTokens } from "../auth/oidc";
 import { TransitionsProvider } from "../api/useTransitions";
 import { frame, testStream, type TestStream } from "../api/testStream";
+import { AppTimezoneProvider } from "../time/AppTimezone";
 
 const TODAY = "2026-09-23";
 
@@ -627,5 +628,119 @@ describe("HistoryTab live updates", () => {
     expect(screen.queryByTestId("history-error")).toBeNull();
     expect(screen.queryByTestId("history-loading")).toBeNull();
     expect(screen.getAllByTestId("history-row")).toHaveLength(ROWS.all.length);
+  });
+});
+
+describe("HistoryTab in the stored application timezone", () => {
+  // 13:00 UTC on Sep 23 is 01:00 on Sep 24 in Auckland (NZST, UTC+12).
+  const NOW = new Date("2026-09-23T13:00:00Z");
+  // Due 00:10 Auckland on Sep 24, done 00:30 Auckland (12:30 UTC on Sep 23).
+  const LATE_NZ = row({
+    instance_id: 7,
+    quest_title: "Feed cat",
+    due_date: "2026-09-24",
+    due_time: "00:10",
+    occurred_at: "2026-09-23T12:30:00Z",
+    was_on_time: false,
+  });
+  // 22:00 Auckland on Sep 23; 10:00 UTC.
+  const EVENING_NZ = row({ instance_id: 8, occurred_at: "2026-09-23T10:00:00Z" });
+
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  function historyRequests(): URL[] {
+    return fetchMock.mock.calls
+      .map(([url]) => new URL(String(url), "http://x"))
+      .filter((url) => url.pathname === "/api/v1/admin/history");
+  }
+
+  async function renderWithZone(timezone: string, effective_timezone = timezone) {
+    fetchMock = vi.fn((url: string) => {
+      const parsed = new URL(url, "http://x");
+      if (parsed.pathname.endsWith("/api/v1/admin/settings")) {
+        return Promise.resolve(jsonResponse({ timezone, effective_timezone }));
+      }
+      const filter = parsed.searchParams.get("filter");
+      const rows = filter === "all" ? [EVENING_NZ, LATE_NZ] : [];
+      return Promise.resolve(
+        jsonResponse({
+          filter,
+          start: parsed.searchParams.get("start"),
+          end: parsed.searchParams.get("end"),
+          count: rows.length,
+          rows,
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <AppTimezoneProvider>
+        <HistoryTab />
+      </AppTimezoneProvider>,
+    );
+    await screen.findByTestId("stat-on-time");
+  }
+
+  function times(section: HTMLElement): string[] {
+    return Array.from(section.querySelectorAll(".history-event-time")).map(
+      (el) => el.textContent ?? "",
+    );
+  }
+
+  beforeAll(() => {
+    vi.stubEnv("TZ", "UTC");
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+  });
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ["the stored zone", "Pacific/Auckland"],
+    ["the API host's published zone when none is stored", ""],
+  ])("today, day grouping, clock and lateness follow %s", async (_label, stored) => {
+    await renderWithZone(stored, "Pacific/Auckland");
+
+    for (const url of historyRequests()) {
+      expect(url.searchParams.get("end")).toBe("2026-09-24");
+      expect(url.searchParams.get("start")).toBe("2026-09-11");
+    }
+    const today = screen.getByTestId("day-2026-09-24");
+    expect(within(today).getByText("Today")).toBeTruthy();
+    expect(times(today)).toEqual(["12:30 AM"]);
+    expect(metas(today)).toEqual(["completed · panel (Declan) · late 20 min"]);
+
+    const yesterday = screen.getByTestId("day-2026-09-23");
+    expect(within(yesterday).getByText("Yesterday")).toBeTruthy();
+    expect(times(yesterday)).toEqual(["10:00 PM"]);
+  });
+
+  it("only an API that publishes no zone leaves the browser's local day and clock", async () => {
+    await renderWithZone("", "");
+
+    for (const url of historyRequests()) {
+      expect(url.searchParams.get("end")).toBe("2026-09-23");
+    }
+    expect(screen.queryByTestId("day-2026-09-24")).toBeNull();
+    const today = screen.getByTestId("day-2026-09-23");
+    expect(within(today).getByText("Today")).toBeTruthy();
+    expect(times(today)).toEqual(["12:30 PM", "10:00 AM"]);
+    // Due 00:10 UTC on Sep 24 is after the 12:30 UTC completion: no minutes.
+    expect(metas(today)).toEqual([
+      "completed · panel (Declan) · late",
+      "completed · panel (Declan) · on time",
+    ]);
   });
 });

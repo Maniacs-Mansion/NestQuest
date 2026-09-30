@@ -60,6 +60,7 @@ def _payload(children) -> dict:
     return {
         "today_iso": "2026-09-23",
         "cycle_day": 0,
+        "timezone": "",
         "children": list(children),
     }
 
