@@ -7,8 +7,10 @@ import {
   FA_DEFINITION_ICONS,
   emojiIconKey,
   faIconName,
+  faTypedIconKey,
   findDefinitionIcon,
   normalizeDefinitionIconName,
+  searchFaIcons,
 } from "./definitionIcons";
 import type { AdminChild, DefinitionRule, QuestDefinition } from "../api/definitions";
 import { storeTokens } from "../auth/oidc";
@@ -1353,7 +1355,7 @@ describe("DefinitionsTab Font Awesome and emoji icons", () => {
     fireEvent.click(within(s).getByRole("button", { name: "Morning" }));
   }
 
-  it("ships the curated Font Awesome subset, each drawn as a filled glyph", () => {
+  it("ships the curated Font Awesome quick picks, each drawn as a filled glyph", () => {
     expect(FA_DEFINITION_ICONS.length).toBeGreaterThan(0);
     for (const entry of FA_DEFINITION_ICONS) {
       expect(entry.kind).toBe("fa");
@@ -1526,6 +1528,245 @@ describe("DefinitionsTab Font Awesome and emoji icons", () => {
     await save(s);
     expect((api.writes()[1].body as { icon: string | null }).icon).toBeNull();
     await waitFor(() => expect(rowGlyph(screen.getByTestId("definition-55"))).toBe("fallback"));
+  });
+});
+
+/* ── Font Awesome search ────────────────────────────────────────────── */
+
+describe("DefinitionsTab Font Awesome search", () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    storeTokens({ access_token: "at-123", expires_in: 600 });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  const CURATED = new Set(FA_DEFINITION_ICONS.map((icon) => icon.name));
+
+  function searchInput(s: HTMLElement): HTMLInputElement {
+    return within(s).getByRole("searchbox", { name: "Search Font Awesome icons" }) as HTMLInputElement;
+  }
+
+  function results(s: HTMLElement): HTMLElement {
+    return within(s).getByRole("radiogroup", { name: "Font Awesome search results" });
+  }
+
+  function resultKeys(s: HTMLElement): string[] {
+    return within(results(s))
+      .getAllByRole("radio")
+      .map((option) => option.getAttribute("data-icon-option")!);
+  }
+
+  function rowFaIcon(row: HTMLElement): string | null {
+    const svg = row.querySelector(".defs-row-glyph svg");
+    return svg!.getAttribute("fill") === "none" ? null : svg!.getAttribute("data-icon");
+  }
+
+  async function save(s: HTMLElement) {
+    await act(async () => {
+      fireEvent.click(within(s).getByRole("button", { name: "Save changes" }));
+    });
+  }
+
+  function fillNewTask(s: HTMLElement) {
+    fireEvent.change(within(s).getByRole("textbox", { name: "Title" }), {
+      target: { value: "Walk the dog" },
+    });
+    fireEvent.click(within(s).getByRole("button", { name: /Assigned children/ }));
+    fireEvent.click(within(s).getByRole("checkbox", { name: "Declan" }));
+    fireEvent.click(within(s).getByRole("button", { name: "Morning" }));
+  }
+
+  it("searches the full Free Solid set by name or label, exact and prefix matches first", () => {
+    expect(searchFaIcons("")).toEqual([]);
+    expect(searchFaIcons("   ")).toEqual([]);
+    const dog = searchFaIcons(" DOG ").map((icon) => icon.name);
+    expect(dog[0]).toBe("dog");
+    expect(dog).toEqual(expect.arrayContaining(["hotdog", "shield-dog"]));
+    expect(dog.some((name) => !CURATED.has(name))).toBe(true);
+    // A label match: "Shield Dog" contains "shield d" though no name does.
+    expect(searchFaIcons("shield d").map((icon) => icon.name)).toContain("shield-dog");
+    expect(searchFaIcons("dog-leashed")).toEqual([]);
+
+    expect(faTypedIconKey("dragon")).toBe("fa:dragon");
+    expect(faTypedIconKey("  Dragon ")).toBe("fa:dragon");
+    for (const bad of ["", "drag", "dgo", "dog-leashed", "github", "fa:dog"]) {
+      expect(faTypedIconKey(bad), bad).toBeNull();
+    }
+  });
+
+  it("shows the curated quick picks while the search is empty", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    const s = sheet();
+    expect(searchInput(s).value).toBe("");
+    const quick = within(s).getByRole("radiogroup", { name: "Font Awesome" });
+    expect(within(quick).getAllByRole("radio")).toHaveLength(FA_DEFINITION_ICONS.length);
+    expect(within(s).queryByRole("radiogroup", { name: "Font Awesome search results" })).toBeNull();
+  });
+
+  it("a query swaps the quick picks for one bounded, labelled page of results", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    const s = sheet();
+    fireEvent.change(searchInput(s), { target: { value: "a" } });
+    const total = searchFaIcons("a").length;
+    expect(total).toBeGreaterThan(80);
+    expect(within(s).queryByRole("radiogroup", { name: "Font Awesome" })).toBeNull();
+    expect(resultKeys(s)).toHaveLength(40);
+    expect(within(results(s)).getAllByRole("radio")[0].textContent).toBe(searchFaIcons("a")[0].label);
+    expect(within(s).getByText(`Showing 1–40 of ${total}`)).toBeTruthy();
+    expect(within(s).queryByRole("button", { name: "Previous" })).toBeNull();
+
+    // "Show more" replaces the page rather than appending to it.
+    const firstPage = resultKeys(s);
+    fireEvent.click(within(s).getByRole("button", { name: "Show more" }));
+    expect(resultKeys(s)).toEqual(searchFaIcons("a").slice(40, 80).map((icon) => `fa:${icon.name}`));
+    expect(resultKeys(s).some((key) => firstPage.includes(key))).toBe(false);
+    expect(within(s).getByText(`Showing 41–80 of ${total}`)).toBeTruthy();
+    fireEvent.click(within(s).getByRole("button", { name: "Previous" }));
+    expect(resultKeys(s)).toEqual(firstPage);
+
+    // A new query starts again from the first page.
+    fireEvent.change(searchInput(s), { target: { value: "dog" } });
+    expect(resultKeys(s)[0]).toBe("fa:dog");
+    expect(resultKeys(s)).toContain("fa:hotdog");
+    expect(within(s).queryByRole("button", { name: "Show more" })).toBeNull();
+
+    fireEvent.change(searchInput(s), { target: { value: "" } });
+    expect(within(s).getByRole("radiogroup", { name: "Font Awesome" })).toBeTruthy();
+  });
+
+  it("paging through every match never mounts more than one page", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    const s = sheet();
+    fireEvent.change(searchInput(s), { target: { value: "-" } });
+    const all = searchFaIcons("-").map((icon) => `fa:${icon.name}`);
+    expect(all.length).toBeGreaterThan(900);
+
+    const seen: string[] = [];
+    for (;;) {
+      expect(results(s).children.length).toBeGreaterThan(0);
+      expect(results(s).children.length).toBeLessThanOrEqual(40);
+      seen.push(...resultKeys(s));
+      const more = within(s).queryByRole("button", { name: "Show more" });
+      if (!more) break;
+      fireEvent.click(more);
+    }
+    // Every match stays reachable, one page at a time, in order.
+    expect(seen).toEqual(all);
+    const lastStart = Math.floor((all.length - 1) / 40) * 40 + 1;
+    expect(within(s).getByText(`Showing ${lastStart}–${all.length} of ${all.length}`)).toBeTruthy();
+  });
+
+  it("selecting a search result POSTs fa:<name> and renders on its row", async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    const s = sheet();
+    fillNewTask(s);
+    fireEvent.change(searchInput(s), { target: { value: "hot" } });
+    expect(within(s).getByRole("alert").textContent).toMatch(/Select a Font Awesome icon from the results/);
+    const hotdog = within(results(s)).getByRole("radio", { name: "Hotdog" });
+    fireEvent.click(hotdog);
+    expect(hotdog.getAttribute("aria-checked")).toBe("true");
+    expect(within(s).queryByRole("alert")).toBeNull();
+    expect(searchInput(s).value).toBe("hot");
+
+    await save(s);
+    expect((api.writes()[0].body as { icon: string }).icon).toBe("fa:hotdog");
+    await waitFor(() => expect(rowFaIcon(screen.getByTestId("definition-99"))).toBe("hotdog"));
+  });
+
+  it("a typed non-curated Free Solid name is accepted and PATCHed", async () => {
+    expect(CURATED.has("dragon")).toBe(false);
+    await renderReady([{ ...BRUSH, id: 70, icon: "lucide:dog" }]);
+    fireEvent.click(screen.getByTestId("definition-70"));
+    const s = sheet();
+    fireEvent.change(searchInput(s), { target: { value: "Dragon" } });
+    expect(within(s).queryByRole("alert")).toBeNull();
+    expect(within(results(s)).getByRole("radio", { name: "Dragon" }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    const lucide = within(s).getByRole("radiogroup", { name: "Icon" });
+    expect(within(lucide).queryAllByRole("radio", { checked: true })).toHaveLength(0);
+
+    await save(s);
+    expect((api.writes()[0].body as { icon: string }).icon).toBe("fa:dragon");
+    await waitFor(() => expect(rowFaIcon(screen.getByTestId("definition-70"))).toBe("dragon"));
+  });
+
+  for (const [typed, message] of [
+    ["do", /Select a Font Awesome icon from the results/],
+    ["dgo", /“dgo” is not a Font Awesome Free Solid icon/],
+    ["dog-leashed", /“dog-leashed” is not a Font Awesome Free Solid icon/],
+    ["github", /“github” is not a Font Awesome Free Solid icon/],
+  ] as const) {
+    it(`typed ${JSON.stringify(typed)} is rejected with a message and nothing is saved`, async () => {
+      await renderReady([{ ...BRUSH, id: 71, icon: "lucide:dog" }]);
+      fireEvent.click(screen.getByTestId("definition-71"));
+      const s = sheet();
+      fireEvent.change(searchInput(s), { target: { value: typed } });
+      expect(within(s).getByRole("alert").textContent).toMatch(message);
+      expect(within(s).getByRole("radio", { name: "No icon" }).getAttribute("aria-checked")).toBe("false");
+
+      await save(s);
+      expect(api.writes()).toHaveLength(0);
+      expect(within(s).getByTestId("sheet-error").textContent).toMatch(message);
+      expect(screen.getByRole("dialog")).toBe(s);
+    });
+  }
+
+  it("clearing the search, or No icon, removes the icon", async () => {
+    await renderReady([
+      { ...BRUSH, id: 72, icon: "fa:dragon" },
+      { ...BRUSH, id: 73, title: "Task 73", icon: "fa:dragon" },
+    ]);
+    fireEvent.click(screen.getByTestId("definition-72"));
+    let s = sheet();
+    fireEvent.change(searchInput(s), { target: { value: "" } });
+    expect(within(s).getByRole("radio", { name: "No icon" }).getAttribute("aria-checked")).toBe("true");
+    await save(s);
+    expect((api.writes()[0].body as { icon: string | null }).icon).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    fireEvent.click(screen.getByTestId("definition-73"));
+    s = sheet();
+    fireEvent.click(within(s).getByRole("radio", { name: "No icon" }));
+    expect(searchInput(s).value).toBe("");
+    await save(s);
+    expect((api.writes()[1].body as { icon: string | null }).icon).toBeNull();
+  });
+
+  it("a saved non-curated fa:<name> renders on its row and opens selected in the results", async () => {
+    await renderReady([{ ...BRUSH, id: 74, icon: "fa:dragon" }]);
+    expect(rowFaIcon(screen.getByTestId("definition-74"))).toBe("dragon");
+    fireEvent.click(screen.getByTestId("definition-74"));
+    const s = sheet();
+    expect(searchInput(s).value).toBe("dragon");
+    expect(within(s).queryByRole("alert")).toBeNull();
+    expect(within(results(s)).getByRole("radio", { name: "Dragon" }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
+
+    fireEvent.change(within(s).getByRole("textbox", { name: "Title" }), {
+      target: { value: "Feed the dragon" },
+    });
+    await save(s);
+    expect(api.writes()[0].body).not.toHaveProperty("icon");
+  });
+
+  it("a saved curated fa:<name> opens in the quick picks with an empty search", async () => {
+    await renderReady([{ ...BRUSH, id: 75, icon: "fa:dog" }]);
+    fireEvent.click(screen.getByTestId("definition-75"));
+    const s = sheet();
+    expect(searchInput(s).value).toBe("");
+    const quick = within(s).getByRole("radiogroup", { name: "Font Awesome" });
+    expect(within(quick).getByRole("radio", { name: "Dog" }).getAttribute("aria-checked")).toBe("true");
   });
 });
 

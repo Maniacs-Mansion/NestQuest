@@ -1,8 +1,8 @@
 # Third-party notices
 
-NestQuest bundles glyph data from the icon sets below. The curated names are listed in
-`tools/icons/curated-icons.json`; `tools/icons/generate.mjs` reads each glyph's SVG path
-data from the locally installed packages and generates it into both bundles
+NestQuest bundles glyph data from the icon sets below. The curated Lucide names and the
+Font Awesome quick-pick names are listed in `tools/icons/curated-icons.json`;
+`tools/icons/generate.mjs` reads each glyph's SVG path data from the locally installed packages and generates it into both bundles
 (`admin/src/icons/registry.generated.ts` and `frontend/src/icons/registry.generated.ts`).
 Nothing is loaded from a CDN or fetched at runtime. The package versions used are recorded
 in the header of each generated file.
@@ -15,8 +15,8 @@ in the header of each generated file.
   - Icons: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
   - Fonts: [SIL OFL 1.1](https://openfontlicense.org)
   - Code: [MIT](https://opensource.org/licenses/MIT)
-- Use in NestQuest: a curated subset of the Free **solid** icon set, embedded as SVG path
-  data. No fonts are bundled.
+- Use in NestQuest: the full Free **solid** icon set, embedded as SVG path data (a curated
+  subset doubles as the admin picker's quick picks). No fonts are bundled.
 
 Font Awesome Free by @fontawesome — https://fontawesome.com — icons licensed under CC BY 4.0.
 
