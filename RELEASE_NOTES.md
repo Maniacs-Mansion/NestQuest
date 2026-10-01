@@ -1,5 +1,57 @@
 # NestQuest Release Notes
 
+## Version 0.10.0 — 2026-09-30
+
+### Scope
+
+Feature release: choose task icons by typing any Font Awesome Free **solid**
+icon name, not just the curated subset. The shared icon registry now embeds the
+full Font Awesome Free solid set offline (no CDN — the panel may be offline),
+the admin icon picker is searchable with free-text entry and validation, and the
+kids' panel renders any Free Solid icon. (Feature `6c681b17`; PRs #289–#292.)
+
+### Behaviour
+
+- **Full Free Solid set**: the panel and admin bundles now carry ~1,422 Font
+  Awesome Free solid glyphs as inline SVG path data, in addition to the existing
+  curated quick-pick lists (Lucide and Font Awesome). `fa:<name>` resolves any
+  Free Solid icon; unknown names still render the fallback glyph.
+- **Searchable picker**: the admin definition icon picker's Font Awesome tab has
+  a search input. Empty shows the curated quick picks; typing filters the full
+  set into a bounded (≤40 per page) result grid, with Previous / Show more.
+- **Free-text entry**: typing an exact Free Solid name selects and stores
+  `fa:<name>`. A partial, misspelled, Pro, or Brands name is rejected with an
+  inline message and nothing is saved.
+- Stored format is unchanged: `lucide:<name>`, `fa:<name>`, `emoji:<grapheme>`,
+  or a legacy bare name.
+
+### Requirements
+
+- Home Assistant floor 2024.6.0 (unchanged).
+
+### Breaking changes
+
+- None to the database: schema unchanged at version 9, no migration and no
+  database backup required.
+- Font Awesome **Pro** and **Brands/Regular** icons are NOT included — only the
+  Free Solid set. A Pro/Brands name is rejected in the picker (and an unknown
+  `fa:` name falls back on the panel).
+
+### Known limitations
+
+- **Bundle size**: the embedded icon set increases the committed panel bundle to
+  ~1.06 MB raw (~276 kB gzip) and the admin PWA bundle similarly. This is
+  expected for the full Free Solid set.
+- Alias names (e.g. Font Awesome's `fa:home` alias of `fa:house`) are
+  de-duplicated to the canonical name, so `fa:house` resolves but `fa:home`
+  falls back.
+- The backend still validates only the `fa:<kebab-name>` format; unknown names
+  are caught in the picker and render as the fallback on the panel.
+
+### Rollback
+
+- No schema change: rolling back to 0.9.8 requires no database restore.
+
 ## Version 0.9.8 — 2026-09-30
 
 ### Scope
