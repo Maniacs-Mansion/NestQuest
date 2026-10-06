@@ -1,5 +1,33 @@
 # NestQuest Release Notes
 
+## Version 0.10.4 — 2026-10-06
+
+### Scope
+
+Patch release carrying the integration brand icons onto `main` (PR #304, task
+ac84fa96).
+
+### Behaviour
+
+- `custom_components/nestquest/brand/` now ships the transparent NestQuest logo
+  (`icon.png`/`icon@2x.png`/`logo.png`/`logo@2x.png`), so Home Assistant 2026.3+
+  shows it on the integrations page and tile after a HACS update.
+- `README.md` embeds the logo at the top (shown on the HACS repository page).
+
+### Requirements
+
+- Home Assistant floor 2024.6.0 (unchanged). The brand-image UI itself requires
+  Home Assistant 2026.3+; older versions show the generic icon.
+
+### Breaking changes
+
+- None. Schema unchanged at version 9; no migration, no database backup
+  required.
+
+### Rollback
+
+- No schema change: rolling back to 0.10.3 requires no database restore.
+
 ## Version 0.10.3 — 2026-10-06
 
 ### Scope
