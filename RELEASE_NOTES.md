@@ -30,8 +30,11 @@ Patch release carrying the panel SSE stream fix onto `main` (PR #295, task
 - Intermittent `GET /api/v1/panel/events failed with HTTP 502` during API
   restarts/redeploys is expected (the integration reconnects with backoff).
 - The event stream still reconnects periodically because Home Assistant's
-  shared aiohttp session applies a default total timeout — tracked as a
-  follow-up; it does not affect correctness.
+  shared aiohttp session applies a default total timeout. During a
+  disconnect/reconnect window, transitions published by the API are NOT
+  re-fired on Home Assistant's event bus (the API has no replay), so an
+  automation could miss a transition in that window; this is tracked as a
+  follow-up (disable aiohttp's total timeout on the stream).
 
 ### Rollback
 
