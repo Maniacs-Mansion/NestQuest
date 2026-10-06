@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="design/logos/NestQuest-NoBG.png" alt="NestQuest logo" width="200">
+</p>
+
 # NestQuest - House Chaos Coordination
 
 Home Assistant custom integration for managing chores, custody schedules, and house coordination.
