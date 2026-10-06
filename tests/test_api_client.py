@@ -473,3 +473,87 @@ async def test_client_logs_nothing() -> None:
     finally:
         logging.getLogger().removeHandler(handler)
     assert records == []
+
+# ---------------------------------------------------------------------------
+# stream_events: the body is read from ``response.content``
+# ---------------------------------------------------------------------------
+
+
+class _StubStreamContent:
+    """A fake aiohttp ``StreamReader``: async-iterable over byte chunks."""
+
+    def __init__(self, chunks) -> None:
+        self._chunks = list(chunks)
+
+    def __aiter__(self):
+        return self._iterate()
+
+    async def _iterate(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class StubStreamResponse:
+    """A fake aiohttp/HA ``ClientResponse`` for a streaming body.
+
+    Like the real ``HassClientResponse`` it does NOT implement
+    ``__aiter__`` — the body is iterated through ``.content`` — so a
+    client that iterates the response object itself raises the
+    ``'async for' requires an object with __aiter__ method`` TypeError.
+    """
+
+    def __init__(self, status: int, chunks) -> None:
+        self.status = status
+        self.content = _StubStreamContent(chunks)
+
+
+async def test_stream_events_reads_frames_from_response_content() -> None:
+    """Frames are parsed from ``response.content`` byte chunks, including
+    a frame split across chunk boundaries; a trailing incomplete frame
+    is discarded."""
+    assert not hasattr(StubStreamResponse, "__aiter__")
+    chunks = [
+        b'event: nestquest_quest_completed\ndata: {"instance_id"',
+        b': 7}\n',
+        b'\nevent: nestquest_child_day_complete\n',
+        b'data: {"child_id": 1}\n\n',
+        b'event: nestquest_quest_missed\ndata: {"instance_id": 9}\n',
+    ]
+    transport = StubTransport(StubStreamResponse(200, chunks))
+    client = make_client(transport)
+
+    frames = [frame async for frame in client.stream_events()]
+
+    assert frames == [
+        ("nestquest_quest_completed", {"instance_id": 7}),
+        ("nestquest_child_day_complete", {"child_id": 1}),
+    ]
+    assert transport.calls[0]["method"] == "GET"
+    assert transport.calls[0]["url"] == f"{BASE_URL}/api/v1/panel/events"
+
+
+async def test_stream_events_non_2xx_raises_typed_with_status() -> None:
+    transport = StubTransport(StubStreamResponse(502, []))
+    client = make_client(transport)
+
+    with pytest.raises(NestQuestApiError) as excinfo:
+        async for _ in client.stream_events():
+            pass
+
+    assert excinfo.value.status == 502
+    assert not excinfo.value.is_transport_error
+
+
+async def test_stream_events_invalid_json_frame_raises_typed() -> None:
+    transport = StubTransport(
+        StubStreamResponse(200, [b"event: nestquest_quest_completed\n", b"data: {nope\n\n"])
+    )
+    client = make_client(transport)
+
+    with pytest.raises(NestQuestApiError) as excinfo:
+        async for _ in client.stream_events():
+            pass
+
+    assert excinfo.value.status == 200
+    assert not excinfo.value.is_transport_error
+    assert isinstance(excinfo.value.__cause__, ValueError)

@@ -315,7 +315,10 @@ class NestQuestApiClient:
             event_type: str | None = None
             data_lines: list[str] = []
             buffer = ""
-            async for chunk in response:
+            # The body is ``response.content`` (aiohttp's StreamReader,
+            # yielding bytes); the response object itself — HA's
+            # ``HassClientResponse`` included — is NOT async-iterable.
+            async for chunk in response.content:
                 if isinstance(chunk, (bytes, bytearray)):
                     chunk = chunk.decode("utf-8")
                 buffer += chunk
