@@ -16,9 +16,11 @@ network and NO aiohttp installed; production builds the client through
 :func:`client_from_entry`, which hands in Home Assistant's shared
 aiohttp session (``homeassistant.helpers.aiohttp_client
 .async_get_clientsession``).  The module itself imports NEITHER
-homeassistant NOR aiohttp at runtime (aiohttp appears only behind
-``TYPE_CHECKING`` for annotations), so the client is usable anywhere —
-the HA coupling lives in the one production factory.
+homeassistant NOR aiohttp at module import (aiohttp appears only
+behind ``TYPE_CHECKING`` for annotations, plus one lazy import inside
+:meth:`NestQuestApiClient.stream_events` for its ``ClientTimeout``), so
+the client is importable anywhere — the HA coupling lives in the one
+production factory.
 
 Every failure is typed: a transport failure (connection refused, DNS
 failure, timeout — the exchange never produced a response) and every
@@ -38,7 +40,11 @@ frame (``event: <type>`` / ``data: <json>`` lines separated by a blank
 line).  Opening the stream gets the same one-timeout, typed-error
 contract as every other call; reading it has NO body-wide timeout (a
 healthy stream is long-lived — the subscription manager owns
-reconnection and backoff).
+reconnection and backoff).  That includes the session's own default:
+Home Assistant's shared session carries ``ClientTimeout(total=300)``,
+which would cut a healthy stream every five minutes, so the stream
+request overrides it with ``total=None`` (keeping a finite
+``sock_connect``).
 """
 from __future__ import annotations
 
@@ -278,8 +284,19 @@ class NestQuestApiClient:
         (``aclose``, i.e. the consumer's task being cancelled) stops
         cleanly and closes the underlying response in every path.
         """
+        # Lazy: aiohttp ships with Home Assistant, but importing it at
+        # module level would make the client unimportable without it.
+        import aiohttp
+
         url = f"{self._base_url}{EVENTS_PATH}"
         headers = self._headers()
+        # The session's default total timeout (HA's shared session:
+        # 300 s) would cut a healthy stream mid-body, and events fired
+        # while reconnecting are not replayed — so the stream request
+        # is unbounded in total time; only connecting stays bounded.
+        stream_timeout = aiohttp.ClientTimeout(
+            total=None, sock_connect=self._timeout_seconds
+        )
         # Opening the response gets ONE request timeout, exactly like
         # ``_request_json``; the read loop below runs WITHOUT one — a
         # body-wide timeout would kill a healthy long-lived stream.
@@ -289,7 +306,7 @@ class NestQuestApiClient:
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 stream_cm = self._session.request(
-                    "GET", url, headers=headers, json=None
+                    "GET", url, headers=headers, json=None, timeout=stream_timeout
                 )
                 response = await stream_cm.__aenter__()
         except asyncio.CancelledError:
