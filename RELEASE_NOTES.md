@@ -1,5 +1,33 @@
 # NestQuest Release Notes
 
+## Version 0.10.2 — 2026-10-06
+
+### Scope
+
+Patch release carrying the panel SSE idle-timeout fix onto `main` (PR #298, task
+6c4b0fa4).
+
+### Behaviour
+
+- The panel event-stream request is no longer subject to aiohttp's default
+  ~300 s total timeout; it now uses an unbounded total with a bounded connect,
+  so a healthy stream stays open instead of reconnecting every ~5 minutes.
+  Because the API does not replay transitions onto the Home Assistant event bus,
+  this also shrinks the windows in which a transition could be missed.
+
+### Requirements
+
+- Home Assistant floor 2024.6.0 (unchanged).
+
+### Breaking changes
+
+- None. Schema unchanged at version 9; no migration, no database backup
+  required.
+
+### Rollback
+
+- No schema change: rolling back to 0.10.1 requires no database restore.
+
 ## Version 0.10.1 — 2026-10-06
 
 ### Scope

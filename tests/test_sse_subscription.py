@@ -44,6 +44,10 @@ from custom_components.nestquest.api_client import (
 )
 from custom_components.nestquest.sse import NestQuestEventStream
 
+# ``stream_events`` imports aiohttp lazily; the harness has none, so
+# every test here runs with the stand-in module installed.
+pytestmark = pytest.mark.usefixtures("fake_aiohttp")
+
 BASE_URL = "http://api.test:8000"
 TOKEN = "test-panel-token"
 
