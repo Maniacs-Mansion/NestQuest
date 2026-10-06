@@ -17,7 +17,7 @@ import types
 
 import pytest
 
-from conftest import make_config_entry
+from conftest import FakeClientTimeout, make_config_entry
 
 from custom_components.nestquest import api_client
 from custom_components.nestquest.api_client import (
@@ -32,6 +32,10 @@ from custom_components.nestquest.const import (
     DEFAULT_API_BASE_URL,
     DEFAULT_PANEL_TOKEN,
 )
+
+# ``stream_events`` imports aiohttp lazily; the harness has none, so
+# every test here runs with the stand-in module installed.
+pytestmark = pytest.mark.usefixtures("fake_aiohttp")
 
 BASE_URL = "http://api.test:8000"
 TOKEN = "test-panel-token"
@@ -124,6 +128,7 @@ class StubTransport:
                 "url": url,
                 "headers": kwargs.get("headers"),
                 "json": kwargs.get("json"),
+                "timeout": kwargs.get("timeout"),
             }
         )
         if not self._outcomes:
@@ -557,3 +562,24 @@ async def test_stream_events_invalid_json_frame_raises_typed() -> None:
     assert excinfo.value.status == 200
     assert not excinfo.value.is_transport_error
     assert isinstance(excinfo.value.__cause__, ValueError)
+
+
+async def test_stream_events_disables_the_session_total_timeout() -> None:
+    """The stream request overrides the session's default total timeout
+    (HA's shared session: 300 s, which would cut a healthy stream) with
+    ``total=None`` while keeping a finite connect timeout; the plain
+    request calls pass no per-request timeout."""
+    transport = StubTransport(
+        StubStreamResponse(200, []), StubResponse(200, json.dumps(SNAPSHOT_PAYLOAD))
+    )
+    client = make_client(transport, timeout_seconds=7.0)
+
+    frames = [frame async for frame in client.stream_events()]
+    await client.get_snapshot()
+
+    assert frames == []
+    stream_timeout = transport.calls[0]["timeout"]
+    assert isinstance(stream_timeout, FakeClientTimeout)
+    assert stream_timeout.total is None
+    assert stream_timeout.sock_connect == 7.0
+    assert transport.calls[1]["timeout"] is None

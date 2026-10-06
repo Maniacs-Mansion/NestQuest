@@ -879,6 +879,29 @@ def set_coordinator_client(entry, client):
     return client
 
 
+@dataclass(frozen=True)
+class FakeClientTimeout:
+    """Stand-in for ``aiohttp.ClientTimeout`` (the fields the client sets)."""
+
+    total: float | None = None
+    sock_connect: float | None = None
+
+
+@pytest.fixture
+def fake_aiohttp(monkeypatch):
+    """Install a stand-in ``aiohttp`` module for one test.
+
+    aiohttp ships only with Home Assistant, so this mock-only harness
+    does not have it; the API client imports it lazily inside
+    ``stream_events`` (for ``ClientTimeout``).  Tests driving the real
+    stream path request this fixture; the module is removed again when
+    the test ends.
+    """
+    module = SimpleNamespace(ClientTimeout=FakeClientTimeout)
+    monkeypatch.setitem(sys.modules, "aiohttp", module)
+    return module
+
+
 @pytest.fixture(autouse=True)
 def coordinator_client_from_test_override():
     """Resolve every entry's coordinator client through the test seam.
