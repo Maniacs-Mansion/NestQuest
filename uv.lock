@@ -373,7 +373,7 @@ wheels = [
 
 [[package]]
 name = "nestquest"
-version = "0.10.1"
+version = "0.10.2"
 source = { virtual = "." }
 
 [package.dev-dependencies]
