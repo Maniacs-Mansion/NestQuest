@@ -165,19 +165,29 @@ MINIMAL_SNAPSHOT = {
 
 
 class _StreamingResponse:
-    """A fake aiohttp streaming response: ``status`` + chunk iteration.
+    """A fake aiohttp streaming response: ``status`` + ``.content``.
 
-    ``chunks`` are the body pieces the stream yields in order; a chunk
-    may be an exception, raised when the iteration reaches it (a
-    mid-stream transport drop).  ``hold_open`` keeps the stream open
-    forever after the chunks run out, for cancellation tests.
+    Like aiohttp's ``ClientResponse`` (and HA's ``HassClientResponse``)
+    the response itself is NOT async-iterable; the body is iterated
+    through ``.content``.  ``chunks`` are the body pieces the stream
+    yields in order; a chunk may be an exception, raised when the
+    iteration reaches it (a mid-stream transport drop).  ``hold_open``
+    keeps the stream open forever after the chunks run out, for
+    cancellation tests.
     """
 
     def __init__(self, status: int, chunks, *, hold_open: bool = False) -> None:
         self.status = status
+        self.content = _StreamingContent(chunks, hold_open)
+        self.closed = False
+
+
+class _StreamingContent:
+    """The fake response body: an async-iterable chunk stream."""
+
+    def __init__(self, chunks, hold_open: bool) -> None:
         self._chunks = list(chunks)
         self._hold_open = hold_open
-        self.closed = False
 
     def __aiter__(self):
         return self._iterate()
