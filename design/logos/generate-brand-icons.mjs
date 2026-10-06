@@ -1,10 +1,12 @@
-// Generates the Home Assistant brands files under
-// custom_integrations/nestquest/ from the transparent logo
-// (design/logos/NestQuest-NoBG.png), box-filter downscaled with alpha kept.
-// Adapted from admin/scripts/generate-icons.mjs for RGBA input/output.
+// Generates the integration's local brand images in
+// custom_components/nestquest/brand/ (read by Home Assistant 2026.3+) from the
+// transparent logo (design/logos/NestQuest-NoBG.png), box-filter downscaled
+// with alpha kept. Adapted from admin/scripts/generate-icons.mjs for RGBA.
 // Pure Node (zlib only) — no network, no image dependencies.
-// Run (from the repository root): node design/logos/brands/generate-brand-icons.mjs
-import { readFileSync, writeFileSync } from "node:fs";
+// Run (from the repository root):
+//   node design/logos/generate-brand-icons.mjs          # write the PNGs
+//   node design/logos/generate-brand-icons.mjs --check  # exit 1 if any drifted
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { deflateSync, inflateSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
@@ -149,16 +151,37 @@ function resize({ width, height, px }, size) {
   return out;
 }
 
-const logo = decodePng(readFileSync(new URL("../NestQuest-NoBG.png", import.meta.url)));
-const outDir = new URL("custom_integrations/nestquest/", import.meta.url);
+const logo = decodePng(readFileSync(new URL("NestQuest-NoBG.png", import.meta.url)));
+const outDir = new URL("../../custom_components/nestquest/brand/", import.meta.url);
 const files = [
   ["icon.png", 256],
   ["icon@2x.png", 512],
   ["logo.png", 256],
   ["logo@2x.png", 512],
 ];
+const check = process.argv.includes("--check");
+let drifted = false;
+if (!check) mkdirSync(outDir, { recursive: true });
 for (const [name, size] of files) {
   const path = fileURLToPath(new URL(name, outDir));
-  writeFileSync(path, encodePng(size, resize(logo, size)));
-  console.log(`wrote ${path}`);
+  const png = encodePng(size, resize(logo, size));
+  if (check) {
+    let current = null;
+    try {
+      current = readFileSync(path);
+    } catch {
+      // missing counts as drift
+    }
+    if (!current || !current.equals(png)) {
+      drifted = true;
+      console.error(`drift: ${path} differs from a fresh generation`);
+    }
+  } else {
+    writeFileSync(path, png);
+    console.log(`wrote ${path}`);
+  }
+}
+if (drifted) {
+  console.error("run `node design/logos/generate-brand-icons.mjs` and commit the result");
+  process.exit(1);
 }
