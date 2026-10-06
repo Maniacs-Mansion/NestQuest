@@ -1,5 +1,31 @@
 # NestQuest Release Notes
 
+## Version 0.10.3 — 2026-10-06
+
+### Scope
+
+Patch release carrying the admin PWA desktop-icon update onto `main` (PR #301,
+task 55e1e687).
+
+### Behaviour
+
+- The admin PWA's installable icons (192, 512, and 512 maskable) are now
+  generated from `design/logos/NestQuest_Logo.png` instead of placeholder
+  graphics, so a home-screen install of the admin app shows the NestQuest logo.
+
+### Requirements
+
+- Home Assistant floor 2024.6.0 (unchanged).
+
+### Breaking changes
+
+- None. Schema unchanged at version 9; no migration, no database backup
+  required.
+
+### Rollback
+
+- No schema change: rolling back to 0.10.2 requires no database restore.
+
 ## Version 0.10.2 — 2026-10-06
 
 ### Scope
