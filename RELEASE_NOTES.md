@@ -1,5 +1,42 @@
 # NestQuest Release Notes
 
+## Version 0.10.1 — 2026-10-06
+
+### Scope
+
+Patch release carrying the panel SSE stream fix onto `main` (PR #295, task
+4cbf2e96).
+
+### Behaviour
+
+- The Home Assistant integration now reads the panel event stream from the
+  response body (`response.content`), fixing the logged failure
+  `'async for' requires an object with __aiter__ method, got HassClientResponse`
+  that logged ~935 times and prevented live panel events (completions,
+  un-completions, day-complete, missed) from re-firing from the API's SSE
+  stream. SSE line-buffering and JSON-frame parsing are unchanged.
+
+### Requirements
+
+- Home Assistant floor 2024.6.0 (unchanged).
+
+### Breaking changes
+
+- None. Schema unchanged at version 9; no migration, no database backup
+  required.
+
+### Known limitations
+
+- Intermittent `GET /api/v1/panel/events failed with HTTP 502` during API
+  restarts/redeploys is expected (the integration reconnects with backoff).
+- The event stream still reconnects periodically because Home Assistant's
+  shared aiohttp session applies a default total timeout — tracked as a
+  follow-up; it does not affect correctness.
+
+### Rollback
+
+- No schema change: rolling back to 0.10.0 requires no database restore.
+
 ## Version 0.10.0 — 2026-09-30
 
 ### Scope
